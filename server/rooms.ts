@@ -1,13 +1,13 @@
 import type { WebSocket } from 'ws';
 import {
   applyCommand, botDecision, canAutoStart, claimHostIfVacant, cleanAvatar, cleanName,
-  createHumanPlayer, createInitialRoom, currentPlayer, GameError, migrateRoom, resetToLobby,
-  sanitizeRoom, startRound,
+  createHumanPlayer, createInitialRoom, currentPlayer, DEFAULT_SETTINGS, GameError, migrateRoom,
+  randomId, resetToLobby, sanitizeRoom, startRound,
   timeoutCurrentPlayer, transferHost, COMMAND_TYPES,
   type GameCommand, type RoomState,
 } from '../shared/game.ts';
-import type { GameEvent, ServerMsg } from '../shared/protocol.ts';
-import { Store } from './store.ts';
+import type { AccountInfo, GameEvent, ServerMsg } from '../shared/protocol.ts';
+import { Store, type Account } from './store.ts';
 
 const ROOM_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 快照保留 3 天
 const IDLE_DROP_MS = 30 * 60 * 1000; // 无人连接 30 分钟后从内存卸载
@@ -90,6 +90,55 @@ export class Hub {
     setInterval(() => this.sweep(), 60_000).unref();
   }
 
+  /* --------------------------------------------------------------- 账户 */
+
+  /**
+   * 认领或新建账户。带着有效凭证来就沿用同一个账户 ——
+   * 换个房间、隔天再来都还是同一个自己，积分接着上次，而不是每次都是新人。
+   */
+  private async resolveAccount(id?: string, token?: string, name?: string, avatar?: string) {
+    if (id && token) {
+      const acc = this.store.getAccount(id);
+      if (acc && (await hashToken(token)) === acc.tokenHash) {
+        if (name) acc.name = name;
+        if (avatar) acc.avatar = avatar;
+        return { account: acc, token };
+      }
+    }
+    const fresh = newToken();
+    const account: Account = {
+      id: randomId('acc'),
+      tokenHash: await hashToken(fresh),
+      name: name ?? '牌友',
+      avatar: avatar ?? '🐯',
+      chips: DEFAULT_SETTINGS.startingChips,
+      granted: DEFAULT_SETTINGS.startingChips,
+      hands: 0,
+      wins: 0,
+    };
+    this.store.createAccount(account);
+    return { account, token: fresh };
+  }
+
+  private accountInfo(a: Account, token: string): AccountInfo {
+    return { id: a.id, token, chips: a.chips, granted: a.granted, hands: a.hands, wins: a.wins };
+  }
+
+  /** 把牌桌上的积分和战绩写回账户。跟着房间快照一起防抖落盘。 */
+  private syncAccounts(room: Room) {
+    for (const p of room.state.players) {
+      if (!p.accountId || p.isBot) continue;
+      const acc = this.store.getAccount(p.accountId);
+      if (!acc) continue;
+      acc.chips = p.chips;
+      acc.granted = p.granted;
+      acc.name = p.name;
+      acc.avatar = p.avatar;
+      acc.wins = p.wins;
+      this.store.saveAccount(acc);
+    }
+  }
+
   /* ------------------------------------------------------------- 生命周期 */
 
   private sweep() {
@@ -117,6 +166,7 @@ export class Hub {
       room.saveTimer = null;
       try {
         this.store.save(room.state);
+        this.syncAccounts(room);
       } catch (e) {
         console.error('[hub] 快照写入失败', e);
       }
@@ -283,8 +333,9 @@ export class Hub {
     return room;
   }
 
-  async create(conn: Conn, name: string, avatar: string, agent = false) {
+  async create(conn: Conn, name: string, avatar: string, agent = false, accountId?: string, accountToken?: string) {
     if (this.rooms.size >= MAX_ROOMS) throw new GameError('服务器房间已满，请稍后再试', 503);
+    const { account, token: accTok } = await this.resolveAccount(accountId, accountToken, name, avatar);
     const token = newToken();
     const hash = await hashToken(token);
     let code = '';
@@ -294,28 +345,45 @@ export class Hub {
     }
     if (!code) throw new GameError('创建房间失败，请重试', 503);
 
-    const host = createHumanPlayer(name, avatar, 0, hash, agent);
+    const host = createHumanPlayer(account.name, account.avatar, 0, hash, agent);
+    host.accountId = account.id;
+    host.chips = account.chips;
+    host.granted = account.granted;
+    host.wins = account.wins;
     const state = createInitialRoom(code, host);
     const room: Room = { state, conns: new Set(), timer: null, hostTimer: null, saveTimer: null, touchedAt: Date.now() };
     this.rooms.set(code, room);
     this.attach(conn, room, host.id);
-    this.send(conn, { t: 'welcome', code, playerId: host.id, token, room: sanitizeRoom(state, host.id) });
+    this.send(conn, {
+      t: 'welcome', code, playerId: host.id, token,
+      room: sanitizeRoom(state, host.id),
+      account: this.accountInfo(account, accTok),
+    });
     this.broadcast(room);
   }
 
-  async join(conn: Conn, code: string, name: string, avatar: string, agent = false) {
+  async join(conn: Conn, code: string, name: string, avatar: string, agent = false, accountId?: string, accountToken?: string) {
     const room = this.room(code);
     const s = room.state;
     if (s.players.length >= s.settings.maxPlayers) throw new GameError('房间已满');
+    const { account, token: accTok } = await this.resolveAccount(accountId, accountToken, name, avatar);
+    // 同一个账户不该在一张桌子上占两个座位
+    if (s.players.some((p) => p.accountId === account.id)) {
+      throw new GameError('你已经在这个房间里了，直接用原来的窗口继续', 409);
+    }
     const token = newToken();
     const hash = await hashToken(token);
     const used = new Set(s.players.map((p) => p.seat));
     let seat = 0;
     while (used.has(seat)) seat++;
 
-    let finalName = cleanName(name);
+    let finalName = cleanName(account.name);
     if (s.players.some((p) => p.name === finalName)) finalName = `${finalName}·${seat + 1}`;
-    const player = createHumanPlayer(finalName, cleanAvatar(avatar), seat, hash, agent);
+    const player = createHumanPlayer(finalName, cleanAvatar(account.avatar), seat, hash, agent);
+    player.accountId = account.id;
+    player.chips = account.chips;
+    player.granted = account.granted;
+    player.wins = account.wins;
     s.players.push(player);
     claimHostIfVacant(s, player.id);
     const suffix = s.phase === 'playing' ? '，等待下一局' : '';
@@ -324,7 +392,11 @@ export class Hub {
     s.log.push({ seq: s.actionSeq, at: Date.now(), text: `${player.name} 加入房间${suffix}` });
 
     this.attach(conn, room, player.id);
-    this.send(conn, { t: 'welcome', code, playerId: player.id, token, room: sanitizeRoom(s, player.id) });
+    this.send(conn, {
+      t: 'welcome', code, playerId: player.id, token,
+      room: sanitizeRoom(s, player.id),
+      account: this.accountInfo(account, accTok),
+    });
     this.broadcast(room);
     this.arm(room);
   }

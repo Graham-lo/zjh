@@ -32,6 +32,9 @@
   --avatar-box: 56px;
   --shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* 入场带一点过冲，像有质量的东西落到桌上，而不是匀速滑到位 */
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --swing: cubic-bezier(0.45, 0.05, 0.25, 1.15);
 }
 
 * { box-sizing: border-box; }
@@ -68,10 +71,10 @@ button { touch-action: manipulation; }
   color: var(--text);
   padding: 11px 16px;
   font-weight: 600;
-  transition: transform 0.14s var(--ease), border-color 0.14s, background 0.14s, box-shadow 0.14s;
+  transition: transform 0.2s var(--spring), border-color 0.14s, background 0.14s, box-shadow 0.14s;
 }
 .btn:hover:not(:disabled) { transform: translateY(-1px); border-color: rgba(217, 185, 120, 0.5); }
-.btn:active:not(:disabled) { transform: translateY(0) scale(0.985); }
+.btn:active:not(:disabled) { transform: translateY(1px) scale(0.955); transition-duration: 0.07s; }
 .btn:disabled { opacity: 0.36; cursor: not-allowed; }
 .btn.primary {
   background: linear-gradient(180deg, var(--gold-2), #c39a52);
@@ -299,7 +302,11 @@ button { touch-action: manipulation; }
   box-shadow: 0 18px 36px -14px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 .pot span { font-size: 10.5px; letter-spacing: 0.2em; color: var(--muted); text-transform: uppercase; }
-.pot strong { font-size: 30px; color: var(--gold-2); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.pot strong {
+  font-size: 30px; color: var(--gold-2); font-variant-numeric: tabular-nums; line-height: 1.1;
+  transition: transform 0.34s var(--spring);
+}
+.pot.bumped strong { transform: scale(1.18); }
 .pot small { font-size: 11px; color: var(--dim); }
 
 /* ------------------------------------------------------------- 座位 */
@@ -322,10 +329,29 @@ button { touch-action: manipulation; }
 .seat-hand:has(.hand-note) { min-height: 0; }
 .seat.is-turn {
   border-color: var(--gold);
-  box-shadow: 0 0 0 1px rgba(217, 185, 120, 0.4), 0 0 34px rgba(217, 185, 120, 0.28);
-  transform: translate(-50%, -50%) scale(1.045);
+  animation: seatBreath 2.6s ease-in-out infinite;
+}
+/* 轮到谁不是死死地亮着，是有呼吸的 */
+@keyframes seatBreath {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1.04);
+    box-shadow: 0 0 0 1px rgba(217, 185, 120, 0.34), 0 0 26px rgba(217, 185, 120, 0.2),
+      0 14px 28px -10px rgba(0, 0, 0, 0.75);
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.075);
+    box-shadow: 0 0 0 1px rgba(217, 185, 120, 0.55), 0 0 46px rgba(217, 185, 120, 0.38),
+      0 16px 32px -10px rgba(0, 0, 0, 0.75);
+  }
 }
 .seat.is-folded { opacity: 0.44; }
+.seat.is-winner { animation: winnerPop 1.3s var(--spring) both; z-index: 6; }
+@keyframes winnerPop {
+  0% { transform: translate(-50%, -50%) scale(1); }
+  22% { transform: translate(-50%, -50%) scale(1.14); box-shadow: 0 0 0 2px var(--gold), 0 0 70px rgba(240, 211, 155, 0.7); }
+  60% { transform: translate(-50%, -50%) scale(1.05); }
+  100% { transform: translate(-50%, -50%) scale(1); }
+}
 .seat.is-offline { opacity: 0.62; }
 .seat-empty {
   border-style: dashed; border-color: rgba(255, 255, 255, 0.14);
@@ -354,10 +380,11 @@ button { touch-action: manipulation; }
   animation: emote 1.9s var(--ease) forwards;
 }
 @keyframes emote {
-  0% { opacity: 0; transform: translate(-50%, 6px) scale(0.6); }
-  18% { opacity: 1; transform: translate(-50%, -18px) scale(1.15); }
-  70% { opacity: 1; transform: translate(-50%, -34px) scale(1); }
-  100% { opacity: 0; transform: translate(-50%, -54px) scale(0.9); }
+  0% { opacity: 0; transform: translate(-50%, 6px) scale(0.5) rotate(-14deg); }
+  18% { opacity: 1; transform: translate(-46%, -20px) scale(1.22) rotate(8deg); }
+  48% { transform: translate(-58%, -34px) scale(1.02) rotate(-6deg); }
+  74% { opacity: 1; transform: translate(-44%, -46px) scale(1) rotate(4deg); }
+  100% { opacity: 0; transform: translate(-52%, -66px) scale(0.86) rotate(0deg); }
 }
 
 .seat-body { min-width: 0; }
@@ -381,55 +408,126 @@ button { touch-action: manipulation; }
   perspective: 700px;
   /* 发牌动画必须放在外层：内层的 transform 是翻面用的，
      两个动画抢同一个属性会让牌在发牌途中露出正面。 */
-  animation: dealIn 0.52s var(--ease) backwards;
-  animation-delay: calc(var(--i, 0) * 90ms);
+  /* 每张牌时长略有差别，避免三张牌像机器一样同步 */
+  animation: dealIn calc(500ms + var(--i, 0) * 45ms) var(--swing) backwards;
+  animation-delay: calc(var(--i, 0) * 95ms);
 }
 .pc-mini { width: var(--card-w); height: var(--card-h); }
 .pc-big { width: var(--card-big-w); height: var(--card-big-h); }
 .pc-inner {
   position: relative; width: 100%; height: 100%;
   transform-style: preserve-3d;
-  transition: transform 0.55s var(--ease);
+  transition: transform 0.62s var(--swing), filter 0.4s ease;
 }
 .pc.is-down .pc-inner { transform: rotateY(180deg); }
+/* 翻面的瞬间牌会抬一下，像被手指挑起来 */
+.pc:not(.is-down) .pc-inner { animation: flipLift 0.62s var(--swing); }
+@keyframes flipLift {
+  0% { filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4)); }
+  45% { filter: drop-shadow(0 16px 22px rgba(0, 0, 0, 0.6)); }
+  100% { filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.45)); }
+}
 @keyframes dealIn {
-  from {
+  0% {
     opacity: 0;
-    transform: translate(var(--deal-x, 0), var(--deal-y, -38px)) rotate(-18deg) scale(0.62);
+    transform: translate(var(--deal-x, 0), var(--deal-y, -38px))
+      rotate(calc(-24deg + var(--i, 0) * 9deg)) scale(0.55);
   }
-  60% { opacity: 1; }
-  to { opacity: 1; transform: none; }
+  55% { opacity: 1; }
+  /* 过一点头再落回来，牌才像被甩到桌上的 */
+  78% { transform: translate(0, -4px) rotate(calc(3deg - var(--i, 0) * 2deg)) scale(1.05); }
+  100% { opacity: 1; transform: none; }
 }
 .pc-face {
-  position: absolute; inset: 0; border-radius: 6px;
+  position: absolute; inset: 0; border-radius: 7px;
   backface-visibility: hidden; -webkit-backface-visibility: hidden;
-  display: grid; place-items: center;
+  overflow: hidden;
   box-shadow: 0 4px 10px rgba(0, 0, 0, 0.55), 0 1px 2px rgba(0, 0, 0, 0.4);
 }
-.pc-big .pc-face { border-radius: 9px; }
+.pc-big .pc-face { border-radius: 10px; }
+
+/* ---- 正面：暖白纸面 + 细内框 + 斜向高光 ---- */
 .pc-front {
-  background: linear-gradient(160deg, #fffdf6, #ece5d4);
-  color: #17181a; border: 1px solid #d6ccb2;
-  font-family: Georgia, "Times New Roman", serif;
-  grid-template-rows: auto auto; align-content: center; gap: 0;
+  background:
+    radial-gradient(120% 90% at 50% 0%, #fffefa 0%, #f7f2e6 55%, #ece4d2 100%);
+  color: #1b1c1f;
+  border: 1px solid #d8cdb2;
+  font-family: Georgia, 'Times New Roman', serif;
 }
 .pc-front[data-red] { color: #c2373d; }
-.pc-front b { font-size: calc(var(--card-w) * 0.44); line-height: 1; font-weight: 700; }
-.pc-front i { font-size: calc(var(--card-w) * 0.4); font-style: normal; line-height: 1; }
-.pc-front .pc-pip { display: none; }
-.pc-big .pc-front { align-content: stretch; padding: 6px 7px; grid-template-rows: auto 1fr; }
-.pc-big .pc-front b { font-size: calc(var(--card-big-w) * 0.28); text-align: left; }
-.pc-big .pc-front i { display: none; }
-.pc-big .pc-front .pc-pip { display: block; font-size: calc(var(--card-big-w) * 0.53); text-align: center; align-self: center; opacity: 0.92; }
+.pc-front::before {
+  /* 内框：颜色跟着花色走，红黑一眼分得开 */
+  content: ''; position: absolute; inset: 2px; border-radius: 5px;
+  border: 1px solid currentColor; opacity: 0.14; pointer-events: none;
+}
+.pc-big .pc-front::before { inset: 3px; border-radius: 7px; }
+
+.pc-idx {
+  position: absolute; display: grid; justify-items: center; line-height: 0.98;
+  font-weight: 700; letter-spacing: -0.02em;
+}
+.pc-idx.tl { top: 3px; left: 4px; }
+.pc-idx.br { bottom: 3px; right: 4px; transform: rotate(180deg); }
+.pc-idx b { font-size: calc(var(--card-w) * 0.40); }
+.pc-idx i { font-style: normal; font-size: calc(var(--card-w) * 0.34); margin-top: -1px; }
+.pc-big .pc-idx.tl { top: 5px; left: 7px; }
+.pc-big .pc-idx.br { bottom: 5px; right: 7px; }
+.pc-big .pc-idx b { font-size: calc(var(--card-big-w) * 0.26); }
+.pc-big .pc-idx i { font-size: calc(var(--card-big-w) * 0.21); }
+
+.pc-center {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  font-size: calc(var(--card-w) * 0.5); opacity: 0.9;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+.pc-big .pc-center {
+  font-size: calc(var(--card-big-w) * 0.52);
+  text-shadow: 0 2px 3px rgba(0, 0, 0, 0.18), 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+/* JQKA 用字母做主图，外面套一圈装饰环 */
+.pc-front.is-court .pc-center {
+  font-weight: 700; font-size: calc(var(--card-w) * 0.46);
+}
+.pc-big .pc-front.is-court .pc-center { font-size: calc(var(--card-big-w) * 0.42); }
+.pc-big .pc-front.is-court::after {
+  content: ''; position: absolute; inset: 22%; border-radius: 50%;
+  border: 1px solid currentColor; opacity: 0.22;
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.5);
+}
+
+/* 斜向高光：让纸面有一层光泽，而不是一块平色 */
+.pc-gloss {
+  position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(118deg, rgba(255, 255, 255, 0.42) 0%, rgba(255, 255, 255, 0) 38%,
+    rgba(255, 255, 255, 0) 62%, rgba(255, 255, 255, 0.16) 100%);
+}
+
+/* ---- 背面：藏青底 + 金色暗纹 + 中央徽记 ---- */
 .pc-back {
   transform: rotateY(180deg);
   background:
-    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.05) 0 3px, transparent 3px 6px),
-    linear-gradient(160deg, #2b4b66, #16273a);
-  border: 1px solid rgba(217, 185, 120, 0.42); color: rgba(217, 185, 120, 0.75);
-  font-size: calc(var(--card-w) * 0.44);
+    repeating-linear-gradient(45deg, rgba(214, 178, 110, 0.16) 0 2px, transparent 2px 7px),
+    repeating-linear-gradient(-45deg, rgba(214, 178, 110, 0.12) 0 2px, transparent 2px 7px),
+    radial-gradient(120% 100% at 50% 0%, #33587a 0%, #1e3550 40%, #142334 100%);
+  background-color: #16283a;
+  border: 1px solid rgba(214, 178, 110, 0.55);
+  display: grid; place-items: center;
 }
-.pc-big .pc-back { font-size: calc(var(--card-big-w) * 0.34); }
+.pc-back::before {
+  content: ''; position: absolute; inset: 3px; border-radius: 5px;
+  border: 1px solid rgba(214, 178, 110, 0.42);
+}
+.pc-big .pc-back::before { inset: 5px; border-radius: 7px; }
+.pc-medallion {
+  display: grid; place-items: center;
+  width: 54%; aspect-ratio: 1; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, rgba(240, 211, 155, 0.32), rgba(214, 178, 110, 0.08) 70%);
+  border: 1px solid rgba(240, 211, 155, 0.5);
+  color: rgba(240, 211, 155, 0.92);
+  font-size: calc(var(--card-w) * 0.42);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+.pc-big .pc-medallion { font-size: calc(var(--card-big-w) * 0.34); }
 
 .peek {
   display: flex; gap: 8px; position: relative; background: none; border: 0; cursor: pointer; padding: 0;
@@ -456,6 +554,62 @@ button { touch-action: manipulation; }
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
 }
 .bar-meta .hand-type { margin-right: 10px; vertical-align: 1px; }
+/* 顶栏的账户净战绩：换房间也接着算 */
+.score-pill {
+  font-size: 11.5px; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+  border: 1px solid var(--line); white-space: nowrap;
+}
+.score-pill.up { color: #9fe3bd; border-color: rgba(127, 210, 164, 0.4); background: rgba(127, 210, 164, 0.1); }
+.score-pill.down { color: #e8a9a9; border-color: rgba(217, 128, 128, 0.4); background: rgba(217, 128, 128, 0.1); }
+
+/* 自己的盈亏：结算面板里最该一眼看到的数 */
+.my-result {
+  animation: myResultIn 0.55s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  animation-delay: 120ms;
+  display: grid; justify-items: center; gap: 2px; margin: 14px auto 2px;
+  padding: 12px 22px; border-radius: 14px; width: fit-content; min-width: 220px;
+  border: 1px solid var(--line);
+}
+.my-result span { font-size: 11px; letter-spacing: 0.16em; color: var(--muted); }
+.my-result strong { font-size: 32px; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.my-result small { font-size: 11.5px; color: var(--dim); }
+.my-result.up { background: rgba(127, 210, 164, 0.12); border-color: rgba(127, 210, 164, 0.4); }
+.my-result.up strong { color: #9fe3bd; }
+.my-result.down { background: rgba(217, 128, 128, 0.12); border-color: rgba(217, 128, 128, 0.4); }
+.my-result.down strong { color: #e8a9a9; }
+@keyframes myResultIn {
+  from { opacity: 0; transform: translateY(-8px) scale(0.82); }
+  60% { transform: scale(1.06); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 结算明细：谁赢多少谁输多少 */
+.score-table { width: 100%; margin: 16px 0 4px; font-size: 13px; }
+.score-head, .score-row {
+  display: grid; grid-template-columns: minmax(0, 1.6fr) 0.8fr 0.9fr 1fr;
+  gap: 8px; align-items: center; padding: 7px 10px; border-radius: 10px; text-align: right;
+}
+.score-head { font-size: 11px; color: var(--dim); padding-bottom: 2px; }
+.score-head span:first-child, .score-who { text-align: left; }
+.score-row {
+  background: rgba(255, 255, 255, 0.035); margin-top: 5px;
+  /* 逐行入场：结算是有过程的，不该一次拍出来 */
+  animation: rowIn 0.42s var(--ease) backwards;
+  animation-delay: calc(360ms + var(--i, 0) * 160ms);
+}
+.score-row.won { box-shadow: inset 0 0 0 1px rgba(217, 185, 120, 0.45); }
+@keyframes rowIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+.score-row.mine { background: rgba(217, 185, 120, 0.13); border: 1px solid rgba(217, 185, 120, 0.3); }
+.score-who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.score-bet { color: var(--muted); font-variant-numeric: tabular-nums; }
+.score-delta, .score-net { font-weight: 800; font-variant-numeric: tabular-nums; }
+.score-delta.up, .score-net.up { color: #9fe3bd; }
+.score-delta.down, .score-net.down { color: #e8a9a9; }
+.result-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 12px; }
+
 .reveal-type { font-style: normal; color: var(--gold); font-size: 11px; margin-left: 8px; opacity: 0.9; }
 .icon-btn.off { opacity: 0.42; }
 
@@ -464,15 +618,25 @@ button { touch-action: manipulation; }
 .fly-chip {
   position: absolute; z-index: 5; pointer-events: none;
   transform: translate(-50%, -50%);
+  animation: flyPath 0.9s cubic-bezier(0.4, 0, 0.45, 1) forwards;
+}
+/* 内层单独走一条抛物线：筹码是被抛过去的，不是贴着桌面滑过去的 */
+.fly-chip i {
+  display: block; font-style: normal;
   font-size: 12px; font-weight: 800; color: #1c1508;
   background: linear-gradient(180deg, var(--gold-2), #c8a05a);
-  padding: 3px 10px; border-radius: 999px; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
-  animation: fly 0.85s var(--ease) forwards;
+  padding: 3px 10px; border-radius: 999px; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+  animation: flyArc 0.9s ease-out forwards;
 }
-@keyframes fly {
-  0% { left: var(--sx); top: var(--sy); opacity: 0; transform: translate(-50%, -50%) scale(0.8); }
-  18% { opacity: 1; }
-  100% { left: 50%; top: 44%; opacity: 0; transform: translate(-50%, -50%) scale(0.55); }
+@keyframes flyPath {
+  0% { left: var(--sx); top: var(--sy); opacity: 0; }
+  16% { opacity: 1; }
+  100% { left: 50%; top: 44%; opacity: 0; }
+}
+@keyframes flyArc {
+  0% { transform: translateY(0) rotate(-12deg) scale(0.8); }
+  45% { transform: translateY(-34px) rotate(7deg) scale(1.08); }
+  100% { transform: translateY(0) rotate(0) scale(0.6); }
 }
 
 /* ------------------------------------------------------------- 控制条 */
@@ -757,6 +921,8 @@ button { touch-action: manipulation; }
   .seat.is-me .seat-hand { gap: 6px; }
   .seat-type { bottom: -10px; font-size: 10px; }
   .tag.bot { display: none; } /* AI 标记不隐藏：对面是不是 AI 必须看得见 */
+  .score-pill { display: none; }
+  .score-head, .score-row { grid-template-columns: minmax(0, 1.4fr) 0.7fr 0.9fr 0.9fr; font-size: 12px; padding: 6px 8px; }
   .pot { top: 54%; }
   .emote-bar { padding-right: 54px; gap: 4px; flex-wrap: nowrap; }
   .emote-btn { width: 32px; height: 32px; font-size: 16px; }

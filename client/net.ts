@@ -1,5 +1,5 @@
 import type { GameCommand, PublicRoom } from '../shared/game.ts';
-import type { ClientMsg, GameEvent, ServerMsg } from '../shared/protocol.ts';
+import type { AccountInfo, ClientMsg, GameEvent, ServerMsg } from '../shared/protocol.ts';
 
 export type NetStatus = 'connecting' | 'online' | 'offline';
 
@@ -11,6 +11,8 @@ export interface Auth {
 
 export interface NetHandlers {
   onStatus(status: NetStatus): void;
+  /** 服务端回执的账户凭证，存下来下次带上，就还是同一个自己 */
+  onAccount(account: AccountInfo): void;
   onWelcome(auth: Auth, room: PublicRoom): void;
   onRoom(room: PublicRoom, events: GameEvent[]): void;
   onError(msg: string, fatal: boolean): void;
@@ -92,6 +94,7 @@ export class Net {
       switch (msg.t) {
         case 'welcome':
           this.resume = { code: msg.code, playerId: msg.playerId, token: msg.token };
+          if (msg.account) this.h.onAccount(msg.account);
           return this.h.onWelcome(this.resume, msg.room);
         case 'room':
           return this.h.onRoom(msg.room, msg.events);

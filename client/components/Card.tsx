@@ -10,6 +10,9 @@ export function rankLabel(rank: number) {
 /**
  * 一张牌。正反面都在 DOM 里，靠 3D 翻转切换 ——
  * 服务器把牌发过来的那一刻，翻牌动画正好盖住数据到达的瞬间。
+ *
+ * 牌面按真牌的排版来：左上、右下各一组角标（点数在上、花色在下，右下角旋转 180°），
+ * 中间是主花色，外加一层斜向高光让纸面有光泽。牌背是金色几何暗纹加中央徽记。
  */
 export function PlayingCard({
   card,
@@ -25,6 +28,10 @@ export function PlayingCard({
   dealKey?: string | number;
 }) {
   const red = card ? card.suit === 'H' || card.suit === 'D' : false;
+  const rank = card ? rankLabel(card.rank) : '';
+  const suit = card ? SUITS[card.suit] : '';
+  const isFace = !!card && card.rank >= 11;
+
   return (
     <div
       key={dealKey}
@@ -32,17 +39,25 @@ export function PlayingCard({
       style={{ ['--i' as string]: dealIndex }}
     >
       <div className="pc-inner">
-        <div className="pc-face pc-front" data-red={red || undefined}>
+        <div className={`pc-face pc-front${isFace ? ' is-court' : ''}`} data-red={red || undefined}>
           {card ? (
             <>
-              <b>{rankLabel(card.rank)}</b>
-              <i>{SUITS[card.suit]}</i>
-              <span className="pc-pip">{SUITS[card.suit]}</span>
+              <span className="pc-idx tl">
+                <b>{rank}</b>
+                <i>{suit}</i>
+              </span>
+              <span className="pc-center">{isFace ? rank : suit}</span>
+              <span className="pc-idx br">
+                <b>{rank}</b>
+                <i>{suit}</i>
+              </span>
+              <span className="pc-gloss" aria-hidden="true" />
             </>
           ) : null}
         </div>
         <div className="pc-face pc-back">
-          <span>♠</span>
+          <span className="pc-medallion">♠</span>
+          <span className="pc-gloss" aria-hidden="true" />
         </div>
       </div>
     </div>

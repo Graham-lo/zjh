@@ -42,6 +42,25 @@ function saveAuth(t: Target, a: Auth) {
   }
 }
 
+// 账户和房间无关：AI 换房间、隔天再来还是同一个自己，积分接着上次
+const accountFile = () => join(STORE, 'account.json');
+function loadAccount(): { id: string; token: string } | null {
+  try {
+    const v = JSON.parse(readFileSync(accountFile(), 'utf8')) as { id: string; token: string };
+    return v.id && v.token ? v : null;
+  } catch {
+    return null;
+  }
+}
+function saveAccount(a: { id: string; token: string }) {
+  try {
+    mkdirSync(STORE, { recursive: true });
+    writeFileSync(accountFile(), JSON.stringify(a), { mode: 0o600 });
+  } catch {
+    /* ignore */
+  }
+}
+
 /* --------------------------------------------------------------- 会话 */
 
 let client: RoomClient | null = null;
@@ -67,8 +86,11 @@ function snapshot(extra: Record<string, unknown> = {}) {
   const view = tableView(c.room!);
   const fresh = c.room!.log.slice(seenLog);
   seenLog = c.room!.log.length;
+  const acc = c.account;
   return {
     ...view,
+    // 跨房间的账户战绩：净战绩 = 当前积分 - 累计发放
+    account: acc ? { chips: acc.chips, granted: acc.granted, lifetime_net: acc.chips - acc.granted, wins: acc.wins } : null,
     since_last_call: fresh.map((l) => l.text),
     ...extra,
   };
@@ -108,18 +130,20 @@ server.tool(
       const nick = (name ?? `AI${100 + Math.floor(Math.random() * 900)}`).slice(0, 10);
       const face = avatar && AVATARS.includes(avatar) ? avatar : AVATARS[Math.floor(Math.random() * AVATARS.length)];
       const saved = roomCode ? loadAuth(target, roomCode) : null;
+      const acc = loadAccount();
 
       if (saved) {
         await client.resumeSeat(saved).catch(async () => {
           client!.auth = null;
-          await client!.joinRoom(roomCode, nick, face, true);
+          await client!.joinRoom(roomCode, nick, face, true, acc);
         });
       } else if (create || !roomCode) {
-        await client.createRoom(nick, face, true);
+        await client.createRoom(nick, face, true, acc);
       } else {
-        await client.joinRoom(roomCode, nick, face, true);
+        await client.joinRoom(roomCode, nick, face, true, acc);
       }
       if (client.auth) saveAuth(target, client.auth);
+      if (client.account) saveAccount({ id: client.account.id, token: client.account.token });
       seenLog = 0;
       return ok({
         joined: true,
@@ -270,7 +294,7 @@ server.tool(
   },
 );
 
-server.tool('zjh_leave', '离开牌桌并断开连接。', {}, async () => {
+server.tool('zjh_leave', '主动退出房间并断开连接。任何时候都可以走；牌局进行中会先弃牌再离座。', {}, async () => {
   try {
     client?.cmd({ type: 'leave' });
     await new Promise((r) => setTimeout(r, 200));

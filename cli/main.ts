@@ -74,6 +74,25 @@ function saveAuth(a: Auth) {
   }
 }
 
+// 账户和房间无关：换房间、隔天再来还是同一个自己，积分接着上次
+const accountFile = join(STORE, 'account.json');
+function loadAccount(): { id: string; token: string } | null {
+  try {
+    const v = JSON.parse(readFileSync(accountFile, 'utf8')) as { id: string; token: string };
+    return v.id && v.token ? v : null;
+  } catch {
+    return null;
+  }
+}
+function saveAccount(a: { id: string; token: string }) {
+  try {
+    mkdirSync(STORE, { recursive: true });
+    writeFileSync(accountFile, JSON.stringify(a), { mode: 0o600 });
+  } catch {
+    /* ignore */
+  }
+}
+
 const identFile = join(STORE, 'identity.json');
 function loadIdent(): { name: string; avatar: string } {
   try {
@@ -114,8 +133,56 @@ function say(msg: string, ms = 4000) {
   draw();
 }
 
+// 结算和发牌都要有过程感：进入对应阶段后短时间内高频重绘
+let settleStart: number | null = null;
+let dealStart: number | null = null;
+let settleTimer: ReturnType<typeof setInterval> | null = null;
+let lastPhase = '';
+let lastHand = 0;
+let lastTurnMine = false;
+
+/** 在一段时间内持续重绘，动画靠它推进 */
+function animate(ms: number) {
+  if (settleTimer) clearInterval(settleTimer);
+  const until = Date.now() + ms;
+  settleTimer = setInterval(() => {
+    if (Date.now() > until) {
+      if (settleTimer) clearInterval(settleTimer);
+      settleTimer = null;
+    }
+    draw();
+  }, 40);
+}
+
+function onRoomUpdate() {
+  const r = client.room;
+  const phase = r?.phase ?? '';
+
+  // 新的一局：牌一张张发出来
+  if (r && phase === 'playing' && r.handNo !== lastHand) {
+    lastHand = r.handNo;
+    dealStart = Date.now();
+    animate(1200);
+  }
+  if (phase === 'round_end' && lastPhase !== 'round_end') {
+    settleStart = Date.now();
+    dealStart = null;
+    animate(1900);
+  }
+  if (phase !== 'round_end') settleStart = null;
+  if (phase !== 'playing') dealStart = null;
+
+  // 轮到自己：响一声，人可能正在看别的窗口
+  const mine = !!client.myTurn;
+  if (mine && !lastTurnMine) process.stdout.write('\u0007');
+  lastTurnMine = mine;
+
+  lastPhase = phase;
+  draw();
+}
+
 const client = new RoomClient(target, {
-  room: () => draw(),
+  room: () => onRoomUpdate(),
   status: () => draw(),
   error: (msg, fatal) => {
     say(`${C.red}${msg}${C.reset}`);
@@ -130,7 +197,12 @@ const client = new RoomClient(target, {
 
 function draw() {
   if (!client.room) return;
-  const body = renderRoom(client.room, client.latency, client.status, target.origin);
+  const settleT = settleStart == null ? null : Date.now() - settleStart;
+  const dealT = dealStart == null ? null : Date.now() - dealStart;
+  const body = renderRoom(
+    client.room, client.latency, client.status, target.origin, client.account,
+    settleT, dealT != null && dealT < 1100 ? dealT : null,
+  );
   let footer = '';
   if (mode === 'chat') footer = `\n${C.gold}说点什么 >${C.reset} ${buffer}${C.dim}_${C.reset}`;
   else if (mode === 'cmd') footer = `\n${C.gold}:${C.reset}${buffer}${C.dim}_${C.reset}`;
@@ -356,14 +428,15 @@ async function main() {
 
   const saved = has('fresh') || !code ? null : loadAuth(code);
   try {
+    const acc = has('fresh') ? null : loadAccount();
     if (saved) await client.resumeSeat(saved);
-    else if (wantCreate) await client.createRoom(name, avatar);
-    else await client.joinRoom(code, name, avatar);
+    else if (wantCreate) await client.createRoom(name, avatar, false, acc);
+    else await client.joinRoom(code, name, avatar, false, acc);
   } catch (e) {
     // 存档失效（房间没了 / 被移出）就退回普通加入
     if (saved) {
       client.auth = null;
-      await client.joinRoom(code, name, avatar).catch((err: Error) => {
+      await client.joinRoom(code, name, avatar, false, has('fresh') ? null : loadAccount()).catch((err: Error) => {
         console.error(`${C.red}${err.message}${C.reset}`);
         process.exit(1);
       });
@@ -373,6 +446,7 @@ async function main() {
     }
   }
   if (client.auth) saveAuth(client.auth);
+  if (client.account) saveAccount({ id: client.account.id, token: client.account.token });
 
   process.stdout.write(C.hideCursor);
   if (process.stdin.isTTY) process.stdin.setRawMode(true);

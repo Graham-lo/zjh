@@ -46,6 +46,12 @@ export interface PlayerState {
   looked: boolean;
   hand: Card[];
   isBot: boolean;
+  /** 跨房间跨会话的账户 id。换个房间还是同一个人，积分接着上次 */
+  accountId?: string;
+  /** 这一桌坐下以来的净变化，输赢一目了然 */
+  net: number;
+  /** 累计补分，从战绩里扣掉才是真实输赢 */
+  granted: number;
   /** 由外部 AI（MCP 客户端）驱动的真人席位。牌桌上会明示，避免有人挂 AI 代打别人不知道 */
   isAgent?: boolean;
   online: boolean;
@@ -79,6 +85,8 @@ export interface RoundResult {
   winnerName: string;
   potWon: number;
   reason: string;
+  /** 本局每个人的净盈亏：赢家 = 底池 - 自己投入，其他人 = -自己投入 */
+  deltas: { id: string; name: string; avatar: string; delta: number; bet: number; net: number }[];
   /** 只有走到摊牌的玩家会亮牌，中途弃牌的人不亮 */
   revealed: string[];
   hands: Record<string, Card[]>;
@@ -133,9 +141,10 @@ export interface PendingAllIn {
 
 export const DEFAULT_SETTINGS: GameSettings = {
   maxPlayers: 6,
-  startingChips: 10_000,
+  startingChips: 50_000,
   ante: 100,
-  betOptions: [100, 200, 500, 1000, 2000],
+  // 第一个是开局的底注档，其余是可选的加注档
+  betOptions: [100, 1000, 3000, 5000],
   special235: true,
   maxRounds: 8,
   escalateFrom: 3,
@@ -311,6 +320,8 @@ export function createHumanPlayer(
     looked: false,
     hand: [],
     isBot: false,
+    net: 0,
+    granted: 0,
     isAgent,
     online: true,
     bet: 0,
@@ -366,6 +377,8 @@ export function migrateRoom(state: RoomState): RoomState {
     p.avatar ||= AVATARS[0];
     p.bet ??= 0;
     p.wins ??= 0;
+    p.net ??= 0;
+    p.granted ??= 0;
     p.online ??= false;
   }
   return state;
@@ -530,6 +543,15 @@ function finishRound(state: RoomState, winner: PlayerState, reason: string, reve
   const won = state.pot;
   winner.chips += won;
   winner.wins += 1;
+  // 先把每个人这一局的盈亏结出来：投入是 bet，赢家再把底池收回去
+  const deltas = state.players
+    .filter((p) => p.bet > 0)
+    .map((p) => {
+      const delta = (p.id === winner.id ? won : 0) - p.bet;
+      p.net += delta;
+      return { id: p.id, name: p.name, avatar: p.avatar, delta, bet: p.bet, net: p.net };
+    })
+    .sort((a, b) => b.delta - a.delta);
   state.pot = 0;
   state.turnSeat = null;
   state.turnDeadline = null;
@@ -540,6 +562,7 @@ function finishRound(state: RoomState, winner: PlayerState, reason: string, reve
     winnerName: winner.name,
     potWon: won,
     reason,
+    deltas,
     revealed: revealIds,
     hands: Object.fromEntries(
       state.players.filter((p) => revealIds.includes(p.id) && p.hand.length === 3).map((p) => [p.id, p.hand.map((c) => ({ ...c }))]),
@@ -627,8 +650,10 @@ export function startRound(state: RoomState, actorId: string | null) {
   // 交完底注后必须还剩得下钱，否则玩家会卡在"只能弃牌"的死角。
   for (const p of entrants) {
     if (p.chips <= state.settings.ante) {
-      p.chips = state.settings.startingChips;
-      pushLog(state, `${p.name} 的积分已自动补满`);
+      const add = state.settings.startingChips - p.chips;
+      p.chips += add;
+      p.granted += add;
+      pushLog(state, `${p.name} 积分不足，自动补充 ${add.toLocaleString('zh-CN')}`);
     }
   }
 
@@ -944,7 +969,7 @@ export function applyCommand(state: RoomState, actorId: string, command: GameCom
       state.players.push({
         id: randomId('bot'), name, avatar: BOT_AVATARS[idx >= 0 ? idx : 0], seat,
         chips: state.settings.startingChips, ready: true, status: 'waiting', looked: false,
-        hand: [], isBot: true, online: true, bet: 0, wins: 0,
+        hand: [], isBot: true, online: true, bet: 0, wins: 0, net: 0, granted: 0,
       });
       pushLog(state, `${name}（电脑）加入房间`);
       return;
@@ -971,8 +996,10 @@ export function applyCommand(state: RoomState, actorId: string, command: GameCom
     }
     case 'top_up': {
       if (state.phase === 'playing' && actor.status === 'active') throw new GameError('本局进行中不能补充积分');
-      actor.chips = state.settings.startingChips;
-      pushLog(state, `${actor.name} 把积分补充到 ${actor.chips.toLocaleString('zh-CN')}`);
+      const add = Math.max(0, state.settings.startingChips - actor.chips);
+      actor.chips += add;
+      actor.granted += add;
+      pushLog(state, `${actor.name} 补充了 ${add.toLocaleString('zh-CN')} 积分`);
       return;
     }
     case 'new_round': {
@@ -1007,8 +1034,10 @@ export function resetToLobby(state: RoomState) {
   for (const p of state.players) {
     // 打空的人直接补满：这是纯娱乐积分，没必要让谁干坐着
     if (p.chips <= state.settings.ante) {
-      p.chips = state.settings.startingChips;
-      pushLog(state, `${p.name} 的积分已自动补满`);
+      const add = state.settings.startingChips - p.chips;
+      p.chips += add;
+      p.granted += add;
+      pushLog(state, `${p.name} 积分不足，自动补充 ${add.toLocaleString('zh-CN')}`);
     }
     p.status = 'waiting';
     p.looked = false;

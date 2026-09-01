@@ -57,8 +57,9 @@ test('开局发唯一的牌、收底注、定出首家', () => {
   const room = makeRoom(2);
   startRound(room, room.hostId);
   assert.equal(room.phase, 'playing');
-  assert.equal(room.pot, 200);
-  assert.equal(room.players[0].chips, 9900);
+  assert.equal(room.pot, room.settings.ante * 2);
+  // 从配置推导，改数值时不用回来改测试
+  assert.equal(room.players[0].chips, room.settings.startingChips - room.settings.ante);
   const cards = room.players.flatMap((p) => p.hand.map((x) => `${x.rank}${x.suit}`));
   assert.equal(new Set(cards).size, 6);
   assert.notEqual(room.turnSeat, null);
@@ -296,7 +297,11 @@ test('梭哈金额取的是在局玩家，已弃牌的短码不算数', () => {
   const folded = room.players.find((p) => p.seat !== room.turnSeat)!;
   folded.chips = 10;
   applyCommand(room, folded.id, { type: 'fold' });
-  assert.equal(allInCost(room), 9900, '弃了牌的人不该再压低梭哈金额');
+  assert.equal(
+    allInCost(room),
+    room.settings.startingChips - room.settings.ante,
+    '弃了牌的人不该再压低梭哈金额',
+  );
 });
 
 test('还没轮到自己也能弃牌，且不会打乱行动顺序', () => {
@@ -405,6 +410,94 @@ test('真人全部离线时电脑不会自己开局打下去', () => {
   assert.equal(canAutoStart(room), true);
   room.players[0].online = false;
   assert.equal(canAutoStart(room), false, '没有在线真人时不该自动开局');
+});
+
+/* ----------------------------------------------------------- 结算 */
+
+test('结算给出每个人的盈亏，且总和为零', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  const actor = currentPlayer(room)!;
+  applyCommand(room, actor.id, { type: 'call' });
+  const second = currentPlayer(room)!;
+  applyCommand(room, second.id, { type: 'fold' });
+  const third = currentPlayer(room)!;
+  applyCommand(room, third.id, { type: 'fold' });
+
+  assert.equal(room.phase, 'round_end');
+  const deltas = room.result!.deltas;
+  assert.equal(deltas.length, 3, '三家都交了底注，都该出现在结算里');
+  // 钱只是在桌上换手，不会凭空多也不会凭空少
+  assert.equal(deltas.reduce((sum, d) => sum + d.delta, 0), 0);
+  const winner = deltas.find((d) => d.id === room.result!.winnerId)!;
+  assert.ok(winner.delta > 0, '赢家应该是正的');
+  for (const d of deltas) if (d.id !== winner.id) assert.ok(d.delta < 0, `${d.name} 应该是负的`);
+});
+
+test('结算里的投入含底注', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  const actor = currentPlayer(room)!;
+  const ante = room.settings.ante;
+  // 开局只交了底注，还没有任何下注动作
+  assert.equal(actor.bet, ante, '底注一开始就算进投入');
+
+  applyCommand(room, actor.id, { type: 'call' });
+  const callCost = room.settings.betOptions[0];
+  assert.equal(actor.bet, ante + callCost, '跟注要加在底注之上');
+
+  const rest = room.players.filter((p) => p.id !== actor.id && p.status === 'active');
+  for (const p of rest) applyCommand(room, p.id, { type: 'fold' });
+
+  const mine = room.result!.deltas.find((d) => d.id === actor.id)!;
+  assert.equal(mine.bet, ante + callCost, '结算里的投入必须含底注');
+  const folded = room.result!.deltas.find((d) => d.id !== actor.id)!;
+  assert.equal(folded.bet, ante, '只交了底注就弃牌的人，投入就是底注');
+  assert.equal(folded.delta, -ante, '他的亏损正好是那份底注');
+});
+
+test('本桌累计跨局叠加，且桌上净变化恒为零', () => {
+  const room = makeRoom(2);
+  const playHand = () => {
+    for (const p of room.players) p.ready = true;
+    startRound(room, room.hostId);
+    const first = currentPlayer(room)!;
+    const other = room.players.find((p) => p.id !== first.id)!;
+    applyCommand(room, other.id, { type: 'fold' }); // 对手直接弃牌，first 收底注
+    assert.equal(room.phase, 'round_end');
+    assert.equal(room.players.reduce((sum, p) => sum + p.net, 0), 0, '钱只是换手，总和必须是零');
+    applyCommand(room, room.hostId, { type: 'new_round' });
+    return { winner: first, loser: other };
+  };
+
+  const h1 = playHand();
+  assert.equal(h1.winner.net, 100, '赢家净赚对手那份底注');
+  assert.equal(h1.loser.net, -100);
+
+  // 第二局庄位轮转，谁赢由座位决定；无论谁赢，累计都是在第一局基础上叠加
+  const netsBefore = new Map(room.players.map((p) => [p.id, p.net]));
+  const h2 = playHand();
+  assert.equal(h2.winner.net, netsBefore.get(h2.winner.id)! + 100, '赢家在原有累计上再加');
+  assert.equal(h2.loser.net, netsBefore.get(h2.loser.id)! - 100, '输家在原有累计上再减');
+});
+
+test('补分要记进 granted，否则净战绩会被冲掉', () => {
+  const room = makeRoom(2);
+  const p = room.players[0];
+  p.chips = 1000;
+  const before = p.granted;
+  applyCommand(room, p.id, { type: 'top_up' });
+  assert.equal(p.chips, room.settings.startingChips);
+  assert.equal(p.granted - before, room.settings.startingChips - 1000, '补了多少就记多少');
+});
+
+test('开局自动补分同样记账', () => {
+  const room = makeRoom(2);
+  const p = room.players[0];
+  p.chips = 50; // 连底注都不够
+  const before = p.granted;
+  startRound(room, room.hostId);
+  assert.ok(p.granted > before, '自动补的分必须记进 granted，否则余额悄悄变了还查不出来');
 });
 
 /* ----------------------------------------------------------- 信息安全 */

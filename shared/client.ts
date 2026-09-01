@@ -9,7 +9,7 @@
  */
 import type { GameCommand, PublicPlayer, PublicRoom } from './game.ts';
 import { allInCost, callCost, canAllInNow, canCompareNow, compareCost, evaluateHand, handPercentile } from './game.ts';
-import type { ClientMsg, GameEvent, ServerMsg } from './protocol.ts';
+import type { AccountInfo, ClientMsg, GameEvent, ServerMsg } from './protocol.ts';
 
 export interface Auth {
   code: string;
@@ -58,6 +58,8 @@ export class RoomClient {
   readonly target: Target;
   room: PublicRoom | null = null;
   auth: Auth | null = null;
+  /** 跨房间的账户凭证，存下来下次带上就还是同一个自己 */
+  account: AccountInfo | null = null;
   status: Status = 'connecting';
   latency = 0;
 
@@ -146,6 +148,7 @@ export class RoomClient {
     switch (msg.t) {
       case 'welcome':
         this.auth = { code: msg.code, playerId: msg.playerId, token: msg.token };
+        if (msg.account) this.account = msg.account;
         this.apply(msg.room, []);
         return;
       case 'room':
@@ -204,12 +207,12 @@ export class RoomClient {
     });
   }
 
-  createRoom(name: string, avatar: string, agent = false) {
-    return this.seat({ t: 'create', name, avatar, agent });
+  createRoom(name: string, avatar: string, agent = false, acc?: { id: string; token: string } | null) {
+    return this.seat({ t: 'create', name, avatar, agent, accountId: acc?.id, accountToken: acc?.token });
   }
 
-  joinRoom(code: string, name: string, avatar: string, agent = false) {
-    return this.seat({ t: 'join', code, name, avatar, agent });
+  joinRoom(code: string, name: string, avatar: string, agent = false, acc?: { id: string; token: string } | null) {
+    return this.seat({ t: 'join', code, name, avatar, agent, accountId: acc?.id, accountToken: acc?.token });
   }
 
   resumeSeat(auth: Auth) {
@@ -330,6 +333,7 @@ export function tableView(room: PublicRoom) {
           cards: myCards ? myCards.map(cardText) : null,
           handType: myCards ? evaluateHand(myCards).name : null,
           strength: myCards ? Number(handPercentile(myCards).toFixed(4)) : null,
+          table_net: me.net,
           isHost: room.hostId === me.id,
         }
       : null,
@@ -343,6 +347,7 @@ export function tableView(room: PublicRoom) {
       kind: p.isBot ? 'bot' : p.isAgent ? 'ai' : 'human',
       online: p.online,
       lastAction: p.lastAction ?? null,
+      table_net: p.net,
       // 只有摊牌时服务端才会下发别人的牌
       cards: p.hand.length === 3 ? p.hand.map(cardText) : null,
     })),
@@ -352,8 +357,22 @@ export function tableView(room: PublicRoom) {
     allIn: room.allIn
       ? { by: room.allIn.initiatorName, amount: room.allIn.amount, waitingOn: room.allIn.pending.length, accepted: room.allIn.accepted.length }
       : null,
+    // 结算明细：谁投了多少、这局赢输多少、坐下以来累计多少
     result: room.result
-      ? { winner: room.result.winnerName, won: room.result.potWon, reason: room.result.reason }
+      ? {
+          winner: room.result.winnerName,
+          won: room.result.potWon,
+          reason: room.result.reason,
+          // 自己的那份单独给一次，模型不用自己去表里找
+          my_delta: room.result.deltas?.find((d) => d.id === room.viewerId)?.delta ?? null,
+          ante_included: true,
+          settlement: (room.result.deltas ?? []).map((d) => ({
+            name: d.name,
+            bet: d.bet,
+            delta: d.delta,
+            table_net: d.net,
+          })),
+        }
       : null,
     legalActions: legalActions(room),
     log: room.log.slice(-10).map((l) => l.text),

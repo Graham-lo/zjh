@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { evaluateHand, type GameCommand, type PublicPlayer, type PublicRoom } from '../shared/game.ts';
-import type { GameEvent } from '../shared/protocol.ts';
+import type { AccountInfo, GameEvent } from '../shared/protocol.ts';
 import { ActionBar, EmoteBar } from './components/ActionBar.tsx';
 import { PlayingCard } from './components/Card.tsx';
 import { Dock } from './components/Dock.tsx';
@@ -42,6 +42,22 @@ function useCountUp(target: number, ms = 480) {
   return value;
 }
 
+/** 会滚动的数字。结算时一个个跳出来，比直接拍上去有戏得多。 */
+function CountUp({ value, delay = 0, sign = false }: { value: number; delay?: number; sign?: boolean }) {
+  const [start, setStart] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setStart(true), delay);
+    return () => clearTimeout(t);
+  }, [delay]);
+  const shown = useCountUp(start ? value : 0, 620);
+  return (
+    <>
+      {sign && shown >= 0 ? '+' : ''}
+      {fmt(shown)}
+    </>
+  );
+}
+
 interface FlyChip {
   id: number;
   left: string;
@@ -75,6 +91,7 @@ export function Table({
   latency,
   batch,
   onToast,
+  account,
 }: {
   room: PublicRoom;
   cmd(c: GameCommand): void;
@@ -82,6 +99,7 @@ export function Table({
   latency: number;
   batch: { seq: number; events: GameEvent[] };
   onToast(msg: string): void;
+  account: AccountInfo | null;
 }) {
   const me = room.players.find((p) => p.id === room.viewerId);
   const [dockOpen, setDockOpen] = useState(false);
@@ -89,6 +107,8 @@ export function Table({
   const [chips, setChips] = useState<FlyChip[]>([]);
   const [flash, setFlash] = useState<'win' | 'lose' | null>(null);
   const [fx, setFx] = useState<{ id: number; label: string; kind: string } | null>(null);
+  const [winnerId, setWinnerId] = useState<string | null>(null);
+  const [potBump, setPotBump] = useState(false);
   const fxId = useRef(0);
   const [muted, setMuted] = useState(!sound.enabled);
   const [mutedVoice, setMutedVoice] = useState(!voice.enabled);
@@ -133,6 +153,9 @@ export function Table({
             setTimeout(() => setChips((c) => c.filter((x) => x.id !== id)), 900);
           }
           sound.play('chip');
+          // 钱进池子这件事要看得见：底池数字被砸大一下
+          setPotBump(true);
+          setTimeout(() => setPotBump(false), 340);
           voice.play(ev.kind === 'all_in' ? 'allin' : ev.kind);
           if (ev.kind === 'all_in') {
             burst('allin', '梭 哈');
@@ -166,6 +189,8 @@ export function Table({
           break;
         }
         case 'win': {
+          setWinnerId(ev.playerId);
+          setTimeout(() => setWinnerId(null), 1400);
           const mine = ev.playerId === room.viewerId;
           const played = me && me.bet > 0;
           if (mine) {
@@ -228,6 +253,15 @@ export function Table({
           </button>
         </div>
         <div className="topbar-right">
+          {account && (
+            <span
+              className={`score-pill ${account.chips - account.granted >= 0 ? 'up' : 'down'}`}
+              title={`累计发放 ${fmt(account.granted)}，当前 ${fmt(account.chips)}。换房间也接着算。`}
+            >
+              净战绩 {account.chips - account.granted >= 0 ? '+' : ''}
+              {fmt(account.chips - account.granted)}
+            </span>
+          )}
           <span className={`net-pill net-${status}`} title={`延迟 ${latency}ms`}>
             <i />
             {status === 'online' ? `${latency}ms` : status === 'connecting' ? '连接中' : '重连中'}
@@ -279,7 +313,7 @@ export function Table({
             </div>
           </div>
 
-          <div className="pot">
+          <div className={`pot${potBump ? ' bumped' : ''}`}>
             <span>{room.phase === 'round_end' ? '本局彩池' : '底池'}</span>
             <strong>{fmt(pot)}</strong>
             <small>
@@ -294,7 +328,7 @@ export function Table({
               className="fly-chip"
               style={{ ['--sx' as string]: c.left, ['--sy' as string]: c.top }}
             >
-              +{fmt(c.amount)}
+              <i>+{fmt(c.amount)}</i>
             </span>
           ))}
 
@@ -311,6 +345,7 @@ export function Table({
               handNo={room.handNo}
               showdownHand={showdownHands[player.id]}
               onPeek={player.id === me.id ? () => cmd({ type: 'look' }) : undefined}
+              celebrating={player.id === winnerId}
             />
           ))}
 
@@ -340,23 +375,53 @@ export function Table({
             <strong className="result-amount">+{fmt(result.potWon)}</strong>
             <span className="result-reason">{result.reason}</span>
 
-            {result.revealed.length > 0 && (
-              <div className="reveal-grid">
-                {result.revealed.map((id) => {
-                  const p = room.players.find((x) => x.id === id);
-                  if (!p) return null;
-                  const hands = showdownHands[id] ?? [];
+            {/* 自己的盈亏单独拎出来，不用在表格里找 */}
+            {(() => {
+              const mine = result.deltas?.find((d) => d.id === room.viewerId);
+              if (!mine) return null;
+              return (
+                <div className={`my-result ${mine.delta >= 0 ? 'up' : 'down'}`}>
+                  <span>你本局</span>
+                  <strong>
+                    <CountUp value={mine.delta} sign delay={140} />
+                  </strong>
+                  <small>
+                    投入 {fmt(mine.bet)}（含底注 {fmt(room.settings.ante)}） · 本桌累计{' '}
+                    {mine.net >= 0 ? '+' : ''}
+                    {fmt(mine.net)}
+                  </small>
+                </div>
+              );
+            })()}
+
+            {/* 本局每个人赢了多少输了多少，外加这一桌坐下以来的累计 */}
+            {result.deltas?.length > 0 && (
+              <div className="score-table">
+                <div className="score-head">
+                  <span>玩家</span>
+                  <span>投入</span>
+                  <span>本局</span>
+                  <span>本桌累计</span>
+                </div>
+                {result.deltas.map((d, i) => {
+                  const hand = showdownHands[d.id];
                   return (
-                    <div key={id} className={`reveal${id === result.winnerId ? ' won' : ''}`}>
-                      <span>
-                        {p.avatar} {p.name}
-                        <i className="reveal-type">{hands.length === 3 ? evaluateHand(hands).name : ''}</i>
+                    <div
+                      key={d.id}
+                      className={`score-row${d.id === room.viewerId ? ' mine' : ''}${d.id === result.winnerId ? ' won' : ''}`}
+                      style={{ ['--i' as string]: i }}
+                    >
+                      <span className="score-who">
+                        {d.avatar} {d.name}
+                        {hand?.length === 3 && <i className="reveal-type">{evaluateHand(hand).name}</i>}
                       </span>
-                      <div className="reveal-hand">
-                        {hands.map((c, i) => (
-                          <PlayingCard key={i} card={c} faceDown={false} />
-                        ))}
-                      </div>
+                      <span className="score-bet">{fmt(d.bet)}</span>
+                      <span className={`score-delta ${d.delta >= 0 ? 'up' : 'down'}`}>
+                        <CountUp value={d.delta} sign delay={420 + i * 160} />
+                      </span>
+                      <span className={`score-net ${d.net >= 0 ? 'up' : 'down'}`}>
+                        <CountUp value={d.net} sign delay={520 + i * 160} />
+                      </span>
                     </div>
                   );
                 })}
@@ -366,11 +431,17 @@ export function Table({
             <p className="result-next">
               {room.settings.autoContinue ? '稍后自动开始下一局' : '等待房主开启下一局'}
             </p>
-            {room.hostId === me.id && (
-              <button className="btn primary" onClick={() => cmd({ type: 'new_round' })}>
-                立刻返回准备
+            <div className="result-actions">
+              {room.hostId === me.id && (
+                <button className="btn primary" onClick={() => cmd({ type: 'new_round' })}>
+                  立刻返回准备
+                </button>
+              )}
+              {/* 结算遮罩会挡住顶栏，这里也得能直接走人 */}
+              <button className="btn ghost" onClick={() => window.confirm('确定退出房间？') && cmd({ type: 'leave' })}>
+                退出房间
               </button>
-            )}
+            </div>
           </div>
         </div>
       )}

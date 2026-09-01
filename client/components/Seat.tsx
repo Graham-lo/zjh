@@ -72,6 +72,7 @@ export function Seat({
   handNo,
   showdownHand,
   onPeek,
+  celebrating,
 }: {
   player: PublicPlayer;
   style: CSSProperties;
@@ -84,12 +85,15 @@ export function Seat({
   showdownHand?: Card[];
   /** 只有自己的座位会传：点牌即看牌 */
   onPeek?: () => void;
+  /** 刚赢下这一局，弹一下 */
+  celebrating?: boolean;
 }) {
   const hand = showdownHand ?? player.hand;
   const revealed = hand.length === 3;
   const classes = [
     'seat',
     isTurn && 'is-turn',
+    celebrating && 'is-winner',
     isMe && 'is-me',
     player.status === 'folded' && 'is-folded',
     !player.online && !player.isBot && 'is-offline',

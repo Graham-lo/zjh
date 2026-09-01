@@ -211,11 +211,11 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
           return hub.send(conn, { t: 'pong', at: msg.at, now: Date.now() });
         case 'create':
           if (!allow(conn.ip, 4)) throw new GameError('操作太频繁，请稍后再试', 429);
-          return await hub.create(conn, msg.name, msg.avatar, !!msg.agent);
+          return await hub.create(conn, msg.name, msg.avatar, !!msg.agent, msg.accountId, msg.accountToken);
         case 'join':
           // 建/进房间比普通操作贵，避免有人拿 6 位房号扫库
           if (!allow(conn.ip, 3)) throw new GameError('操作太频繁，请稍后再试', 429);
-          return await hub.join(conn, String(msg.code ?? '').trim(), msg.name, msg.avatar, !!msg.agent);
+          return await hub.join(conn, String(msg.code ?? '').trim(), msg.name, msg.avatar, !!msg.agent, msg.accountId, msg.accountToken);
         case 'resume':
           if (!allow(conn.ip, 1)) throw new GameError('操作太频繁，请稍后再试', 429);
           return await hub.resume(conn, String(msg.code ?? '').trim(), msg.playerId, msg.token);

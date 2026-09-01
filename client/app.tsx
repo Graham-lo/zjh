@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { AVATARS, type GameCommand, type PublicRoom } from '../shared/game.ts';
-import type { GameEvent } from '../shared/protocol.ts';
+import type { AccountInfo, GameEvent } from '../shared/protocol.ts';
 import { Landing, type Identity } from './components/Landing.tsx';
 import { Net, type Auth, type NetStatus } from './net.ts';
 import { sound, voice } from './sound.ts';
 import { Table } from './table.tsx';
 
 const IDENT_KEY = 'zjh:me';
+// 账户凭证和房间无关：换房间、隔天再来都还是同一个自己，积分接着上次
+const ACCOUNT_KEY = 'zjh:account';
 const authKey = (code: string) => `zjh:auth:${code}`;
 
 function loadIdent(): Identity {
@@ -23,6 +25,17 @@ function loadIdent(): Identity {
     name: `牌友${1000 + Math.floor(Math.random() * 9000)}`,
     avatar: AVATARS[Math.floor(Math.random() * AVATARS.length)],
   };
+}
+
+function loadAccount(): { id: string; token: string } | null {
+  try {
+    const raw = localStorage.getItem(ACCOUNT_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as { id: string; token: string };
+    return v.id && v.token ? v : null;
+  } catch {
+    return null;
+  }
 }
 
 function loadAuth(code: string): Auth | null {
@@ -53,6 +66,7 @@ export default function App() {
   const [latency, setLatency] = useState(0);
   const [busy, setBusy] = useState(false);
   const [batch, setBatch] = useState<{ seq: number; events: GameEvent[] }>({ seq: 0, events: [] });
+  const [account, setAccount] = useState<AccountInfo | null>(null);
 
   const netRef = useRef<Net | null>(null);
   const seqRef = useRef(0);
@@ -117,6 +131,14 @@ export default function App() {
           notify(msg);
         }
       },
+      onAccount: (acc: AccountInfo) => {
+        try {
+          localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ id: acc.id, token: acc.token }));
+        } catch {
+          /* 无痕模式下每次都是新账户，只能这样 */
+        }
+        setAccount(acc);
+      },
       onLatency: setLatency,
     });
     netRef.current = net;
@@ -153,9 +175,9 @@ export default function App() {
     voice.unlock();
     setBusy(true);
     setError('');
-    net.send(kind === 'create'
-      ? { t: 'create', name: ident.name, avatar: ident.avatar }
-      : { t: 'join', code, name: ident.name, avatar: ident.avatar });
+    const acc = loadAccount();
+    const hello = { name: ident.name, avatar: ident.avatar, accountId: acc?.id, accountToken: acc?.token };
+    net.send(kind === 'create' ? { t: 'create', ...hello } : { t: 'join', code, ...hello });
     // 网络卡住时不要让按钮一直转
     setTimeout(() => setBusy(false), 6000);
   };
@@ -163,7 +185,7 @@ export default function App() {
   return (
     <>
       {room ? (
-        <Table room={room} cmd={cmd} status={status} latency={latency} batch={batch} onToast={notify} />
+        <Table room={room} cmd={cmd} status={status} latency={latency} batch={batch} onToast={notify} account={account} />
       ) : (
         <Landing
           ident={ident}

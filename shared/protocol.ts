@@ -5,6 +5,19 @@ export interface ClientHello {
   avatar: string;
   /** 由 AI 驱动的席位。牌桌上会明示，不允许静默代打 */
   agent?: boolean;
+  /** 账户凭证。带上就沿用同一个账户（积分和战绩接着上次），不带则开新账户 */
+  accountId?: string;
+  accountToken?: string;
+}
+
+/** 服务端回执的账户信息，客户端要存下来下次带上 */
+export interface AccountInfo {
+  id: string;
+  token: string;
+  chips: number;
+  granted: number;
+  hands: number;
+  wins: number;
 }
 
 export type ClientMsg =
@@ -28,7 +41,7 @@ export type GameEvent =
   | { k: 'presence'; playerId: string; online: boolean };
 
 export type ServerMsg =
-  | { t: 'welcome'; code: string; playerId: string; token: string; room: PublicRoom }
+  | { t: 'welcome'; code: string; playerId: string; token: string; room: PublicRoom; account?: AccountInfo }
   | { t: 'room'; room: PublicRoom; events: GameEvent[] }
   | { t: 'error'; msg: string; fatal?: boolean }
   | { t: 'pong'; at: number; now: number };

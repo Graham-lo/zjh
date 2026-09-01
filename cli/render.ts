@@ -2,6 +2,7 @@
 import type { Card, PublicRoom } from '../shared/game.ts';
 import { cardText, legalActions } from '../shared/client.ts';
 import { evaluateHand, handPercentile } from '../shared/game.ts';
+import type { AccountInfo } from '../shared/protocol.ts';
 
 const E = '\u001B'; // ESC，写成转义避免源码里出现裸控制字符
 export const C = {
@@ -20,6 +21,19 @@ export const C = {
 };
 
 export const fmt = (n: number) => n.toLocaleString('zh-CN');
+
+/** 结算动画的时间轴：第 i 行在什么时候出现、数字滚到几成 */
+const ROW_DELAY = 160;
+const ROW_START = 420;
+const COUNT_MS = 500;
+const easeOut = (k: number) => 1 - (1 - k) ** 3;
+
+function countAt(value: number, settleT: number | null, delay: number): number {
+  if (settleT == null) return value;
+  const k = Math.max(0, Math.min(1, (settleT - delay) / COUNT_MS));
+  return Math.round(value * easeOut(k));
+}
+const shownAt = (settleT: number | null, delay: number) => settleT == null || settleT >= delay;
 
 const ANSI = new RegExp(`${E}\\[[0-9;]*m`, 'g');
 
@@ -69,7 +83,9 @@ export function cardArt(cards: Card[], count = 3): string[] {
   return rows;
 }
 
-function seatCards(p: PublicRoom['players'][number]): string {
+function seatCards(p: PublicRoom['players'][number], dealt = true): string {
+  // 发牌动画期间，还没轮到这个座位就先空着
+  if (!dealt) return `${C.dim}· · ·${C.reset}`;
   if (p.status === 'waiting') return `${C.dim}等待下局${C.reset}`;
   if (p.hand.length === 3) {
     const cards = p.hand.map((c) => `${isRed(c) ? C.red : C.white}${cardText(c)}${C.reset}`).join(' ');
@@ -80,14 +96,30 @@ function seatCards(p: PublicRoom['players'][number]): string {
   return '';
 }
 
-export function renderRoom(room: PublicRoom, latency: number, status: string, origin: string): string {
+export function renderRoom(
+  room: PublicRoom,
+  latency: number,
+  status: string,
+  origin: string,
+  account?: AccountInfo | null,
+  /** 距离本局结算开始过了多少毫秒；null 表示不做动画 */
+  settleT: number | null = null,
+  /** 距离本局开牌过了多少毫秒；null 表示不做发牌动画 */
+  dealT: number | null = null,
+): string {
   const me = room.players.find((p) => p.id === room.viewerId);
   const L: string[] = [];
   const line = (s = '') => L.push(s);
   const rule = () => line(`${C.dim}${'─'.repeat(74)}${C.reset}`);
 
   const net = status === 'online' ? `${C.green}●${C.reset} ${latency}ms` : `${C.red}●${C.reset} ${status}`;
-  line(`${C.bold}${C.gold}好友炸金花${C.reset}  房间 ${C.bold}${room.code}${C.reset}   ${net}`);
+  const acc = account
+    ? (() => {
+        const v = account.chips - account.granted;
+        return `   ${v >= 0 ? C.green : C.red}净战绩 ${v >= 0 ? '+' : ''}${fmt(v)}${C.reset}`;
+      })()
+    : '';
+  line(`${C.bold}${C.gold}好友炸金花${C.reset}  房间 ${C.bold}${room.code}${C.reset}   ${net}${acc}`);
   line(`${C.dim}邀请链接 ${origin}/?room=${room.code}${C.reset}`);
   line();
 
@@ -99,7 +131,9 @@ export function renderRoom(room: PublicRoom, latency: number, status: string, or
   line(`${C.bold}${phase}${C.reset}   ${meta}`);
   rule();
 
-  for (const p of [...room.players].sort((a, b) => a.seat - b.seat)) {
+  const seated = [...room.players].sort((a, b) => a.seat - b.seat);
+  for (const [idx, p] of seated.entries()) {
+    const dealt = dealT == null || dealT > 140 + idx * 130;
     const isMe = p.id === room.viewerId;
     const turn = room.phase === 'playing' && room.turnSeat === p.seat;
     const marks = [
@@ -116,7 +150,7 @@ export function renderRoom(room: PublicRoom, latency: number, status: string, or
     const bet = p.bet > 0 ? `${C.gold}+${fmt(p.bet)}${C.reset}` : '';
     line(
       `${cursor} ${C.dim}${p.seat}${C.reset} ${p.avatar} ${pad(nm, 12)} ${pad(fmt(p.chips), 8)} ${pad(bet, 8)} ` +
-        `${pad(seatCards(p), 26)} ${marks}${p.lastAction ? ` ${C.dim}${p.lastAction}${C.reset}` : ''}`,
+        `${pad(seatCards(p, dealt), 26)} ${marks}${p.lastAction ? ` ${C.dim}${p.lastAction}${C.reset}` : ''}`,
     );
   }
   rule();
@@ -132,11 +166,46 @@ export function renderRoom(room: PublicRoom, latency: number, status: string, or
     line(
       `${C.bold}${C.gold}本局赢家 ${room.result.winnerName}   +${fmt(room.result.potWon)}${C.reset}   ${C.dim}${room.result.reason}${C.reset}`,
     );
+    // 自己的盈亏单独一行，最显眼；数字是滚出来的，不是拍出来的
+    const deltas = room.result.deltas ?? [];
+    const sign = (n: number) => `${n >= 0 ? '+' : ''}${fmt(n)}`;
+    const mine = deltas.find((d) => d.id === room.viewerId);
+    if (mine && shownAt(settleT, 120)) {
+      const col = mine.delta >= 0 ? C.green : C.red;
+      line(
+        `  ${C.bold}你本局 ${col}${sign(countAt(mine.delta, settleT, 120))}${C.reset}` +
+          `   ${C.dim}投入 ${fmt(mine.bet)}（含底注 ${fmt(room.settings.ante)}）` +
+          ` · 本桌累计 ${sign(countAt(mine.net, settleT, 220))}${C.reset}`,
+      );
+    }
+    if (deltas.length && shownAt(settleT, ROW_START - 60)) {
+      line(`  ${C.dim}${pad('玩家', 16)}${pad('投入', 10)}${pad('本局', 12)}本桌累计${C.reset}`);
+      deltas.forEach((d, i) => {
+        const at = ROW_START + i * ROW_DELAY;
+        if (!shownAt(settleT, at)) return;
+        const isMe = d.id === room.viewerId;
+        const won = d.id === room.result!.winnerId;
+        const col = (n: number) => (n >= 0 ? C.green : C.red);
+        const hand = room.result!.hands[d.id];
+        const type = hand?.length === 3 ? ` ${C.gold}${evaluateHand(hand).name}${C.reset}` : '';
+        line(
+          `  ${isMe ? C.bold : ''}${won ? C.gold : ''}${pad(`${d.avatar} ${d.name}`, 16)}${C.reset}` +
+            `${pad(fmt(d.bet), 10)}` +
+            `${col(d.delta)}${pad(sign(countAt(d.delta, settleT, at)), 12)}${C.reset}` +
+            `${col(d.net)}${sign(countAt(d.net, settleT, at + 100))}${C.reset}${type}`,
+        );
+      });
+    }
     line();
   }
 
   // 自己的牌：看过就画出牌面，没看就是三张背面
   if (me && me.status === 'active' && (me.hand.length === 3 || me.hasHand)) {
+    const myIdx = seated.findIndex((p) => p.id === me.id);
+    if (dealT != null && dealT <= 140 + myIdx * 130) {
+      line(`  ${C.dim}发牌中…${C.reset}`);
+      line();
+    } else {
     const revealed = me.hand.length === 3;
     for (const row of cardArt(revealed ? me.hand : [])) line(`  ${row}`);
     if (revealed) {
@@ -147,6 +216,7 @@ export function renderRoom(room: PublicRoom, latency: number, status: string, or
       line(`  ${C.dim}按 ${C.gold}k${C.reset}${C.dim} 看牌（看牌后下注翻倍）${C.reset}`);
     }
     line();
+    }
   }
 
   const turnP = room.players.find((p) => p.seat === room.turnSeat);
