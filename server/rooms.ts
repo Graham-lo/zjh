@@ -1,7 +1,8 @@
 import type { WebSocket } from 'ws';
 import {
   applyCommand, botDecision, canAutoStart, claimHostIfVacant, cleanAvatar, cleanName,
-  createHumanPlayer, createInitialRoom, currentPlayer, GameError, resetToLobby, sanitizeRoom, startRound,
+  createHumanPlayer, createInitialRoom, currentPlayer, GameError, migrateRoom, resetToLobby,
+  sanitizeRoom, startRound,
   timeoutCurrentPlayer, transferHost, COMMAND_TYPES,
   type GameCommand, type RoomState,
 } from '../shared/game.ts';
@@ -76,7 +77,9 @@ export class Hub {
   constructor(store: Store) {
     this.store = store;
     let restored = 0;
-    for (const state of store.loadAll(ROOM_TTL_MS)) {
+    for (const raw of store.loadAll(ROOM_TTL_MS)) {
+      // 老快照可能缺新加的字段，先补齐再用
+      const state = migrateRoom(raw);
       // 重启后没有任何人是连着的；牌局停在原地等人回来。
       for (const p of state.players) if (!p.isBot) p.online = false;
       state.turnDeadline = null;

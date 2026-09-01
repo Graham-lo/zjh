@@ -329,6 +329,32 @@ export function createInitialRoom(code: string, host: PlayerState): RoomState {
   };
 }
 
+/**
+ * 把旧快照补齐成当前版本的形状。
+ *
+ * 房间状态是整个 JSON 存盘的，所以一个上线后新增的字段（比如 allInFromRound）
+ * 在老房间里就是 undefined —— 界面会显示「第 undefined 轮起」，
+ * 而 `roundNo >= undefined` 恒为 false，那些房间里永远梭不了哈。
+ * 每次从快照恢复都过一遍这里，以后再加设置项也不会重演。
+ */
+export function migrateRoom(state: RoomState): RoomState {
+  state.settings = { ...DEFAULT_SETTINGS, ...(state.settings ?? {}) };
+  state.log ??= [];
+  state.chat ??= [];
+  state.roundNo ??= 0;
+  state.firstActorSeat ??= 0;
+  state.turnDeadline ??= null;
+  state.actionSeq ??= 0;
+  state.createdAt ??= Date.now();
+  for (const p of state.players ?? []) {
+    p.avatar ||= AVATARS[0];
+    p.bet ??= 0;
+    p.wins ??= 0;
+    p.online ??= false;
+  }
+  return state;
+}
+
 export function activePlayers(state: RoomState): PlayerState[] {
   return state.players.filter((p) => p.status === 'active');
 }
@@ -435,9 +461,22 @@ export function allInCost(state: { players: { status: PlayerStatus; chips: numbe
   return stacks.length ? Math.max(0, Math.min(...stacks)) : 0;
 }
 
-/** 主动梭哈的开放轮次。跟不起时的被动梭哈不受这个限制。 */
-export function canAllInNow(state: { roundNo: number; settings: { allInFromRound: number } }): boolean {
-  return state.roundNo >= state.settings.allInFromRound;
+/**
+ * 梭哈什么时候可用。两个条件满足其一即可：
+ *  1. 牌局已经打过设定的轮数（默认第 3 轮起），前面的下注博弈已经走完；
+ *  2. 场上有人已经跟不起了 —— 这时候梭哈本来就是自然的收场方式，
+ *     没必要逼那个人干等到第 3 轮。
+ */
+export function canAllInNow(state: {
+  roundNo: number;
+  betUnit: number;
+  players: { status: PlayerStatus; chips: number; looked: boolean }[];
+  settings: { allInFromRound: number };
+}): boolean {
+  if (state.roundNo >= (state.settings.allInFromRound ?? 3)) return true;
+  return state.players.some(
+    (p) => p.status === 'active' && p.chips <= state.betUnit * (p.looked ? 2 : 1),
+  );
 }
 
 export function canCompareNow(state: {

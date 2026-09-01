@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   allInCost as calcAllIn, callCost as calcCall, canAllInNow, canAutoStart, canCompareNow,
   EMOTES, evaluateHand, type GameCommand, type PublicPlayer, type PublicRoom,
@@ -35,8 +35,35 @@ export function ActionBar({
   const canShove = me.chips > 0 && active.length > 1 && (shoveOpen || shoveForced);
   const handType = me.looked && me.hand.length === 3 ? evaluateHand(me.hand).name : null;
   const shove = room.allIn;
+  // 兜底：万一房间是老快照，别把 undefined 显示出来
+  const allInFrom = room.settings.allInFromRound ?? 3;
 
   const tiers = room.settings.betOptions.filter((x) => x > room.betUnit);
+  /**
+   * 自动跟注（挂机）。跟不起时自动改成梭哈，正好是「钱没了自动梭哈比牌」。
+   * 有人梭哈时会自动关掉交还给人 —— 接不接一个全场开牌的注，不该由一个勾选框替你决定。
+   */
+  const [autoCall, setAutoCall] = useState(false);
+  const firedRef = useRef('');
+  useEffect(() => {
+    if (!autoCall) return;
+    if (shove) {
+      setAutoCall(false);
+      return;
+    }
+    if (!myTurn || me.status !== 'active') return;
+    const token = `${room.handNo}:${room.turnCount}`;
+    if (firedRef.current === token) return;
+    firedRef.current = token;
+    const t = setTimeout(() => {
+      if (me.chips > cost) cmd({ type: 'call' });
+      else if (me.chips > 0) cmd({ type: 'all_in' });
+      else cmd({ type: 'fold' });
+    }, 450);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoCall, myTurn, !!shove, room.handNo, room.turnCount]);
+
   // 非自己回合弃牌要点两次 —— 用原生 confirm 会打断节奏，手机上尤其难受
   const [armFold, setArmFold] = useState(false);
   useEffect(() => {
@@ -173,25 +200,24 @@ export function ActionBar({
           <button className="btn primary" disabled={!myTurn || !canCall} onClick={() => cmd({ type: 'call' })}>
             跟注 {fmt(cost)}
           </button>
-          <button
-            className="btn allin"
-            disabled={!myTurn || !canShove}
-            title={
-              canShove
-                ? `你先出 ${fmt(shovePrice)}（场上最少的一家），其他人自己选接或弃`
-                : `第 ${room.settings.allInFromRound} 轮起才能主动梭哈`
-            }
-            onClick={() => cmd({ type: 'all_in' })}
-          >
-            {shoveOpen || shoveForced ? `梭哈 ${fmt(shovePrice)}` : `梭哈 第${room.settings.allInFromRound}轮起`}
-          </button>
+          {/* 条件不满足时干脆不显示，而不是摆一个点不动的按钮 */}
+          {canShove && (
+            <button
+              className="btn allin"
+              disabled={!myTurn}
+              title={`你先出 ${fmt(shovePrice)}（场上最少的一家），其他人自己选接或弃`}
+              onClick={() => cmd({ type: 'all_in' })}
+            >
+              梭哈 {fmt(shovePrice)}
+            </button>
+          )}
         </div>
       )}
 
       {/* 加注档位平铺成一排，点一下就走 —— 下拉框要点两次还挡住牌桌 */}
-      {me.status === 'active' && !shove && tiers.length > 0 && (
+      {me.status === 'active' && !shove && (
         <div className="raise-row">
-          <span>加注到</span>
+          {tiers.length > 0 && <span>加注到</span>}
           {tiers.map((x) => (
             <button
               key={x}
@@ -203,6 +229,13 @@ export function ActionBar({
               {fmt(x)}
             </button>
           ))}
+          <button
+            className={`btn auto${autoCall ? ' on' : ''}`}
+            title="自动跟注；跟不起时自动梭哈。有人梭哈会自动交还给你决定"
+            onClick={() => setAutoCall((v) => !v)}
+          >
+            {autoCall ? '● 自动跟注中' : '自动跟注'}
+          </button>
         </div>
       )}
 

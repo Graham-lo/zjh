@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   allInCost, applyCommand, botDecision, canAllInNow, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
   compareHands, createHumanPlayer, createInitialRoom, currentPlayer, evaluateHand,
-  handPercentile, sanitizeRoom, startRound, timeoutCurrentPlayer, transferHost,
+  handPercentile, migrateRoom, sanitizeRoom, startRound, timeoutCurrentPlayer, transferHost,
   type Card, type RoomState,
 } from '../shared/game.ts';
 
@@ -251,6 +251,28 @@ test('表态阶段超时按不接处理，牌局仍然会结束', () => {
     timeoutCurrentPlayer(room);
   }
   assert.equal(room.phase, 'round_end');
+});
+
+test('老快照缺字段时会被补齐，不会出现 undefined 轮', () => {
+  const room = makeRoom(2);
+  // 模拟一个在 allInFromRound 上线之前存下来的房间
+  delete (room.settings as Partial<typeof room.settings>).allInFromRound;
+  delete (room.settings as Partial<typeof room.settings>).maxRounds;
+  migrateRoom(room);
+  assert.equal(room.settings.allInFromRound, 3);
+  assert.equal(room.settings.maxRounds, 8);
+  assert.equal(typeof room.settings.allInFromRound, 'number');
+});
+
+test('场上有人跟不起时，梭哈提前开放', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  assert.equal(room.roundNo, 1);
+  assert.equal(canAllInNow(room), false, '第一轮且人人有钱时不该开放');
+
+  // 让一个人跟不起，梭哈就该提前可用
+  room.players.find((p) => p.status === 'active')!.chips = 50;
+  assert.equal(canAllInNow(room), true);
 });
 
 test('前两轮不能主动梭哈', () => {
