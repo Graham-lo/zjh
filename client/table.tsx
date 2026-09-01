@@ -564,6 +564,7 @@ export function Table({
               isMe={player.id === me.id}
               isHost={room.hostId === player.id}
               isTurn={room.phase === 'playing' && room.turnSeat === player.seat}
+              playing={room.phase === 'playing'}
               deadline={room.turnDeadline}
               turnSeconds={room.settings.turnSeconds}
               handNo={room.handNo}

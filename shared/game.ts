@@ -44,6 +44,15 @@ export interface PlayerState {
   ready: boolean;
   status: PlayerStatus;
   looked: boolean;
+  /**
+   * 输赢已经在牌面上定过，结算时对全场公开。
+   *
+   * 和 `folded` 的区别是「怎么出局的」：主动弃牌的人是自己选择退出，牌不该被人看；
+   * 被比牌比下去、被封顶/梭哈开牌比下去的人是被牌面淘汰的，那手牌已经摆上过桌面，
+   * 全场有权知道谁是被什么牌打掉的。比牌的胜方同样置位 —— 只亮输家不亮赢家，
+   * 别人只会看到有人被比掉却不知道被什么牌比掉，那是更难受的半截信息。
+   */
+  bared: boolean;
   hand: Card[];
   isBot: boolean;
   /** 跨房间跨会话的账户 id。换个房间还是同一个人，积分接着上次 */
@@ -87,7 +96,7 @@ export interface RoundResult {
   reason: string;
   /** 本局每个人的净盈亏：赢家 = 底池 - 自己投入，其他人 = -自己投入 */
   deltas: { id: string; name: string; avatar: string; delta: number; bet: number; net: number }[];
-  /** 只有走到摊牌的玩家会亮牌，中途弃牌的人不亮 */
+  /** 输赢在牌面上定过的人都会亮牌（摊牌方、比牌双方）；只有主动弃牌的人不亮 */
   revealed: string[];
   hands: Record<string, Card[]>;
 }
@@ -318,6 +327,7 @@ export function createHumanPlayer(
     ready: false,
     status: 'waiting',
     looked: false,
+    bared: false,
     hand: [],
     isBot: false,
     net: 0,
@@ -379,6 +389,7 @@ export function migrateRoom(state: RoomState): RoomState {
     p.wins ??= 0;
     p.net ??= 0;
     p.granted ??= 0;
+    p.bared ??= false;
     p.online ??= false;
   }
   return state;
@@ -556,7 +567,10 @@ function finishRound(state: RoomState, winner: PlayerState, reason: string, reve
   state.turnSeat = null;
   state.turnDeadline = null;
   state.phase = 'round_end';
-  const revealIds = revealed.map((p) => p.id);
+  // 摊牌名单 = 这一下终局摊出来的人 ∪ 本局所有「牌面上定过输赢」的人。
+  // 后半截是关键：中途被比牌比下去的人已经是 folded，等牌局绕到别的路径结束时
+  // 谁也不会再把他放进 revealed，他那手已经亮给对手看过的牌就永远消失了。
+  const revealIds = [...new Set([...revealed, ...state.players.filter((p) => p.bared)].map((p) => p.id))];
   state.result = {
     winnerId: winner.id,
     winnerName: winner.name,
@@ -574,14 +588,14 @@ function finishRound(state: RoomState, winner: PlayerState, reason: string, reve
 /**
  * 只剩一个人时收锅。
  *
- * 默认不亮牌 —— 大家都弃了，没人摊过牌，赢家没有义务把牌给人看。
- * 但如果这一锅是被一次比牌收掉的，比牌双方的牌就得公开：
- * 那是真的摊过牌了，全场不该连谁大谁小都不知道。
+ * 这里不额外指定摊牌名单 —— 大家都弃了、赢家不战而胜的局，赢家没有义务把牌给人看。
+ * 如果这一锅是被一次比牌收掉的，比牌双方早已在 doCompare 里被标成 `bared`，
+ * finishRound 会自己把他们并进摊牌名单，不需要在这里再传一次。
  */
-function maybeFinish(state: RoomState, reason = '其他玩家均已弃牌', revealed: PlayerState[] = []): boolean {
+function maybeFinish(state: RoomState, reason = '其他玩家均已弃牌'): boolean {
   const active = activePlayers(state);
   if (active.length !== 1) return false;
-  finishRound(state, active[0], reason, revealed);
+  finishRound(state, active[0], reason, []);
   return true;
 }
 
@@ -598,6 +612,8 @@ function forceShowdown(state: RoomState, initiator: PlayerState, reason: string)
     if (compareHands(winner.hand, target.hand, state.settings.special235) <= 0) winner = target;
   }
   for (const p of active) {
+    // 开牌是把牌摆到桌面上定胜负，赢的输的都不是自己退出的，结算时一律公开
+    p.bared = true;
     if (p.id !== winner.id) {
       p.status = 'folded';
       p.lastAction = `开牌负于 ${winner.name}`;
@@ -678,6 +694,7 @@ export function startRound(state: RoomState, actorId: string | null) {
 
   for (const p of seated) {
     p.looked = false;
+    p.bared = false;
     p.bet = 0;
     p.hand = [];
     p.lastAction = undefined;
@@ -869,10 +886,13 @@ function doCompare(state: RoomState, actorId: string, targetId: string) {
   loser.status = 'folded';
   loser.lastAction = `比牌负于 ${winner.name}`;
   winner.lastAction = `比牌胜 ${loser.name}`;
+  // 比过牌的两个人都是「牌面上定过输赢」的，本局无论最后怎么结束都要摊给全场。
+  // 局还没结束的中途，双方的牌仍然只有当事人互相看得到（走 seen），
+  // 旁观者要等到结算才看得见 —— 那才是真实牌桌上的规矩。
+  winner.bared = true;
+  loser.bared = true;
   pushLog(state, `${p.name} 与 ${target.name} 比牌，${loser.name} 出局`);
-  // 最后一手比牌直接终局：把这一对的牌摊给全场。
-  // 局还没结束的中途比牌仍然只有当事双方看得到 —— 那才是真实牌桌上的规矩。
-  if (maybeFinish(state, '比牌决出胜负', [winner, loser])) return;
+  if (maybeFinish(state, '比牌决出胜负')) return;
   if (p.status === 'active' && p.chips === 0) {
     forceShowdown(state, p, '比牌后积分打空，封顶开牌');
     return;
@@ -976,7 +996,7 @@ export function applyCommand(state: RoomState, actorId: string, command: GameCom
       const name = idx >= 0 ? BOT_NAMES[idx] : `电脑${seat + 1}`;
       state.players.push({
         id: randomId('bot'), name, avatar: BOT_AVATARS[idx >= 0 ? idx : 0], seat,
-        chips: state.settings.startingChips, ready: true, status: 'waiting', looked: false,
+        chips: state.settings.startingChips, ready: true, status: 'waiting', looked: false, bared: false,
         hand: [], isBot: true, online: true, bet: 0, wins: 0, net: 0, granted: 0,
       });
       pushLog(state, `${name}（电脑）加入房间`);
@@ -1049,6 +1069,7 @@ export function resetToLobby(state: RoomState) {
     }
     p.status = 'waiting';
     p.looked = false;
+    p.bared = false;
     p.hand = [];
     p.bet = 0;
     p.ready = p.isBot ? true : p.ready;
@@ -1189,7 +1210,14 @@ export function sanitizeRoom(state: RoomState, viewerId: string): PublicRoom {
     viewerId,
     players: state.players.map((p) => {
       const { tokenHash: _t, hand, ...safe } = p;
-      const show = (p.id === viewerId && p.looked) || visible(p.id);
+      // 自己的牌：看过了当然能看；被比掉出局的人也能看 —— 真实牌桌上比牌那一下
+      // 你本来就会把牌翻开，没道理闷着被比掉之后连自己那手是什么都不知道。
+      //
+      // 但**还在局里**的人即使比赢过也不给看：闷牌的代价就是看不见，换来的是半价下注。
+      // 比赢了就白拿一手信息、还继续按半价跟，等于绕开了看牌翻倍那道门槛。
+      // 这只放开「自己看自己」；旁观者仍然只走 publicIds/privateIds，中途不会提前泄露。
+      const beatenOut = p.bared && p.status === 'folded';
+      const show = (p.id === viewerId && (p.looked || beatenOut)) || visible(p.id);
       return { ...safe, hand: show ? hand.map((c) => ({ ...c })) : [], hasHand: hand.length === 3 };
     }),
   };

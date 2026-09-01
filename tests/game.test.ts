@@ -537,6 +537,71 @@ test('比牌直接收锅时，比牌双方的牌摊给全场', () => {
   assert.equal(seenByFolder.players.filter((p) => p.hand.length === 3).length, 2, '旁观者也看得到摊开的两家');
 });
 
+test('中途被比牌比下去的人，牌局继续也要在结算时亮牌', () => {
+  const room = makeRoom(4);
+  room.settings.escalateFrom = 0; // 别让自动升档把人打空，本局要走到封顶开牌
+  startRound(room, room.hostId);
+  room.turnCount = room.compareUnlockAt; // 解锁比牌
+
+  const b = currentPlayer(room)!; // 发起比牌的人
+  const rest = room.players.filter((p) => p.id !== b.id && p.status === 'active');
+  const a = rest[0]; // 闷牌被比下去的人
+  const c1 = rest[1]; // 中途主动弃牌的人
+  b.hand = [c(14, 'S'), c(14, 'H'), c(14, 'D')];
+  a.hand = [c(9, 'S'), c(7, 'H'), c(4, 'D')];
+  assert.equal(a.looked, false, 'A 全程闷牌');
+
+  applyCommand(room, b.id, { type: 'compare', targetId: a.id });
+  assert.equal(a.status, 'folded');
+  assert.equal(room.phase, 'playing', '还剩三家，牌局必须继续');
+
+  // 被比下去的当场就能看到自己那手牌，不用等结算
+  const midView = sanitizeRoom(room, a.id);
+  assert.equal(midView.players.find((p) => p.id === a.id)!.hand.length, 3, 'A 当场就该看得到自己的牌');
+  assert.equal(
+    sanitizeRoom(room, c1.id).players.filter((p) => p.hand.length === 3).length,
+    0,
+    '没参与比牌的人中途不该提前看到任何人的牌',
+  );
+
+  applyCommand(room, c1.id, { type: 'fold' }); // 主动弃牌的那一家
+  // 剩下的人一路跟到封顶开牌，本局由别的路径结束
+  let steps = 0;
+  while (room.phase === 'playing') {
+    applyCommand(room, currentPlayer(room)!.id, { type: 'call' });
+    assert.ok(++steps < 200, '一直跟注也必须收敛');
+  }
+
+  const revealed = room.result!.revealed;
+  assert.ok(revealed.includes(a.id), '被比下去的人必须亮牌 —— 他是被牌面淘汰的');
+  assert.ok(revealed.includes(b.id), '比牌的赢家也要亮，否则全场不知道 A 是被什么牌比掉的');
+  assert.equal(room.result!.hands[a.id]?.length, 3);
+  assert.equal(room.result!.hands[b.id]?.length, 3);
+  assert.equal(room.result!.hands[c1.id], undefined, '主动弃牌的人不该被亮牌');
+  assert.ok(!revealed.includes(c1.id));
+
+  // 从 A 自己的视角看结算：他能看到自己的牌
+  const view = sanitizeRoom(room, a.id);
+  assert.deepEqual(view.players.find((p) => p.id === a.id)!.hand, a.hand, 'A 结算时要看得到自己的牌');
+  assert.equal(view.result!.hands[c1.id], undefined, '弃牌的人在谁的视角里都不亮');
+});
+
+test('下一局开始时会清掉上一局的摊牌标记', () => {
+  const room = makeRoom(2);
+  startRound(room, room.hostId);
+  const actor = currentPlayer(room)!;
+  const other = room.players.find((p) => p.id !== actor.id)!;
+  applyCommand(room, actor.id, { type: 'compare', targetId: other.id });
+  assert.ok(room.players.some((p) => p.bared), '比过牌就该有人被标记');
+
+  applyCommand(room, room.hostId, { type: 'new_round' });
+  assert.ok(room.players.every((p) => !p.bared), '回到大厅时标记要清干净');
+  for (const p of room.players) p.ready = true;
+  startRound(room, room.hostId);
+  assert.ok(room.players.every((p) => !p.bared), '新的一局不该继承上一局的摊牌标记');
+  assert.equal(sanitizeRoom(room, room.hostId).players[0].hand.length, 0, '没看牌就不该看到自己的牌');
+});
+
 test('中途弃牌的人不会在结算时被亮牌', () => {
   const room = makeRoom(3);
   startRound(room, room.hostId);

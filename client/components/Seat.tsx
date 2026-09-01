@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 import { evaluateHand, type Card, type PublicPlayer } from '../../shared/game.ts';
 import { handRarity, PlayingCard, type CardTone } from './Card.tsx';
-import { Laurel } from './Icons.tsx';
+import { IconEye, Laurel } from './Icons.tsx';
 import { TurnRing } from './TurnRing.tsx';
 
 const fmt = (n: number) => n.toLocaleString('zh-CN');
@@ -71,6 +71,7 @@ export function Seat({
   isMe,
   isHost,
   isTurn,
+  playing,
   deadline,
   turnSeconds,
   handNo,
@@ -83,6 +84,8 @@ export function Seat({
   isMe: boolean;
   isHost: boolean;
   isTurn: boolean;
+  /** 本局是否进行中。「已看牌」只在牌局里才有意义，大厅和结算后不显示 */
+  playing: boolean;
   deadline: number | null;
   turnSeconds: number;
   handNo: number;
@@ -106,11 +109,23 @@ export function Seat({
     .filter(Boolean)
     .join(' ');
   const type = revealed ? evaluateHand(hand).name : null;
+  // 只标看过牌的人，闷牌的什么都不挂：全场都挂徽章等于没有信息，
+  // 用「有没有这个标」表达状态，扫一眼就知道谁看过牌。
+  // 手里真有牌才标 —— 等下局、已弃牌、大厅阶段挂着它只是占位置。
+  const showLooked = playing && player.looked && player.status === 'active' && (player.hasHand || revealed);
 
   return (
     <div className={classes} style={style}>
       {celebrating && <Laurel id={`laurel-${player.id}`} />}
       {player.bet > 0 && <span className="seat-bet">{fmt(player.bet)}</span>}
+      {/* 挂在座位左上角，和右上角的投注额凑成一对，而不是挤进名字那一行 ——
+          名字行只有 96px，再塞一个徽章会把「房主 + 已看牌」的人名挤成省略号 */}
+      {showLooked && (
+        <span className="tag looked" title="已经看过牌，之后下注翻倍">
+          <IconEye size={11} />
+          <i>已看牌</i>
+        </span>
+      )}
       <div className="seat-avatar">
         {isTurn && <TurnRing deadline={deadline} total={turnSeconds} />}
         <span className="avatar-glyph">{player.avatar}</span>

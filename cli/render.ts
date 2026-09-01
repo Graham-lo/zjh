@@ -507,6 +507,11 @@ export function renderRoom(input: RenderInput): string[] {
       p.isBot ? `${C.blue}电脑${C.reset}` : '',
       p.isAgent ? `${C.purple}AI${C.reset}` : '',
       !p.online && !p.isBot ? `${C.red}离线${C.reset}` : '',
+      // 只标看过牌的人，闷牌的不加任何标记：全场都挂标记等于没有信息，
+      // 「这一行有没有它」本身就是状态。手里真有牌才标，等下局/已弃牌时挂着它没意义。
+      room.phase === 'playing' && p.looked && p.status === 'active' && (p.hasHand || p.hand.length === 3)
+        ? `${C.gold}已看牌${C.reset}`
+        : '',
       room.phase === 'lobby' && !p.isBot ? (p.ready ? `${C.green}已准备${C.reset}` : `${C.dim}未准备${C.reset}`) : '',
     ]
       .filter(Boolean)

@@ -1921,3 +1921,35 @@ button { touch-action: manipulation; }
     transition-delay: 0ms !important;
   }
 }
+
+/* --------------------------------------------------- 座位上的「已看牌」标注
+
+   只标看过牌的人，闷牌的座位什么都不挂。两种状态都标的话每个座位都挂着徽章，
+   等于没有信息增量；用「有没有这个标」表达状态，一眼就扫得出谁看过牌。
+
+   位置挂在座位左上角，和右上角的 .seat-bet 凑成一对，而不是挤进名字那一行：
+   名字行在 --seat-w 190px 时只有 96px，一个「房主」加一个「已看牌」就占满，
+   人名会被压成一个省略号 —— 认人比认状态重要，不能让状态标把名字挤掉。
+
+   配色跟 .tag.host 同一族香槟金，但压暗一档并换成描边样式 ——
+   房主/电脑/AI 是身份，这个是本局的临时状态，不该比身份还抢眼。
+   动效一概不加：单个徽章不必抢戏，也就没有 reduced-motion 要照顾的地方。 */
+.tag.looked {
+  position: absolute; top: -9px; left: 11px;
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 6px 1px 5px;
+  background: rgba(10, 18, 13, 0.94);
+  border: 1px solid var(--gold-line);
+  color: #cbb083;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4);
+}
+.tag.looked i { font-style: normal; }
+.tag.looked svg { flex: 0 0 auto; opacity: 0.85; }
+
+@media (max-width: 780px) {
+  /* 手机上别人的座位只有 118px 宽，左上角的徽章带文字会顶到右上角的投注额：
+     退化成纯图标，一只睁眼本身就说清了「他看过牌」。
+     自己的座位在手机上是整幅屏宽，文字留着。 */
+  .seat:not(.is-me) .tag.looked { left: 8px; padding: 1px 3px; }
+  .seat:not(.is-me) .tag.looked i { display: none; }
+}

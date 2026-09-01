@@ -31,7 +31,7 @@ interface Asset {
   br: Buffer | null;
   type: string;
   etag: string;
-  immutable: boolean;
+  cacheControl: string;
 }
 
 const MIME: Record<string, string> = {
@@ -54,6 +54,20 @@ const MIME: Record<string, string> = {
   '.wav': 'audio/wav',
 };
 const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.json', '.svg', '.txt']);
+
+/**
+ * 缓存策略按路径分层：
+ *  - /assets/*：Vite 产物带内容哈希，永久缓存；
+ *  - /voice/ 下的音频：内容基本不变但文件名没有哈希，缓存一天，
+ *    过期后凭 ETag 重新验证（304）。/voice/manifest.json 不在此列，
+ *    保持 no-cache，这样新增/替换语音包时客户端能及时感知；
+ *  - 其余（index.html、manifest、图标等）：no-cache，每次凭 ETag 验证。
+ */
+function cacheControlFor(url: string, ext: string): string {
+  if (url.startsWith('/assets/')) return 'public, max-age=31536000, immutable';
+  if (url.startsWith('/voice/') && ext !== '.json') return 'public, max-age=86400';
+  return 'no-cache';
+}
 
 /**
  * 整个前端只有几百 KB，启动时一次读进内存并预压缩：
@@ -86,8 +100,7 @@ function loadAssets(dir: string): Map<string, Asset> {
           : null,
         type: MIME[ext] ?? 'application/octet-stream',
         etag: `"${createHash('sha1').update(body).digest('base64url').slice(0, 20)}"`,
-        // Vite 产物带内容哈希，可以放心长期缓存
-        immutable: url.startsWith('/assets/'),
+        cacheControl: cacheControlFor(url, ext),
       });
     }
   };
@@ -102,7 +115,8 @@ if (assets.size === 0) {
 
 function serveAsset(req: IncomingMessage, res: ServerResponse, asset: Asset) {
   if (req.headers['if-none-match'] === asset.etag) {
-    res.writeHead(304, { ETag: asset.etag });
+    // 304 也带 Cache-Control，让客户端刷新缓存有效期（对 /voice/ 的一天缓存尤其重要）
+    res.writeHead(304, { ETag: asset.etag, 'Cache-Control': asset.cacheControl });
     return res.end();
   }
   const accept = String(req.headers['accept-encoding'] ?? '');
@@ -110,7 +124,7 @@ function serveAsset(req: IncomingMessage, res: ServerResponse, asset: Asset) {
   const headers: Record<string, string> = {
     'Content-Type': asset.type,
     ETag: asset.etag,
-    'Cache-Control': asset.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+    'Cache-Control': asset.cacheControl,
     Vary: 'Accept-Encoding',
   };
   if (asset.br && accept.includes('br')) {

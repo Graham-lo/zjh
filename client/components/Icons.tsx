@@ -92,6 +92,20 @@ export const IconClose = (p: P) => (
   </Svg>
 );
 
+/**
+ * 睁眼：座位上的「已看牌」徽章。
+ *
+ * 只有看过牌的人才挂这个标 —— 闷牌不标，用「没有徽章」表示，
+ * 一眼扫过去挂着眼睛的就是看过牌的，比两种状态都标干净。
+ * 徽章只有十来个像素，描边要比通用图标粗一点才不糊成一团。
+ */
+export const IconEye = (p: P) => (
+  <Svg strokeWidth={2} {...p}>
+    <path d="M2 12s3.7-6.6 10-6.6S22 12 22 12s-3.7 6.6-10 6.6S2 12 2 12Z" />
+    <circle cx="12" cy="12" r="2.9" />
+  </Svg>
+);
+
 /** 结算面板上落在赢家头顶的桂冠。实心渐变，和线稿图标不是一路，单独画。 */
 export function Laurel({ id = 'laurel' }: { id?: string }) {
   return (
