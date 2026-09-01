@@ -201,13 +201,19 @@ export function Table({
 
   if (!me) return <div className="loading">正在回到牌桌…</div>;
 
-  const invite = () => {
-    const url = `${location.origin}/?room=${room.code}`;
+  const copy = (text: string, okMsg: string) => {
     navigator.clipboard
-      ?.writeText(url)
-      .then(() => onToast('邀请链接已复制，发给好友即可'))
+      ?.writeText(text)
+      .then(() => onToast(okMsg))
       .catch(() => onToast(`房间号 ${room.code}`));
   };
+  const invite = () => copy(`${location.origin}/?room=${room.code}`, '邀请链接已复制，发给好友即可');
+  // 命令行客户端由服务器本身分发，朋友不用 clone 仓库
+  const inviteCli = () =>
+    copy(
+      `curl -fsSL ${location.origin}/cli.mjs -o zjh.mjs && node zjh.mjs "${location.origin}/?room=${room.code}"`,
+      '命令行加入命令已复制（需要对方装了 Node 22+）',
+    );
 
   const result = room.result;
   const showdownHands = result?.hands ?? {};
@@ -318,7 +324,7 @@ export function Table({
         </div>
       </section>
 
-      <ActionBar room={room} me={me as PublicPlayer} cmd={cmd} onInvite={invite} />
+      <ActionBar room={room} me={me as PublicPlayer} cmd={cmd} onInvite={invite} onInviteCli={inviteCli} />
       <EmoteBar cmd={cmd} />
 
       <Dock room={room} cmd={cmd} open={dockOpen} onToggle={setDockOpen} unread={unread} />

@@ -103,18 +103,50 @@ test('走到摊牌（梭哈被接受）之后，视图里才会出现别人的�
   assert.equal(view.players.filter((p) => p.cards).length, 3, '三家都接了梭哈，三家都亮牌');
 });
 
-test('比牌决出胜负时不向全桌公开牌面', () => {
-  // 当前规则：只有 forceShowdown 才算摊牌。比牌是两个人之间的事，
-  // 公开给全桌会把信息泄露给没参与的人。
+test('比牌只让当事双方互相看到，旁观者看不到', () => {
+  const room = table(3);
+  startRound(room, room.hostId);
+  const a = currentPlayer(room)!;
+  const b = room.players.find((p) => p.status === 'active' && p.id !== a.id)!;
+  const bystander = room.players.find((p) => p.id !== a.id && p.id !== b.id)!;
+  room.turnCount = room.compareUnlockAt; // 解锁比牌
+
+  applyCommand(room, a.id, { type: 'compare', targetId: b.id });
+
+  // 当事双方：互相看得到对方的牌
+  const seenByA = tableView(sanitizeRoom(room, a.id)).players.filter((p) => p.cards).map((p) => p.name);
+  const seenByB = tableView(sanitizeRoom(room, b.id)).players.filter((p) => p.cards).map((p) => p.name);
+  assert.ok(seenByA.includes(b.name), 'A 应该看得到 B 的牌');
+  assert.ok(seenByB.includes(a.name), 'B 应该看得到 A 的牌');
+
+  // 旁观者：一张都看不到
+  const seenByC = tableView(sanitizeRoom(room, bystander.id)).players.filter((p) => p.cards).map((p) => p.name);
+  assert.deepEqual(seenByC, [], '没参与比牌的人什么都不该看到');
+});
+
+test('比牌的可见性只在本局有效，下一局清空', () => {
   const room = table(2);
   startRound(room, room.hostId);
-  const actor = currentPlayer(room)!;
-  const other = room.players.find((p) => p.id !== actor.id)!;
-  applyCommand(room, actor.id, { type: 'compare', targetId: other.id });
-  assert.equal(room.phase, 'round_end');
-  assert.deepEqual(room.result?.revealed, []);
-  const view = tableView(sanitizeRoom(room, actor.id));
-  assert.equal(view.players.filter((p) => p.cards).length, 0);
+  const a = currentPlayer(room)!;
+  const b = room.players.find((p) => p.id !== a.id)!;
+  applyCommand(room, a.id, { type: 'compare', targetId: b.id });
+  assert.ok(sanitizeRoom(room, a.id).players.find((p) => p.id === b.id)!.hand.length === 3);
+
+  applyCommand(room, room.hostId, { type: 'new_round' });
+  for (const p of room.players) p.ready = true;
+  startRound(room, room.hostId);
+  const still = sanitizeRoom(room, a.id).players.filter((p) => p.id !== a.id && p.hand.length === 3);
+  assert.deepEqual(still, [], '上一局比过牌，这一局不该还看得到');
+});
+
+test('下发的房间视图里不含 seen 记账', () => {
+  const room = table(3);
+  startRound(room, room.hostId);
+  const a = currentPlayer(room)!;
+  const b = room.players.find((p) => p.status === 'active' && p.id !== a.id)!;
+  room.turnCount = room.compareUnlockAt;
+  applyCommand(room, a.id, { type: 'compare', targetId: b.id });
+  assert.equal('seen' in sanitizeRoom(room, a.id), false);
 });
 
 test('视图带上了牌桌记录和聊天，命令行才有氛围', () => {

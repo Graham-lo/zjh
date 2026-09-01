@@ -12,11 +12,13 @@ export function ActionBar({
   me,
   cmd,
   onInvite,
+  onInviteCli,
 }: {
   room: PublicRoom;
   me: PublicPlayer;
   cmd(c: GameCommand): void;
   onInvite(): void;
+  onInviteCli(): void;
 }) {
   const isHost = room.hostId === me.id;
   const myTurn = room.phase === 'playing' && room.turnSeat === me.seat && me.status === 'active';
@@ -99,6 +101,9 @@ export function ActionBar({
             <>
               <button className="btn" onClick={onInvite}>
                 邀请好友
+              </button>
+              <button className="btn" title="复制一条命令，朋友粘到终端就能进这个房间" onClick={onInviteCli}>
+                命令行加入
               </button>
               {isHost && (
                 <button className="btn" onClick={() => cmd({ type: 'add_bot' })}>

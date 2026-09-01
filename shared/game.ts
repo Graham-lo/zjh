@@ -108,6 +108,12 @@ export interface RoomState {
   log: LogEntry[];
   chat: ChatEntry[];
   createdAt: number;
+  /**
+   * 定向可见：seen[观看者id] = 他有权看到底牌的玩家 id 列表。
+   * 比牌是两个人之间的事 —— 双方互相看到对方的牌，没参与的人什么都看不到，
+   * 这和真实牌桌一致。全桌公开的摊牌走 result.revealed，两者互不干扰。
+   */
+  seen?: Record<string, string[]>;
   /** 有人梭哈后等待其他玩家表态；只有接受的人才会进入开牌 */
   allIn?: PendingAllIn;
   result?: RoundResult;
@@ -351,6 +357,7 @@ export function migrateRoom(state: RoomState): RoomState {
   state.log ??= [];
   state.chat ??= [];
   state.roundNo ??= 0;
+  state.seen ??= {};
   state.firstActorSeat ??= 0;
   state.turnDeadline ??= null;
   state.actionSeq ??= 0;
@@ -362,6 +369,13 @@ export function migrateRoom(state: RoomState): RoomState {
     p.online ??= false;
   }
   return state;
+}
+
+/** 让 viewer 从此看得到 subject 的底牌（本局有效） */
+function markSeen(state: RoomState, viewerId: string, subjectId: string) {
+  state.seen ??= {};
+  const list = (state.seen[viewerId] ??= []);
+  if (!list.includes(subjectId)) list.push(subjectId);
 }
 
 export function activePlayers(state: RoomState): PlayerState[] {
@@ -629,6 +643,7 @@ export function startRound(state: RoomState, actorId: string | null) {
   state.compareUnlockAt = Math.max(2, entrants.length);
   state.result = undefined;
   state.allIn = undefined;
+  state.seen = {};
 
   for (const p of seated) {
     p.looked = false;
@@ -814,6 +829,9 @@ function doCompare(state: RoomState, actorId: string, targetId: string) {
   if (target.id === p.id || target.status !== 'active') throw new GameError('比牌对象无效');
   const cost = compareCost(state, p);
   pay(state, p, cost);
+  // 比牌 = 两个人把牌亮给对方看。双方互相可见，其他人看不到。
+  markSeen(state, p.id, target.id);
+  markSeen(state, target.id, p.id);
   const result = compareHands(p.hand, target.hand, state.settings.special235);
   const loser = result > 0 ? target : p;
   const winner = result > 0 ? p : target;
@@ -1002,6 +1020,7 @@ export function resetToLobby(state: RoomState) {
   state.phase = 'lobby';
   state.result = undefined;
   state.allIn = undefined;
+  state.seen = {};
   state.turnSeat = null;
   state.turnDeadline = null;
   state.pot = 0;
@@ -1107,13 +1126,33 @@ export type PublicRoom = Omit<RoomState, 'players'> & { players: PublicPlayer[];
 
 /** 生成给某个玩家看的房间视图：别人的暗牌永远不出现在响应里。 */
 export function sanitizeRoom(state: RoomState, viewerId: string): PublicRoom {
-  const revealed = new Set(state.result?.revealed ?? []);
+  const publicIds = new Set(state.result?.revealed ?? []);
+  // 只有这个观看者有权看到的人（比牌对手），别人拿不到
+  const privateIds = new Set(state.seen?.[viewerId] ?? []);
+  const visible = (id: string) => publicIds.has(id) || privateIds.has(id);
+
+  // 结算面板同样按观看者裁剪：比牌双方能看到彼此，旁观者只看到公开摊牌的部分
+  let result = state.result;
+  if (result) {
+    const shown = state.players.filter((p) => p.hand.length === 3 && visible(p.id)).map((p) => p.id);
+    result = {
+      ...result,
+      revealed: shown,
+      hands: Object.fromEntries(
+        state.players.filter((p) => shown.includes(p.id)).map((p) => [p.id, p.hand.map((c) => ({ ...c }))]),
+      ),
+    };
+  }
+
+  // seen 是服务端的记账，没必要下发（它能透露谁和谁比过牌）
+  const { seen: _seen, ...rest } = state;
   return {
-    ...state,
+    ...rest,
+    result,
     viewerId,
     players: state.players.map((p) => {
       const { tokenHash: _t, hand, ...safe } = p;
-      const show = (p.id === viewerId && p.looked) || revealed.has(p.id);
+      const show = (p.id === viewerId && p.looked) || visible(p.id);
       return { ...safe, hand: show ? hand.map((c) => ({ ...c })) : [], hasHand: hand.length === 3 };
     }),
   };
