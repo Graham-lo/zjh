@@ -1,0 +1,6 @@
+# Caddy 会自动申请并续期 HTTPS 证书，WebSocket 升级也不用额外配置。
+# 安装：sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+zjh.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8787
+}

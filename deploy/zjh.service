@@ -1,0 +1,41 @@
+# 安装：
+#   sudo cp deploy/zjh.service /etc/systemd/system/zjh.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now zjh
+[Unit]
+Description=好友炸金花
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zjh
+Group=zjh
+WorkingDirectory=/opt/zjh
+ExecStart=/usr/bin/node /opt/zjh/dist/server.mjs
+Restart=always
+RestartSec=2
+
+Environment=NODE_ENV=production
+# 只监听回环，公网流量一律走反向代理
+Environment=HOST=127.0.0.1
+Environment=PORT=8787
+Environment=ZJH_DB=/var/lib/zjh/zjh.db
+# 在反向代理后面才打开，否则限流会被伪造的 X-Forwarded-For 绕过
+Environment=ZJH_TRUST_PROXY=1
+
+# 基础加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/zjh
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

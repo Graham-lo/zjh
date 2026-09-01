@@ -1,36 +1,49 @@
-# 好友炸金花 · ChatGPT Sites
+# 好友炸金花
 
-一个面向好友私下娱乐的 2–6 人房间制炸金花。项目按 OpenAI 官方 ChatGPT Sites Vinext starter 的当前运行方式组织，使用 D1 保存权威房间状态。
+2–6 人的私人房间制炸金花。开房、发链接、坐下就打；虚拟积分仅供娱乐，**不充值、不转让、不提现、不兑换**。
 
-## 已实现
+面向"几个朋友一起玩"这一个场景做的：牌局状态放在服务器内存里，通过 WebSocket 主动推送，
+别人行动到你屏幕上更新通常在 20–40ms 量级，而不是靠轮询等半秒。
 
-- 系统自动分配昵称；6 位房间号 + 一键加入邀请链接
-- 2–6 名真人好友，房主可添加电脑玩家补位
-- 服务端权威洗牌与发牌
-- 玩家未“看牌”前，API 连自己的底牌都不会返回，避免浏览器开发者工具偷看
-- 跟注、加注、弃牌、比牌、封顶梭哈
-- 豹子 > 同花顺 > 同花 > 顺子 > 对子 > 单张
-- A23 作为最小顺子；默认开启不同花 235 克豹子规则
-- 看牌后下注成本翻倍
-- 只剩两名活跃玩家时立即开放比牌；其他情况按房规在首轮后开放
-- 比牌消耗为当前跟注额的 2 倍；积分不足跟注时可梭哈并强制所有在局玩家依次开牌
-- D1 + 乐观并发控制，避免两名玩家同时操作覆盖状态
-- 房主退出时自动把房主身份移交给仍在线的真人；掉线玩家可由房主代弃
-- 进行中也可加入房间并等待下一局
-- 前台约 550ms、后台约 1.8s 的非重叠状态同步；成员加入会即时更新人数并提示
-- 本地 token 断线重进同一浏览器可恢复身份
-- 桌面与手机响应式牌桌
-- 虚拟积分：默认 10,000，底注 100；不充值、不转让、不提现、不兑换
+## 技术形态
 
-## 为什么默认没有用 WebSocket 广播
+一个 Node 进程 + 一个反向代理，没有任何平台绑定，能跑 Node 22+ 的 VPS 都能部署。
 
-ChatGPT Sites 当前明确支持 WebSocket，但官方公开文档没有给出一个适合多人房间的“跨实例共享 WebSocket 房间协调器”约束。为了不把正确性建立在单进程内存上，本版本把 D1 当作唯一权威状态并用短轮询同步。6 人回合制牌局的负载很低，且多实例部署时更稳。
+```
+浏览器 ──WebSocket──> Node 单进程（房间状态在内存里，权威）
+                          │
+                          └─ node:sqlite 快照（重启后牌局还在，不在热路径上）
+```
 
-后续若 Sites 提供明确的持久房间协调 primitive，可以在不改游戏状态机的前提下把同步层替换成 WebSocket 推送。
+| 目录 | 内容 |
+| --- | --- |
+| `shared/` | 游戏内核（发牌、牌型、状态机、机器人 AI）与协议类型。运行时无关，服务端 / 客户端 / 测试共用同一份 |
+| `server/` | HTTP + WebSocket 服务端、房间管理与定时器、SQLite 快照 |
+| `client/` | React 前端（Vite 构建的纯静态 SPA） |
+| `tests/` | `node:test` 单元测试与机器人收敛回归测试 |
+| `deploy/` | systemd / Caddy / nginx 配置与安装脚本 |
 
-## 本地
+服务端只在启动时把前端产物读进内存并预压缩（brotli + gzip），之后每个静态请求都是内存里的
+Buffer，配合 ETag 与长缓存，不碰磁盘。
 
-需要 Node.js >= 22.13。
+## 玩法
+
+- 6 位房间号 + 一键复制邀请链接；自定义昵称和头像，朋友能一眼认出谁是谁
+- 2–6 名真人，房主可以加电脑玩家补位；进行中也能加入，等下一局入座
+- 服务端权威洗牌发牌。**别人的暗牌根本不会离开服务器进程**，开发者工具里也偷不到
+- 豹子 > 同花顺 > 同花 > 顺子 > 对子 > 单张；A23 是最小顺子；默认开启不同花 235 克豹子
+- 看牌随时可以看（点自己的牌就行），看牌后下注成本翻倍
+- 跟注、加注、弃牌、比牌、封顶梭哈；比牌花当前跟注额的 2 倍
+- 只剩两名玩家时立即开放比牌，其余情况走满一轮后开放
+- **每局一定会结束**：打满 8 轮强制全员开牌，且从第 3 轮起每两轮自动升一档底注
+- 每步行动 30 秒倒计时，超时自动弃牌；房主掉线 20 秒后自动移交给还在线的真人
+- 只有"已准备且在线"的人入局，掉线的人保留座位等下一局
+- 结算只亮走到摊牌的人的牌，中途弃牌的人不亮
+- 聊天、表情、牌桌记录；断线自动重连并恢复座位
+
+## 本地开发
+
+需要 Node 22.5 以上（用到内置的 `node:sqlite`）。
 
 ```bash
 npm install
@@ -38,16 +51,79 @@ npm test
 npm run dev
 ```
 
-## 部署到 ChatGPT Sites
+`npm run dev` 会同时起两个进程：Vite 前端在 `http://localhost:5173`（带 HMR），
+Node 服务端在 8787，`/ws` 由 Vite 代理过去。开发用的数据库是 `.dev.db`。
 
-`.openai/hosting.json` 已声明 D1 binding 为 `DB`，并绑定到本项目对应的 Site。
+其他命令：
 
-在 ChatGPT Work / Sites 中打开此项目后要求：
+```bash
+npm run typecheck   # tsc --noEmit
+npm run build       # 产出 dist/client 静态文件 + dist/server.mjs
+npm start           # 跑构建产物
+```
 
-> Deploy this project with Sites. Reuse the project_id and provisioned D1 database declared through .openai/hosting.json. Run the tests and build first. Save a version, deploy it, and keep the Site public so anyone with the URL can join a private room. Do not add payments, purchases, cash value, transfers, withdrawals, prizes, or any real-money functionality.
+## 部署到 VPS
 
-首次发布后把 Site URL 发给好友即可。房间仍由 6 位房间号隔离。
+构建产物是自包含的：`dist/server.mjs` 里已经打包了 `ws`，VPS 上**不需要 node_modules**，
+只要有 `node` 和 `dist/` 目录。
+
+```bash
+# 1. 在本机或 CI 上构建
+npm ci && npm test && npm run build
+
+# 2. 把代码和产物同步到服务器
+rsync -a --delete dist/ deploy/ package.json  你的服务器:/tmp/zjh-release/
+
+# 3. 在服务器上安装（建 zjh 用户、装 systemd 单元、启动）
+cd /tmp/zjh-release && sudo bash deploy/install.sh
+
+# 4. 配置反向代理拿 HTTPS（Caddy 最省事，会自动签证书）
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # 记得改域名
+sudo systemctl reload caddy
+```
+
+用 nginx 的话见 `deploy/nginx.conf` —— **必须显式转发 `Upgrade` / `Connection` 头**，
+否则 WebSocket 连不上，页面会一直显示"重连中"。
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` | `8787` | 监听端口 |
+| `HOST` | `0.0.0.0` | 监听地址。放在反向代理后面建议设成 `127.0.0.1` |
+| `ZJH_DB` | `dist/../zjh.db` | SQLite 快照路径。生产环境指到独立的数据目录 |
+| `ZJH_CLIENT` | `dist/client` | 前端产物目录 |
+| `ZJH_TRUST_PROXY` | 关闭 | 设成 `1` 才会信任 `X-Forwarded-For`。**只有在反向代理后面才开**，否则限流可以被伪造的头绕过 |
+
+### 运维
+
+```bash
+curl -s localhost:8787/healthz          # 房间数、在线人数、连接数、运行时长
+sudo journalctl -u zjh -f               # 日志
+sudo systemctl restart zjh              # 重启（进行中的牌局会从快照恢复）
+sudo sqlite3 /var/lib/zjh/zjh.db .dump > backup.sql   # 备份
+```
+
+更新版本时把新的 `dist/` 同步上去再 `systemctl restart zjh`。**静态资源是启动时读进内存的，
+所以换了前端产物必须重启进程**，光替换文件不会生效。
+
+内存占用大约几十 MB。房间没人连接 30 分钟后从内存卸载，快照保留 3 天后清理。
+
+## 一些设计取舍
+
+**为什么不用数据库做权威状态。** 只有几个朋友同时玩，不需要多实例，也就不需要为跨实例一致性
+付出每次操作读写数据库的代价。状态放内存后，一次操作是一次函数调用（微秒级），省下的延迟
+全部用来做推送、动画和倒计时。SQLite 只负责"进程挂了别丢牌局"。
+
+**为什么每局强制封顶。** 早期版本的机器人在小注下永远达不到弃牌阈值，几个机器人会互相跟注到
+循环上限，然后整个房间永久卡死（真人此时发任何指令都会被"还没轮到你"挡回去）。
+现在有两层保险：机器人用底池赔率决策，且**打满 8 轮无条件强制开牌**。
+`tests/bots.test.ts` 里有针对这个死局的回归测试。
+
+**为什么弃牌的人不亮牌。** 亮牌会泄露对手的弃牌习惯，跨局累积就成了信息优势。只有走到摊牌的人
+才亮牌，这也是正常牌桌的规矩。
 
 ## 说明
 
-这是纯娱乐积分游戏。代码没有充值、提现、积分转移、奖品、现金或虚拟资产兑换能力，也不应添加这些能力。
+这是纯娱乐积分游戏。代码里没有充值、提现、积分转移、奖品、现金或虚拟资产兑换的能力，
+也不应该添加这些能力。

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+    <meta name="theme-color" content="#08110e" />
+    <meta name="color-scheme" content="dark" />
+    <title>好友炸金花</title>
+    <meta name="description" content="2–6 人私人房间炸金花，纯娱乐虚拟积分，不充值不提现。" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="好友炸金花" />
+    <meta property="og:description" content="点开就能玩的私人牌桌：6 位房间号，2–6 人，纯娱乐虚拟积分。" />
+    <meta property="og:image" content="/og.svg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+    <script>
+      // 首屏之前就把音效偏好读出来，避免开关闪一下
+      try { window.__zjhSound = localStorage.getItem('zjh:sound') !== 'off'; } catch { window.__zjhSound = true; }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

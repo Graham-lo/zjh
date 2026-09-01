@@ -10,3 +10,7 @@ dist/
 .DS_Store
 *.log
 *.tsbuildinfo
+*.db
+*.db-wal
+*.db-shm
+.dev.db*

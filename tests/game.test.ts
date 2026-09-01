@@ -1,118 +1,254 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compareCost, compareHands, createHumanPlayer, createInitialRoom, evaluateHand, startRound, applyCommand, type Card } from '../lib/game.ts';
+import {
+  applyCommand, botDecision, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
+  compareHands, createHumanPlayer, createInitialRoom, currentPlayer, evaluateHand,
+  handPercentile, sanitizeRoom, startRound, transferHost,
+  type Card, type RoomState,
+} from '../shared/game.ts';
 
 const c = (rank: number, suit: Card['suit']): Card => ({ rank, suit });
 
-test('hand ranking: straight flush beats flush, flush beats straight', () => {
-  assert.equal(compareHands([c(10,'H'),c(11,'H'),c(12,'H')],[c(14,'S'),c(9,'S'),c(4,'S')]), 1);
-  assert.equal(compareHands([c(14,'S'),c(9,'S'),c(4,'S')],[c(10,'H'),c(11,'D'),c(12,'C')]), 1);
+function makeRoom(humans: number, bots = 0): RoomState {
+  const host = createHumanPlayer('甲', '🐯', 0, 'h0');
+  const room = createInitialRoom('123456', host);
+  for (let i = 1; i < humans; i++) {
+    room.players.push(createHumanPlayer(`玩家${i}`, '🦊', i, `h${i}`));
+  }
+  for (const p of room.players) p.ready = true;
+  for (let i = 0; i < bots; i++) applyCommand(room, host.id, { type: 'add_bot' });
+  return room;
+}
+
+/* ------------------------------------------------------------- 牌型 */
+
+test('牌型大小：同花顺 > 同花 > 顺子', () => {
+  assert.equal(compareHands([c(10, 'H'), c(11, 'H'), c(12, 'H')], [c(14, 'S'), c(9, 'S'), c(4, 'S')]), 1);
+  assert.equal(compareHands([c(14, 'S'), c(9, 'S'), c(4, 'S')], [c(10, 'H'), c(11, 'D'), c(12, 'C')]), 1);
 });
 
-test('A23 is the lowest straight', () => {
-  const a23 = evaluateHand([c(14,'S'),c(2,'D'),c(3,'C')]);
-  const qka = evaluateHand([c(12,'S'),c(13,'D'),c(14,'C')]);
-  assert.equal(a23.name, '顺子'); assert.deepEqual(a23.tiebreak, [3]); assert.equal(qka.tiebreak[0], 14);
-  assert.equal(compareHands([c(14,'S'),c(2,'D'),c(3,'C')],[c(2,'S'),c(3,'D'),c(4,'C')]), -1);
+test('A23 是最小顺子', () => {
+  const a23 = evaluateHand([c(14, 'S'), c(2, 'D'), c(3, 'C')]);
+  assert.equal(a23.name, '顺子');
+  assert.deepEqual(a23.tiebreak, [3]);
+  assert.equal(compareHands([c(14, 'S'), c(2, 'D'), c(3, 'C')], [c(2, 'S'), c(3, 'D'), c(4, 'C')]), -1);
 });
 
-test('special 235 beats trips but loses to ordinary high card', () => {
-  const sp = [c(2,'S'),c(3,'H'),c(5,'D')];
-  const aaa = [c(14,'S'),c(14,'H'),c(14,'D')];
-  const high = [c(14,'S'),c(9,'H'),c(7,'D')];
-  assert.equal(compareHands(sp, aaa, true), 1);
-  assert.equal(compareHands(sp, high, true), -1);
+test('235 克豹子，但输给普通单张', () => {
+  const sp = [c(2, 'S'), c(3, 'H'), c(5, 'D')];
+  assert.equal(compareHands(sp, [c(14, 'S'), c(14, 'H'), c(14, 'D')], true), 1);
+  assert.equal(compareHands(sp, [c(14, 'S'), c(9, 'H'), c(7, 'D')], true), -1);
 });
 
-test('round start deals unique cards, takes antes, and chooses a turn', () => {
-  const p1 = createHumanPlayer('甲', 0, 'x'); const p2 = createHumanPlayer('乙', 1, 'y');
-  p1.ready = p2.ready = true; const room = createInitialRoom('123456', p1); room.players.push(p2);
-  startRound(room, p1.id);
-  assert.equal(room.phase, 'playing'); assert.equal(room.pot, 200); assert.equal(room.players[0].chips, 9900); assert.equal(room.players[1].chips, 9900);
-  const cards = room.players.flatMap((p) => p.hand.map((x) => `${x.rank}${x.suit}`)); assert.equal(new Set(cards).size, 6); assert.notEqual(room.turnSeat, null);
+test('牌力分位单调：豹子 > 同花 > 对子 > 单张', () => {
+  const p = (h: Card[]) => handPercentile(h);
+  assert.ok(p([c(14, 'S'), c(14, 'H'), c(14, 'D')]) > p([c(9, 'S'), c(5, 'S'), c(2, 'S')]));
+  assert.ok(p([c(9, 'S'), c(5, 'S'), c(2, 'S')]) > p([c(9, 'S'), c(9, 'H'), c(2, 'D')]));
+  assert.ok(p([c(9, 'S'), c(9, 'H'), c(2, 'D')]) > p([c(9, 'S'), c(5, 'H'), c(2, 'D')]));
+  assert.ok(p([c(14, 'S'), c(14, 'H'), c(14, 'D')]) <= 1 && p([c(5, 'S'), c(3, 'H'), c(2, 'D')]) >= 0);
 });
 
-test('seen player pays double and folding heads-up awards the pot', () => {
-  const p1 = createHumanPlayer('甲', 0, 'x'); const p2 = createHumanPlayer('乙', 1, 'y'); p1.ready = p2.ready = true;
-  const room = createInitialRoom('123456', p1); room.players.push(p2); startRound(room, p1.id);
-  const actor = room.players.find((p) => p.seat === room.turnSeat)!; const other = room.players.find((p) => p.id !== actor.id)!;
-  applyCommand(room, actor.id, { type: 'look' }); const before = actor.chips; applyCommand(room, actor.id, { type: 'call' }); assert.equal(before - actor.chips, 200);
-  assert.equal(room.turnSeat, other.seat); const winnerBefore = actor.chips; applyCommand(room, other.id, { type: 'fold' });
-  assert.equal(room.phase, 'round_end'); assert.equal(room.result?.winnerId, actor.id); assert.ok(actor.chips > winnerBefore);
+/* ------------------------------------------------------------- 开局 */
+
+test('开局发唯一的牌、收底注、定出首家', () => {
+  const room = makeRoom(2);
+  startRound(room, room.hostId);
+  assert.equal(room.phase, 'playing');
+  assert.equal(room.pot, 200);
+  assert.equal(room.players[0].chips, 9900);
+  const cards = room.players.flatMap((p) => p.hand.map((x) => `${x.rank}${x.suit}`));
+  assert.equal(new Set(cards).size, 6);
+  assert.notEqual(room.turnSeat, null);
+  assert.equal(room.roundNo, 1);
 });
 
-test('compare costs twice the current call and is available immediately heads-up', () => {
-  const p1 = createHumanPlayer('甲', 0, 'x'); const p2 = createHumanPlayer('乙', 1, 'y'); p1.ready = p2.ready = true;
-  const room = createInitialRoom('123456', p1); room.players.push(p2); startRound(room, p1.id);
-  const actor = room.players.find((p) => p.seat === room.turnSeat)!;
+test('只有已准备且在线的人入局，掉线的人留座位等下一局', () => {
+  const room = makeRoom(3);
+  room.players[2].online = false;
+  startRound(room, room.hostId);
+  assert.equal(room.players[2].status, 'waiting');
+  assert.equal(room.players[2].hand.length, 0);
+  assert.equal(room.pot, 200);
+});
+
+test('底注会把人交空时自动补分，不会留下只能弃牌的死角', () => {
+  const room = makeRoom(2);
+  room.players[0].chips = room.settings.ante; // 交完底注就会归零
+  startRound(room, room.hostId);
+  assert.ok(room.players[0].chips > 0, '开局后不该有人是 0 分还在场上');
+});
+
+/* ------------------------------------------------------------- 下注 */
+
+test('看牌后跟注翻倍；单挑时对手弃牌直接收锅', () => {
+  const room = makeRoom(2);
+  startRound(room, room.hostId);
+  const actor = currentPlayer(room)!;
+  const other = room.players.find((p) => p.id !== actor.id)!;
+  applyCommand(room, actor.id, { type: 'look' });
+  const before = actor.chips;
+  applyCommand(room, actor.id, { type: 'call' });
+  assert.equal(before - actor.chips, 200);
+  assert.equal(room.turnSeat, other.seat);
+  applyCommand(room, other.id, { type: 'fold' });
+  assert.equal(room.phase, 'round_end');
+  assert.equal(room.result?.winnerId, actor.id);
+});
+
+test('比牌花两倍跟注额，单挑时立即开放', () => {
+  const room = makeRoom(2);
+  startRound(room, room.hostId);
+  const actor = currentPlayer(room)!;
   const target = room.players.find((p) => p.id !== actor.id)!;
-  actor.hand = [c(13,'S'),c(13,'H'),c(13,'D')]; target.hand = [c(14,'S'),c(14,'H'),c(14,'D')];
-  const before = actor.chips; const price = compareCost(room, actor);
-
+  actor.hand = [c(13, 'S'), c(13, 'H'), c(13, 'D')];
+  target.hand = [c(14, 'S'), c(14, 'H'), c(14, 'D')];
+  const before = actor.chips;
+  const price = compareCost(room, actor);
   applyCommand(room, actor.id, { type: 'compare', targetId: target.id });
-
   assert.equal(before - actor.chips, price);
   assert.equal(price, 200);
   assert.equal(room.phase, 'round_end');
+  assert.equal(room.result?.winnerId, target.id);
 });
 
-test('all-in contributes the remaining stack and forces every active player to showdown', () => {
-  const p1 = createHumanPlayer('甲', 0, 'x'); const p2 = createHumanPlayer('乙', 1, 'y'); const p3 = createHumanPlayer('丙', 2, 'z');
-  p1.ready = p2.ready = p3.ready = true;
-  const room = createInitialRoom('123456', p1); room.players.push(p2, p3); startRound(room, p1.id);
-  const actor = room.players.find((p) => p.seat === room.turnSeat)!;
-  const opponents = room.players.filter((p) => p.id !== actor.id);
-  actor.hand = [c(9,'S'),c(7,'H'),c(4,'D')];
-  opponents[0].hand = [c(14,'S'),c(14,'H'),c(14,'D')];
-  opponents[1].hand = [c(13,'S'),c(13,'H'),c(12,'D')];
-  actor.chips = 50; const potBefore = room.pot; const winnerBefore = opponents[0].chips;
-
+test('梭哈把剩余积分全投入并强制所有人开牌', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  const actor = currentPlayer(room)!;
+  const others = room.players.filter((p) => p.id !== actor.id);
+  actor.hand = [c(9, 'S'), c(7, 'H'), c(4, 'D')];
+  others[0].hand = [c(14, 'S'), c(14, 'H'), c(14, 'D')];
+  others[1].hand = [c(13, 'S'), c(13, 'H'), c(12, 'D')];
+  actor.chips = 50;
+  const pot = room.pot;
   applyCommand(room, actor.id, { type: 'all_in' });
-
   assert.equal(room.phase, 'round_end');
-  assert.equal(room.result?.winnerId, opponents[0].id);
-  assert.equal(room.result?.reason, '梭哈封顶，全员开牌');
-  assert.equal(opponents[0].chips, winnerBefore + potBefore + 50);
-  assert.equal(room.players.filter((p) => p.status === 'active').length, 1);
+  assert.equal(room.result?.winnerId, others[0].id);
+  assert.equal(room.result?.potWon, pot + 50);
+  assert.equal(room.result?.revealed.length, 3);
 });
 
-test('all-in cannot be used as a voluntary early showdown while a full call is affordable', () => {
-  const p1 = createHumanPlayer('甲', 0, 'x'); const p2 = createHumanPlayer('乙', 1, 'y'); p1.ready = p2.ready = true;
-  const room = createInitialRoom('123456', p1); room.players.push(p2); startRound(room, p1.id);
-  const actor = room.players.find((p) => p.seat === room.turnSeat)!;
-  assert.throws(() => applyCommand(room, actor.id, { type: 'all_in' }), /只有积分不足或刚好跟完时才能梭哈/);
+test('积分够跟注时不能拿梭哈当提前开牌用', () => {
+  const room = makeRoom(2);
+  startRound(room, room.hostId);
+  const actor = currentPlayer(room)!;
+  assert.throws(() => applyCommand(room, actor.id, { type: 'all_in' }), /积分不足/);
 });
 
-test('host leaving mid-round transfers ownership to a remaining human', () => {
-  const host = createHumanPlayer('房主', 0, 'x');
-  const guest = createHumanPlayer('好友', 2, 'y');
-  host.ready = guest.ready = true;
-  const room = createInitialRoom('123456', host);
-  room.players.push({
-    id: 'bot_1', name: '电脑', seat: 1, chips: 10_000, ready: true,
-    status: 'waiting', looked: false, hand: [], isBot: true,
-  });
-  room.players.push(guest);
+test('看牌不占用行动权，什么时候都能看自己的牌', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  const actor = currentPlayer(room)!;
+  const waiting = room.players.find((p) => p.id !== actor.id && p.status === 'active')!;
+  applyCommand(room, waiting.id, { type: 'look' });
+  assert.equal(waiting.looked, true);
+  assert.equal(room.turnSeat, actor.seat, '别人看牌不该改变行动顺序');
+});
+
+/* --------------------------------------------------------- 结束保证 */
+
+test('打满封顶轮数一定会强制开牌结束本局', () => {
+  const room = makeRoom(3);
+  room.settings.escalateFrom = 0; // 关掉自动升档，逼出纯"一直跟注"的最坏情况
+  startRound(room, room.hostId);
+  let steps = 0;
+  while (room.phase === 'playing') {
+    const cur = currentPlayer(room)!;
+    applyCommand(room, cur.id, { type: 'call' });
+    assert.ok(++steps < 200, '一直跟注也必须收敛');
+  }
+  assert.equal(room.phase, 'round_end');
+  assert.ok(room.roundNo <= room.settings.maxRounds + 1);
+});
+
+/* ----------------------------------------------------------- 房主 */
+
+test('房主中途退出会把房主移交给还在的真人', () => {
+  const room = makeRoom(3, 1);
+  const host = room.players[0];
   startRound(room, host.id);
-
   applyCommand(room, host.id, { type: 'leave' });
-
-  assert.equal(room.hostId, guest.id);
-  assert.equal(host.pendingLeave, true);
+  assert.notEqual(room.hostId, host.id);
+  const newHost = room.players.find((p) => p.id === room.hostId)!;
+  assert.equal(newHost.isBot, false);
 });
 
-test('host leaving the lobby never transfers ownership to a bot when a human remains', () => {
-  const host = createHumanPlayer('房主', 0, 'x');
-  const guest = createHumanPlayer('好友', 2, 'y');
-  const room = createInitialRoom('123456', host);
-  room.players.push({
-    id: 'bot_1', name: '电脑', seat: 1, chips: 10_000, ready: true,
-    status: 'waiting', looked: false, hand: [], isBot: true,
-  });
-  room.players.push(guest);
-
+test('房主在准备阶段退出也不会把房主给电脑', () => {
+  const room = makeRoom(2, 1);
+  const host = room.players[0];
   applyCommand(room, host.id, { type: 'leave' });
+  const newHost = room.players.find((p) => p.id === room.hostId)!;
+  assert.equal(newHost.isBot, false);
+});
 
-  assert.equal(room.hostId, guest.id);
-  assert.equal(room.players.some((p) => p.id === host.id), false);
+test('房主永远不会落到电脑玩家头上', () => {
+  const room = makeRoom(1, 3);
+  const host = room.players[0];
+  transferHost(room, host.id);
+  assert.equal(room.hostId, '', '只剩电脑时房主应该空出来，而不是交给电脑');
+
+  // 下一个进来的真人接手
+  const human = createHumanPlayer('乙', '🦊', 4, 'h4');
+  room.players.push(human);
+  assert.equal(claimHostIfVacant(room, human.id), true);
+  assert.equal(room.hostId, human.id);
+});
+
+test('真人全部离线时电脑不会自己开局打下去', () => {
+  const room = makeRoom(1, 3);
+  room.players[0].ready = true;
+  assert.equal(canAutoStart(room), true);
+  room.players[0].online = false;
+  assert.equal(canAutoStart(room), false, '没有在线真人时不该自动开局');
+});
+
+/* ----------------------------------------------------------- 信息安全 */
+
+test('别人的暗牌永远不会出现在下发的房间视图里', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  for (const p of room.players) p.looked = true;
+  const view = sanitizeRoom(room, room.players[0].id);
+  assert.equal(view.players[0].hand.length, 3, '自己看过牌就该看得到自己的牌');
+  assert.equal(view.players[1].hand.length, 0);
+  assert.equal(view.players[2].hand.length, 0);
+  assert.equal(JSON.stringify(view).includes('tokenHash'), false);
+});
+
+test('中途弃牌的人不会在结算时被亮牌', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  const first = currentPlayer(room)!;
+  applyCommand(room, first.id, { type: 'fold' });
+  const second = currentPlayer(room)!;
+  applyCommand(room, second.id, { type: 'fold' });
+  assert.equal(room.phase, 'round_end');
+  assert.deepEqual(room.result?.revealed, [], '没有摊牌就不该亮任何人的牌');
+  const view = sanitizeRoom(room, first.id);
+  assert.equal(view.players.filter((p) => p.hand.length === 3).length, 0);
+});
+
+/* ----------------------------------------------------------- 机器人 */
+
+test('机器人的决策永远是当前状态下的合法操作', () => {
+  for (let trial = 0; trial < 60; trial++) {
+    const room = makeRoom(1, 3);
+    startRound(room, room.hostId);
+    let steps = 0;
+    while (room.phase === 'playing' && steps < 400) {
+      const cur = currentPlayer(room)!;
+      const cmd = cur.isBot ? botDecision(room, cur) : ({ type: 'fold' } as const);
+      applyCommand(room, cur.id, cmd); // 不允许抛错：抛错就说明 AI 会给出非法指令
+      steps++;
+    }
+    assert.equal(room.phase, 'round_end');
+  }
+});
+
+test('比牌解锁条件与客户端算的一致', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  assert.equal(canCompareNow(room), false);
+  const view = sanitizeRoom(room, room.players[0].id);
+  assert.equal(canCompareNow(view), canCompareNow(room));
 });

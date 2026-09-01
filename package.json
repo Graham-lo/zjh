@@ -1,45 +1,34 @@
 {
-  "name": "friends-zhajinhua-sites",
-  "version": "1.0.0",
+  "name": "zjh",
+  "version": "2.0.0",
   "private": true,
+  "type": "module",
+  "description": "好友炸金花 —— 单进程 Node 服务端权威 + WebSocket 实时推送",
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.5.0"
   },
   "scripts": {
-    "dev": "vinext dev",
-    "build": "vinext build",
-    "start": "wrangler dev --config dist/server/wrangler.json",
-    "lint": "oxlint",
-    "typecheck": "tsc --noEmit",
-    "format": "oxfmt",
-    "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "db:generate": "drizzle-kit generate"
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "vite build",
+    "build:server": "node scripts/build-server.mjs",
+    "start": "node dist/server.mjs",
+    "test": "node --test 'tests/*.test.ts'",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "drizzle-orm": "0.45.2",
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "react-server-dom-webpack": "19.2.8",
-    "vinext": "1.0.0-beta.8"
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
-    "@cloudflare/workers-types": "4.20260515.1",
-    "@openai/sites-vite-plugin": "0.2.0",
-    "@tailwindcss/postcss": "4.2.1",
-    "@types/node": "22.19.19",
-    "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3",
-    "@vitejs/plugin-react": "6.0.2",
-    "@vitejs/plugin-rsc": "0.5.34",
-    "drizzle-kit": "0.31.10",
-    "oxfmt": "0.61.0",
-    "oxlint": "1.76.0",
-    "oxlint-tsgolint": "7.0.2001",
-    "tailwindcss": "4.2.1",
-    "typescript": "5.9.3",
-    "vite": "8.2.2",
-    "wrangler": "4.92.0"
-  },
-  "type": "module"
+    "@types/node": "^22.19.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/ws": "^8.18.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  }
 }

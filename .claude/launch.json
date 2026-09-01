@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "zjh-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/dev.mjs"],
+      "port": 5173
+    },
+    {
+      "name": "zjh-prod",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["dist/server.mjs"],
+      "port": 8787
+    }
+  ]
+}
