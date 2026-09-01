@@ -2,7 +2,10 @@
  * 全部音效都是 WebAudio 现场合成的 —— 没有音频文件，
  * 首屏不多一个字节，也不用等资源加载就能出声。
  */
-type Name = 'deal' | 'flip' | 'chip' | 'turn' | 'win' | 'lose' | 'msg' | 'tap';
+type Name =
+  | 'deal' | 'flip' | 'chip' | 'turn' | 'win' | 'lose' | 'msg' | 'tap'
+  // 重构后新增的几下：比牌对撞、梭哈闷响、金币流、好牌提示、末段心跳
+  | 'clash' | 'shove' | 'coin' | 'ding' | 'heart';
 
 class Sound {
   ctx: AudioContext | null = null;
@@ -77,8 +80,31 @@ class Sound {
       case 'flip':
         return this.swish(0, 0.08, 0.09, 4200, 1400);
       case 'chip':
-        this.tone(1750, 0, 0.05, 0.09, 'triangle');
-        return this.tone(2300, 0.045, 0.05, 0.06, 'triangle');
+        // index 是这一注飞出的第几枚筹码，音高逐枚递进，听得出「加注更大」
+        this.tone(1650 + index * 180, 0, 0.05, 0.09, 'triangle');
+        return this.tone(2200 + index * 200, 0.045, 0.05, 0.06, 'triangle');
+      case 'clash':
+        // 比牌对撞：一记低频闷响垫底，上面盖一层金属擦击
+        this.tone(90, 0, 0.34, 0.24, 'sine');
+        this.swish(0, 0.2, 0.16, 6000, 900);
+        return this.tone(1560, 0.03, 0.16, 0.1, 'square');
+      case 'shove':
+        // 梭哈：先半拍静默感（低音下坠），再一记砸下的重音
+        this.tone(220, 0, 0.26, 0.14, 'sawtooth');
+        this.tone(70, 0.24, 0.5, 0.3, 'sine');
+        return this.swish(0.24, 0.34, 0.18, 3400, 320);
+      case 'coin':
+        // 金币流：一串上行的清脆声，跟着筹码飞进赢家的堆里
+        return [1180, 1480, 1760, 2100, 2480].forEach((f, i) =>
+          this.tone(f, index * 0.05 + i * 0.035, 0.09, 0.07, 'triangle'),
+        );
+      case 'ding':
+        this.tone(2100, 0, 0.16, 0.1, 'sine');
+        return this.tone(3150, 0.07, 0.22, 0.06, 'sine');
+      case 'heart':
+        // 倒计时最后 8 秒的心跳，两下一组
+        this.tone(62, 0, 0.14, 0.2, 'sine');
+        return this.tone(58, 0.19, 0.18, 0.15, 'sine');
       case 'turn':
         this.tone(880, 0, 0.12, 0.12, 'sine');
         return this.tone(1320, 0.11, 0.16, 0.1, 'sine');

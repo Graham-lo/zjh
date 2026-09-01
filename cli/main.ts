@@ -12,9 +12,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { AVATARS, EMOTES, type GameCommand } from '../shared/game.ts';
+import { AVATARS, EMOTES, type GameCommand, type PublicRoom } from '../shared/game.ts';
 import { legalActions, parseTarget, RoomClient, type Auth } from '../shared/client.ts';
-import { C, renderRoom } from './render.ts';
+import type { GameEvent } from '../shared/protocol.ts';
+import { ANIM, C, DUEL_TTL, FRAME, newFx, renderRoom, Screen, TTY, type Fx } from './render.ts';
 
 const KEY = { ctrlC: '\u0003', esc: '\u001B', backspace: '\u007F' };
 
@@ -133,57 +134,94 @@ function say(msg: string, ms = 4000) {
   draw();
 }
 
-// 结算和发牌都要有过程感：进入对应阶段后短时间内高频重绘
-let settleStart: number | null = null;
-let dealStart: number | null = null;
-let settleTimer: ReturnType<typeof setInterval> | null = null;
-let lastPhase = '';
-let lastHand = 0;
-let lastTurnMine = false;
+const screen = new Screen();
+/**
+ * 动画的时间轴。这里只存**起点时间戳**，进度每帧现算；
+ * 而且每个起点都由服务器推来的事件写入 —— 客户端不自己编状态，
+ * 所以「谁梭哈了、谁和谁比了牌」永远和服务端一致。
+ */
+const fx = newFx();
 
-/** 在一段时间内持续重绘，动画靠它推进 */
-function animate(ms: number) {
-  if (settleTimer) clearInterval(settleTimer);
-  const until = Date.now() + ms;
-  settleTimer = setInterval(() => {
-    if (Date.now() > until) {
-      if (settleTimer) clearInterval(settleTimer);
-      settleTimer = null;
-    }
-    draw();
-  }, 40);
+/** 终端响铃。管道里响铃只是一个垃圾字节，非 TTY 就别响 */
+const BELL = String.fromCharCode(7);
+const bell = () => {
+  if (TTY) process.stdout.write(BELL);
+};
+
+/**
+ * 比牌的双方是谁、谁输了。
+ *
+ * 优先用事件自带的 targetId / loserId；这两个字段是后加的，
+ * 老服务端不下发，所以退回读 lastAction —— 赢家是「比牌胜 X」，输家是「比牌负于 Y」。
+ */
+function duelFrom(r: PublicRoom, ev: { playerId: string; targetId?: string; loserId?: string }, at: number): Fx['duel'] {
+  const byId = (id?: string) => (id ? r.players.find((p) => p.id === id) : undefined);
+  const pair = [byId(ev.playerId), byId(ev.targetId)];
+  const win =
+    ev.loserId && pair[0] && pair[1]
+      ? pair.find((p) => p!.id !== ev.loserId)
+      : r.players.find((p) => p.lastAction?.startsWith('比牌胜'));
+  const lose =
+    ev.loserId && pair[0] && pair[1] ? byId(ev.loserId) : r.players.find((p) => p.lastAction?.startsWith('比牌负于'));
+  if (!win || !lose) return null;
+  // 左右按座位固定：同一桌里谁在左边每次都一样，画面不会乱跳
+  const [a, b] = win.seat <= lose.seat ? [win, lose] : [lose, win];
+  return {
+    at,
+    a: { avatar: a.avatar, name: a.name, won: a.id === win.id },
+    b: { avatar: b.avatar, name: b.name, won: b.id === win.id },
+  };
 }
 
-function onRoomUpdate() {
+function onRoomUpdate(events: GameEvent[]) {
   const r = client.room;
-  const phase = r?.phase ?? '';
+  if (!r) return;
+  const now = Date.now();
 
-  // 新的一局：牌一张张发出来
-  if (r && phase === 'playing' && r.handNo !== lastHand) {
-    lastHand = r.handNo;
-    dealStart = Date.now();
-    animate(1200);
+  for (const ev of events) {
+    switch (ev.k) {
+      case 'deal':
+        // 新的一局：牌一张张发出来，上一局的横幅和对决行同时退场
+        fx.deal = now;
+        fx.settle = null;
+        fx.look = null;
+        fx.allIn = null;
+        fx.duel = null;
+        break;
+      case 'look':
+        // 只有自己看牌才有牌面可展开；别人看牌，桌面上仍然是三张背
+        if (ev.playerId === r.viewerId) fx.look = now;
+        break;
+      case 'bet':
+        if (ev.kind === 'all_in') {
+          fx.allIn = { at: now, amount: ev.amount };
+          bell(); // 梭哈这一下值得响一声，人可能正在看别的窗口
+        }
+        if (ev.kind === 'compare') fx.duel = duelFrom(r, ev, now);
+        break;
+      case 'turn':
+        // 轮到自己：响一声
+        if (ev.playerId === r.viewerId) bell();
+        break;
+      case 'win':
+        fx.settle = now;
+        fx.deal = null;
+        break;
+    }
   }
-  if (phase === 'round_end' && lastPhase !== 'round_end') {
-    settleStart = Date.now();
-    dealStart = null;
-    animate(1900);
-  }
-  if (phase !== 'round_end') settleStart = null;
-  if (phase !== 'playing') dealStart = null;
-
-  // 轮到自己：响一声，人可能正在看别的窗口
-  const mine = !!client.myTurn;
-  if (mine && !lastTurnMine) process.stdout.write('\u0007');
-  lastTurnMine = mine;
-
-  lastPhase = phase;
   draw();
 }
 
+let wasOffline = true;
+
 const client = new RoomClient(target, {
-  room: () => onRoomUpdate(),
-  status: () => draw(),
+  room: (_room, events) => onRoomUpdate(events),
+  status: (s) => {
+    // 断线重连回来那一下，顶栏的绿点多亮一帧，人才注意得到「回来了」
+    if (s === 'online' && wasOffline) fx.online = Date.now();
+    wasOffline = s !== 'online';
+    draw();
+  },
   error: (msg, fatal) => {
     say(`${C.red}${msg}${C.reset}`);
     if (fatal) {
@@ -197,29 +235,47 @@ const client = new RoomClient(target, {
 
 function draw() {
   if (!client.room) return;
-  const settleT = settleStart == null ? null : Date.now() - settleStart;
-  const dealT = dealStart == null ? null : Date.now() - dealStart;
-  const body = renderRoom(
-    client.room, client.latency, client.status, target.origin, client.account,
-    settleT, dealT != null && dealT < 1100 ? dealT : null,
-  );
-  let footer = '';
-  if (mode === 'chat') footer = `\n${C.gold}说点什么 >${C.reset} ${buffer}${C.dim}_${C.reset}`;
-  else if (mode === 'cmd') footer = `\n${C.gold}:${C.reset}${buffer}${C.dim}_${C.reset}`;
+  fx.now = Date.now();
+  // 对决行留够看一眼的时间就撤，牌桌上不留旧信息
+  if (fx.duel && fx.now - fx.duel.at > DUEL_TTL) fx.duel = null;
+
+  const lines = renderRoom({
+    room: client.room,
+    latency: client.latency,
+    status: client.status,
+    origin: target.origin,
+    account: client.account,
+    fx,
+  });
+  if (mode === 'chat') lines.push('', `${C.gold}说点什么 >${C.reset} ${buffer}${C.dim}_${C.reset}`);
+  else if (mode === 'cmd') lines.push('', `${C.gold}:${C.reset}${buffer}${C.dim}_${C.reset}`);
   else if (mode === 'compare') {
-    footer = `\n${C.gold}和谁比牌？${C.reset} ${compareTargets()
-      .map((p, i) => `[${i + 1}] ${p.avatar}${p.name}`)
-      .join('   ')}   [esc]取消`;
+    lines.push(
+      '',
+      `${C.gold}和谁比牌？${C.reset} ${compareTargets()
+        .map((p, i) => `[${i + 1}] ${p.avatar}${p.name}`)
+        .join('   ')}   [esc]取消`,
+    );
   } else if (mode === 'emote') {
-    footer = `\n${C.gold}发个表情${C.reset} ${EMOTES.map((e, i) => `[${i + 1}]${e}`).join(' ')}   [esc]取消`;
+    lines.push('', `${C.gold}发个表情${C.reset} ${EMOTES.map((e, i) => `[${i + 1}]${e}`).join(' ')}   [esc]取消`);
   }
-  process.stdout.write(`${C.clear}${body}${footer}${notice ? `\n\n${notice}` : ''}\n`);
+  // notice 可能是多行的帮助文本，拆成行交给差分重绘
+  if (notice) lines.push('', ...notice.split('\n'));
+  screen.paint(lines);
 }
 
-// 行动倒计时要走秒，所以进行中每秒重画一次
-setInterval(() => {
-  if (mode === 'play' && client.room?.phase === 'playing') draw();
-}, 1000).unref();
+/**
+ * 所有帧动画共用这一个心跳。
+ * 差分重绘让「和上一帧一模一样的行」一个字节都不写，所以 80ms 常开也不费终端；
+ * 关掉动画时退回每秒一次，纯粹为了让行动倒计时走秒。
+ */
+setInterval(
+  () => {
+    if (!ANIM && !(mode === 'play' && client.room?.phase === 'playing')) return;
+    draw();
+  },
+  ANIM ? FRAME : 1000,
+).unref();
 
 /* --------------------------------------------------------------- 动作 */
 
@@ -416,7 +472,9 @@ function cleanup() {
   } catch {
     /* ignore */
   }
-  process.stdout.write(`${C.showCursor}\n`);
+  // 差分重绘时光标停在最后写过的那一行，退出前挪到内容下面，
+  // 否则 shell 提示符会压在牌桌中间
+  screen.end();
   client.close();
 }
 
@@ -456,6 +514,11 @@ async function main() {
     cleanup();
     process.exit(0);
   });
+  // 终端被拖大拖小时行号全部作废，只有这种时候才允许整屏清一次
+  process.stdout.on('resize', () => draw());
+  // 刚入座：整屏铺一次底，标题从这一刻开始一列列打出来
+  screen.invalidate();
+  fx.enter = Date.now();
   draw();
   say(`${C.dim}按 ${C.gold}?${C.reset}${C.dim} 看全部按键${C.reset}`);
 }

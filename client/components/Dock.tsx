@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { GameCommand, PublicRoom } from '../../shared/game.ts';
+import { IconChat, IconClose, IconSend } from './Icons.tsx';
 
 type Tab = 'chat' | 'log';
 
@@ -36,7 +37,8 @@ export function Dock({
   return (
     <>
       <button className={`dock-toggle${open ? ' on' : ''}`} onClick={() => onToggle(!open)} aria-label="聊天与记录">
-        💬{unread > 0 && !open && <i className="badge">{unread > 9 ? '9+' : unread}</i>}
+        <IconChat size={20} />
+        {unread > 0 && !open && <i className="badge">{unread > 9 ? '9+' : unread}</i>}
       </button>
 
       <aside className={`dock${open ? ' open' : ''}`}>
@@ -48,7 +50,7 @@ export function Dock({
             牌桌记录
           </button>
           <button className="dock-close" onClick={() => onToggle(false)} aria-label="收起">
-            ✕
+            <IconClose size={15} />
           </button>
         </div>
 
@@ -86,8 +88,8 @@ export function Dock({
                 if (e.key === 'Enter') send();
               }}
             />
-            <button className="btn tiny primary" onClick={send}>
-              发送
+            <button className="btn tiny send" onClick={send} aria-label="发送">
+              <IconSend size={15} />
             </button>
           </div>
         )}

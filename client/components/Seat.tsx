@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
 import { evaluateHand, type Card, type PublicPlayer } from '../../shared/game.ts';
-import { PlayingCard } from './Card.tsx';
+import { handRarity, PlayingCard, type CardTone } from './Card.tsx';
+import { Laurel } from './Icons.tsx';
 import { TurnRing } from './TurnRing.tsx';
 
 const fmt = (n: number) => n.toLocaleString('zh-CN');
@@ -31,12 +32,14 @@ function Cards({
   revealed,
   handNo,
   big,
+  tone,
   onPeek,
 }: {
   hand: Card[];
   revealed: boolean;
   handNo: number;
   big: boolean;
+  tone?: CardTone;
   onPeek?: () => void;
 }) {
   const cards = [0, 1, 2].map((i) => (
@@ -47,6 +50,7 @@ function Cards({
       card={hand[i]}
       faceDown={!revealed}
       size={big ? 'big' : 'mini'}
+      tone={tone}
     />
   ));
   // 自己的暗牌是个按钮：点一下就看牌，不用再去操作条里找
@@ -90,19 +94,22 @@ export function Seat({
 }) {
   const hand = showdownHand ?? player.hand;
   const revealed = hand.length === 3;
+  const folded = player.status === 'folded';
   const classes = [
     'seat',
     isTurn && 'is-turn',
     celebrating && 'is-winner',
     isMe && 'is-me',
-    player.status === 'folded' && 'is-folded',
+    folded && 'is-folded',
     !player.online && !player.isBot && 'is-offline',
   ]
     .filter(Boolean)
     .join(' ');
+  const type = revealed ? evaluateHand(hand).name : null;
 
   return (
     <div className={classes} style={style}>
+      {celebrating && <Laurel id={`laurel-${player.id}`} />}
       {player.bet > 0 && <span className="seat-bet">{fmt(player.bet)}</span>}
       <div className="seat-avatar">
         {isTurn && <TurnRing deadline={deadline} total={turnSeconds} />}
@@ -126,16 +133,28 @@ export function Seat({
         {player.lastAction && <div className="seat-action">{player.lastAction}</div>}
       </div>
 
-      {/* 看过牌之后直接把牌型写出来，省得自己在心里对一遍 */}
-      {revealed && <span className="hand-type seat-type">{evaluateHand(hand).name}</span>}
+      {/* 看过牌之后直接把牌型写出来，省得自己在心里对一遍。
+          金花及以上多一圈金色波纹 —— 好牌值得被看见。 */}
+      {type && (
+        <span className={`hand-type seat-type r-${handRarity(type)}`} key={`${handNo}-${type}`}>
+          {type}
+        </span>
+      )}
 
       <div className="seat-hand">
         {player.status === 'waiting' ? (
           <span className="hand-note">等待下局</span>
-        ) : player.status === 'folded' && !revealed ? (
+        ) : folded && !revealed ? (
           <span className="hand-note folded">已弃牌</span>
         ) : player.hasHand || revealed ? (
-          <Cards hand={hand} revealed={revealed} handNo={handNo} big={isMe} onPeek={onPeek} />
+          <Cards
+            hand={hand}
+            revealed={revealed}
+            handNo={handNo}
+            big={isMe}
+            tone={celebrating ? 'win' : folded ? 'fold' : undefined}
+            onPeek={onPeek}
+          />
         ) : null}
       </div>
     </div>

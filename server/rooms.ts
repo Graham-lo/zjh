@@ -11,7 +11,9 @@ import { Store, type Account } from './store.ts';
 
 const ROOM_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 快照保留 3 天
 const IDLE_DROP_MS = 30 * 60 * 1000; // 无人连接 30 分钟后从内存卸载
-const ROUND_END_MS = 7000; // 结算展示时长
+// 结算展示时长。前 ~3.2s 是牌桌上的开牌亮相（翻牌 → 牌型徽章 → 赢家金环金币），
+// 之后才升起结算面板 —— 两拍都要看得完，所以这里给的是两段之和。
+const ROUND_END_MS = 10500;
 const AUTO_START_MS = 2500; // 自动续局前的缓冲
 const HOST_GRACE_MS = 20_000; // 房主掉线多久后移交
 const MAX_ROOMS = 400;
@@ -217,7 +219,17 @@ export class Hub {
       if (spent > 0 && (cmd.type === 'call' || cmd.type === 'raise' || cmd.type === 'all_in' || cmd.type === 'compare')) {
         // 表态阶段的「跟注」其实是接梭哈，播报要不一样
         const kind = cmd.type === 'call' && before.allIn ? 'accept' : cmd.type;
-        events.push({ k: 'bet', playerId: actorId, amount: spent, kind });
+        // 比牌额外带上对手和输家：客户端要靠它演「金蓝对撞」那一下。
+        // 输家一定是这两个人里刚被判成 folded 的那个（比牌是即时结算的）。
+        const extra =
+          cmd.type === 'compare'
+            ? {
+                targetId: cmd.targetId,
+                loserId:
+                  state.players.find((p) => p.id === actorId)?.status === 'folded' ? actorId : cmd.targetId,
+              }
+            : {};
+        events.push({ k: 'bet', playerId: actorId, amount: spent, kind, ...extra });
       }
       if (cmd.type === 'look') events.push({ k: 'look', playerId: actorId });
       if (cmd.type === 'fold') events.push({ k: 'fold', playerId: actorId });

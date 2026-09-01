@@ -513,6 +513,30 @@ test('别人的暗牌永远不会出现在下发的房间视图里', () => {
   assert.equal(JSON.stringify(view).includes('tokenHash'), false);
 });
 
+test('比牌直接收锅时，比牌双方的牌摊给全场', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  room.turnCount = room.compareUnlockAt; // 解锁比牌
+  const actor = currentPlayer(room)!;
+  const rest = room.players.filter((p) => p.id !== actor.id);
+  applyCommand(room, rest[1].id, { type: 'fold' }); // 先弃到只剩两家
+  actor.hand = [c(13, 'S'), c(13, 'H'), c(13, 'D')];
+  rest[0].hand = [c(14, 'S'), c(14, 'H'), c(14, 'D')];
+
+  applyCommand(room, actor.id, { type: 'compare', targetId: rest[0].id });
+  assert.equal(room.phase, 'round_end');
+  assert.equal(room.result?.winnerId, rest[0].id);
+  assert.deepEqual(
+    [...(room.result?.revealed ?? [])].sort(),
+    [actor.id, rest[0].id].sort(),
+    '比过牌的两家都要亮，全场才知道谁大',
+  );
+  // 没参与的那家弃了牌，不该被连坐亮出来
+  assert.equal(room.result?.hands[rest[1].id], undefined);
+  const seenByFolder = sanitizeRoom(room, rest[1].id);
+  assert.equal(seenByFolder.players.filter((p) => p.hand.length === 3).length, 2, '旁观者也看得到摊开的两家');
+});
+
 test('中途弃牌的人不会在结算时被亮牌', () => {
   const room = makeRoom(3);
   startRound(room, room.hostId);

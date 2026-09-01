@@ -30,7 +30,21 @@ export type ClientMsg =
 /** 一次状态变更伴随的瞬时事件，客户端拿它播动画和音效。状态本身仍以 room 为准。 */
 export type GameEvent =
   | { k: 'deal'; handNo: number; seats: number[] }
-  | { k: 'bet'; playerId: string; amount: number; kind: 'call' | 'raise' | 'all_in' | 'compare' | 'accept' }
+  | {
+      k: 'bet';
+      playerId: string;
+      amount: number;
+      kind: 'call' | 'raise' | 'all_in' | 'compare' | 'accept';
+      /**
+       * 比牌专用的附加信息（只在 kind === 'compare' 时出现）。
+       *
+       * 客户端的比牌对决全屏动画需要知道「谁和谁比」「谁输了」才能把追光打对、
+       * 让败者的牌碎掉。这些都是比牌当场全桌都会从日志里看到的公开事实，
+       * 不含任何暗牌，所以放进事件里不泄密。字段是后加的，老客户端忽略即可。
+       */
+      targetId?: string;
+      loserId?: string;
+    }
   | { k: 'look'; playerId: string }
   | { k: 'fold'; playerId: string }
   | { k: 'showdown'; winnerId: string }

@@ -3,11 +3,16 @@ import { useEffect, useRef, useState } from 'react';
 const R = 27;
 const C = 2 * Math.PI * R;
 
-/** 头像外圈的倒计时环。用一次 CSS transition 走完，不占用每帧 JS。 */
+/**
+ * 头像外圈的倒计时环。用一次 CSS transition 走完，不占用每帧 JS。
+ * 最后 8 秒环转红并开始心跳 —— 时间快到了这件事，不该只写在文字里。
+ */
 export function TurnRing({ deadline, total }: { deadline: number | null; total: number }) {
   const [offset, setOffset] = useState(C);
   const [dur, setDur] = useState(0);
   const raf = useRef(0);
+  const left = useCountdown(deadline);
+  const urgent = deadline != null && left > 0 && left <= 8;
 
   useEffect(() => {
     if (!deadline) return;
@@ -24,7 +29,7 @@ export function TurnRing({ deadline, total }: { deadline: number | null; total: 
 
   if (!deadline) return null;
   return (
-    <svg className="turn-ring" viewBox="0 0 64 64" aria-hidden="true">
+    <svg className={`turn-ring${urgent ? ' urgent' : ''}`} viewBox="0 0 64 64" aria-hidden="true">
       <circle className="turn-ring-track" cx="32" cy="32" r={R} />
       <circle
         className="turn-ring-bar"

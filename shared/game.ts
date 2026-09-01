@@ -571,11 +571,17 @@ function finishRound(state: RoomState, winner: PlayerState, reason: string, reve
   pushLog(state, `${winner.name} 赢得 ${won.toLocaleString('zh-CN')} 积分`);
 }
 
-/** 只剩一个人时收锅。没有摊牌，所以不亮牌。 */
-function maybeFinish(state: RoomState, reason = '其他玩家均已弃牌'): boolean {
+/**
+ * 只剩一个人时收锅。
+ *
+ * 默认不亮牌 —— 大家都弃了，没人摊过牌，赢家没有义务把牌给人看。
+ * 但如果这一锅是被一次比牌收掉的，比牌双方的牌就得公开：
+ * 那是真的摊过牌了，全场不该连谁大谁小都不知道。
+ */
+function maybeFinish(state: RoomState, reason = '其他玩家均已弃牌', revealed: PlayerState[] = []): boolean {
   const active = activePlayers(state);
   if (active.length !== 1) return false;
-  finishRound(state, active[0], reason, []);
+  finishRound(state, active[0], reason, revealed);
   return true;
 }
 
@@ -864,7 +870,9 @@ function doCompare(state: RoomState, actorId: string, targetId: string) {
   loser.lastAction = `比牌负于 ${winner.name}`;
   winner.lastAction = `比牌胜 ${loser.name}`;
   pushLog(state, `${p.name} 与 ${target.name} 比牌，${loser.name} 出局`);
-  if (maybeFinish(state, '比牌决出胜负')) return;
+  // 最后一手比牌直接终局：把这一对的牌摊给全场。
+  // 局还没结束的中途比牌仍然只有当事双方看得到 —— 那才是真实牌桌上的规矩。
+  if (maybeFinish(state, '比牌决出胜负', [winner, loser])) return;
   if (p.status === 'active' && p.chips === 0) {
     forceShowdown(state, p, '比牌后积分打空，封顶开牌');
     return;

@@ -3,6 +3,7 @@ import {
   allInCost as calcAllIn, callCost as calcCall, canAllInNow, canAutoStart, canCompareNow,
   EMOTES, evaluateHand, type GameCommand, type PublicPlayer, type PublicRoom,
 } from '../../shared/game.ts';
+import { handRarity } from './Card.tsx';
 import { useCountdown } from './TurnRing.tsx';
 
 const fmt = (n: number) => n.toLocaleString('zh-CN');
@@ -130,9 +131,11 @@ export function ActionBar({
   if (room.phase !== 'playing') return null;
 
   const turnName = room.players.find((p) => p.seat === room.turnSeat)?.name ?? '玩家';
+  // 最后 8 秒行动台边缘跟着心跳脉动，和头像上的倒计时环是同一套节律
+  const urgent = myTurn && left > 0 && left <= 8;
 
   return (
-    <div className="bar">
+    <div className={`bar${urgent ? ' is-urgent' : ''}${shove ? ' is-shove' : ''}`}>
       <div className="bar-status">
         {shove ? (
           me.status !== 'active' ? (
@@ -156,9 +159,11 @@ export function ActionBar({
           <strong className="dim">等待 {turnName} 行动…</strong>
         )}
         <span className="bar-meta">
-          {handType && <b className="hand-type" title="你的牌型">{handType}</b>}
+          {handType && <b className={`hand-type r-${handRarity(handType)}`} title="你的牌型">{handType}</b>}
           第 {room.handNo} 局 · 第 {room.roundNo}/{room.settings.maxRounds} 轮 · 底注 {fmt(room.betUnit)}
           {compareOpen ? ' · 可比牌' : ' · 首轮中'}
+          {/* 梭哈还没开放时把门槛写出来，省得有人一直找那个按钮 */}
+          {!shoveOpen && ` · 第 ${allInFrom} 轮起可梭哈`}
         </span>
       </div>
 
@@ -183,6 +188,9 @@ export function ActionBar({
         </div>
       )}
 
+      {/* 主行动排：弃牌 / 跟注 / 加注档 / 梭哈 一次排开，点一下就走 ——
+          下拉框要点两次还挡住牌桌。手机上靠 flex-wrap 自然折成两行，
+          第一行是最常用的三个大目标，加注档退到第二行。 */}
       {me.status === 'active' && !shove && (
         <div className="bar-actions">
           {!me.looked && (
@@ -202,9 +210,20 @@ export function ActionBar({
           >
             {armFold ? '再点一次确认' : '弃牌'}
           </button>
-          <button className="btn primary" disabled={!myTurn || !canCall} onClick={() => cmd({ type: 'call' })}>
+          <button className="btn primary call" disabled={!myTurn || !canCall} onClick={() => cmd({ type: 'call' })}>
             跟注 {fmt(cost)}
           </button>
+          {tiers.map((x) => (
+            <button
+              key={x}
+              className="btn tier"
+              disabled={!myTurn || me.chips <= x * (me.looked ? 2 : 1)}
+              title={`本次需要投入 ${fmt(x * (me.looked ? 2 : 1))}`}
+              onClick={() => cmd({ type: 'raise', unit: x })}
+            >
+              加注 {fmt(x)}
+            </button>
+          ))}
           {/* 条件不满足时干脆不显示，而不是摆一个点不动的按钮 */}
           {canShove && (
             <button
@@ -219,46 +238,35 @@ export function ActionBar({
         </div>
       )}
 
-      {/* 加注档位平铺成一排，点一下就走 —— 下拉框要点两次还挡住牌桌 */}
+      {/* 比牌行：谁能被比一目了然，自动跟注靠右单独站着不抢戏 */}
       {me.status === 'active' && !shove && (
-        <div className="raise-row">
-          {tiers.length > 0 && <span>加注到</span>}
-          {tiers.map((x) => (
-            <button
-              key={x}
-              className="btn tier"
-              disabled={!myTurn || me.chips <= x * (me.looked ? 2 : 1)}
-              title={`本次需要投入 ${fmt(x * (me.looked ? 2 : 1))}`}
-              onClick={() => cmd({ type: 'raise', unit: x })}
-            >
-              {fmt(x)}
-            </button>
-          ))}
+        <div className="compare-row">
+          {myTurn && compareOpen && active.length > 1 ? (
+            <>
+              <span>比牌 {fmt(comparePrice)}：</span>
+              {active
+                .filter((p) => p.id !== me.id)
+                .map((p) => (
+                  <button
+                    key={p.id}
+                    className="btn tiny"
+                    disabled={me.chips < comparePrice}
+                    onClick={() => cmd({ type: 'compare', targetId: p.id })}
+                  >
+                    {p.avatar} {p.name}
+                  </button>
+                ))}
+            </>
+          ) : (
+            <span>{compareOpen ? `比牌 ${fmt(comparePrice)} · 轮到你时可选对手` : '首轮走完后开放比牌'}</span>
+          )}
           <button
-            className={`btn auto${autoCall ? ' on' : ''}`}
+            className={`btn tiny auto${autoCall ? ' on' : ''}`}
             title="自动跟注；跟不起时自动梭哈。有人梭哈会自动交还给你决定"
             onClick={() => setAutoCall((v) => !v)}
           >
             {autoCall ? '● 自动跟注中' : '自动跟注'}
           </button>
-        </div>
-      )}
-
-      {myTurn && !shove && compareOpen && active.length > 1 && (
-        <div className="compare-row">
-          <span>比牌 {fmt(comparePrice)}：</span>
-          {active
-            .filter((p) => p.id !== me.id)
-            .map((p) => (
-              <button
-                key={p.id}
-                className="btn tiny"
-                disabled={me.chips < comparePrice}
-                onClick={() => cmd({ type: 'compare', targetId: p.id })}
-              >
-                {p.avatar} {p.name}
-              </button>
-            ))}
         </div>
       )}
 
