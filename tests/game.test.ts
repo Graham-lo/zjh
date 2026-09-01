@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  allInCost, applyCommand, botDecision, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
+  allInCost, applyCommand, botDecision, canAllInNow, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
   compareHands, createHumanPlayer, createInitialRoom, currentPlayer, evaluateHand,
-  handPercentile, sanitizeRoom, startRound, transferHost,
+  handPercentile, sanitizeRoom, startRound, timeoutCurrentPlayer, transferHost,
   type Card, type RoomState,
 } from '../shared/game.ts';
 
@@ -114,7 +114,7 @@ test('比牌花两倍跟注额，单挑时立即开放', () => {
   assert.equal(room.result?.winnerId, target.id);
 });
 
-test('梭哈把剩余积分全投入并强制所有人开牌', () => {
+test('短码梭哈时金额就是他自己的身家，接的人按同一金额入池', () => {
   const room = makeRoom(3);
   startRound(room, room.hostId);
   const actor = currentPlayer(room)!;
@@ -122,50 +122,159 @@ test('梭哈把剩余积分全投入并强制所有人开牌', () => {
   actor.hand = [c(9, 'S'), c(7, 'H'), c(4, 'D')];
   others[0].hand = [c(14, 'S'), c(14, 'H'), c(14, 'D')];
   others[1].hand = [c(13, 'S'), c(13, 'H'), c(12, 'D')];
-  actor.chips = 50;
+  actor.chips = 50; // 跟不起，被动梭哈，第一轮也允许
   const pot = room.pot;
+
   applyCommand(room, actor.id, { type: 'all_in' });
+  assert.equal(room.allIn?.amount, 50, '金额取场上最短的一家，也就是他自己');
+  assert.equal(actor.chips, 0);
+
+  for (const id of room.allIn!.pending.slice()) applyCommand(room, id, { type: 'call' });
+
   assert.equal(room.phase, 'round_end');
   assert.equal(room.result?.winnerId, others[0].id);
-  assert.equal(room.result?.potWon, pot + 50);
+  assert.equal(room.result?.potWon, pot + 50 * 3, '三家各出 50');
   assert.equal(room.result?.revealed.length, 3);
 });
 
-test('梭哈是可以主动选的战术，成本跟着底池走', () => {
+test('梭哈金额由场上最短的一家决定，接的人都掏得起', () => {
   const room = makeRoom(3);
   startRound(room, room.hostId);
+  room.roundNo = room.settings.allInFromRound;
   const actor = currentPlayer(room)!;
-  // 底池 300、比牌价 200 → 取较大者，且不超过自己的积分
-  const price = allInCost(room, actor);
-  assert.equal(price, 300);
-  const before = actor.chips;
+  const others = room.players.filter((p) => p.id !== actor.id);
+  // 人为造出一个短码：金额应该跟着他走，而不是跟着梭哈的人
+  others[0].chips = 1500;
+  assert.equal(allInCost(room), 1500);
+
+  const potBefore = room.pot;
+  const stacksBefore = new Map(room.players.map((p) => [p.id, p.chips]));
+
+  applyCommand(room, actor.id, { type: 'all_in' });
+  for (const id of room.allIn!.pending.slice()) applyCommand(room, id, { type: 'call' });
+
+  assert.equal(room.phase, 'round_end');
+  assert.equal(room.result?.potWon, potBefore + 1500 * 3);
+  const potWon = room.result!.potWon;
+  for (const p of room.players) {
+    const paid = stacksBefore.get(p.id)! - 1500;
+    const want: number = p.id === room.result!.winnerId ? paid + potWon : paid;
+    assert.equal(p.chips, want, `${p.name} 的积分不对`);
+    assert.ok(p.chips >= 0, '不该有人被打成负数');
+  }
+});
+
+test('跟不起的时候任何轮次都能梭哈脱身', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  assert.equal(room.roundNo, 1, '第一轮，主动梭哈本来是禁止的');
+  const actor = currentPlayer(room)!;
+  actor.chips = 50; // 跟注要 100，跟不起
+  applyCommand(room, actor.id, { type: 'all_in' });
+  assert.ok(room.allIn, '被动梭哈也要走表态');
+  for (const id of room.allIn!.pending.slice()) applyCommand(room, id, { type: 'fold' });
+  assert.equal(room.phase, 'round_end');
+  assert.equal(room.result?.winnerId, actor.id);
+});
+
+test('梭哈要别人接受才比牌：接的人开牌，不接的人出局', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  room.roundNo = room.settings.allInFromRound;
+  const actor = currentPlayer(room)!;
+  const others = room.players.filter((p) => p.id !== actor.id);
   const potBefore = room.pot;
 
   applyCommand(room, actor.id, { type: 'all_in' });
 
+  // 还没开牌，进入表态
+  assert.equal(room.phase, 'playing', '梭哈不该立刻结束本局');
+  assert.ok(room.allIn, '应该进入表态状态');
+  assert.equal(room.allIn!.accepted.length, 1, '一开始只有发起人');
+  assert.equal(room.allIn!.pending.length, 2);
+  const amount = room.allIn!.amount;
+  assert.equal(room.pot, potBefore + amount, '只有发起人先掏钱');
+
+  // 第一个人接
+  const first = currentPlayer(room)!;
+  assert.ok(others.some((p) => p.id === first.id), '应该轮到别人表态');
+  applyCommand(room, first.id, { type: 'call' });
+  assert.equal(room.phase, 'playing');
+  assert.equal(room.pot, potBefore + amount * 2);
+
+  // 第二个人不接
+  const second = currentPlayer(room)!;
+  applyCommand(room, second.id, { type: 'fold' });
+
   assert.equal(room.phase, 'round_end');
-  assert.equal(room.result?.revealed.length, 3, '梭哈要逼所有人开牌');
-  // 只往池子里加一个底池的量，而不是清空整个身家
-  assert.equal(room.result?.potWon, potBefore + price);
-  // 赢了就把整池收回，输了只赔这一份 —— 风险和回报是对称的
-  const won = room.result!.winnerId === actor.id;
-  assert.equal(actor.chips, won ? before - price + room.result!.potWon : before - price);
+  assert.equal(room.allIn, undefined);
+  assert.equal(room.result?.revealed.length, 2, '只有接受的两家开牌');
+  assert.ok(!room.result!.revealed.includes(second.id), '不接的人不该被亮牌');
+  assert.equal(room.result?.potWon, potBefore + amount * 2);
 });
 
-test('底池很小时梭哈也不会比比牌还便宜', () => {
-  const room = makeRoom(2);
+test('梭哈没人接就直接收锅，而且不亮牌', () => {
+  const room = makeRoom(3);
   startRound(room, room.hostId);
+  room.roundNo = room.settings.allInFromRound;
   const actor = currentPlayer(room)!;
-  room.pot = 50; // 人为制造一个极小底池
-  assert.equal(allInCost(room, actor), compareCost(room, actor));
+  applyCommand(room, actor.id, { type: 'all_in' });
+  const rest = room.allIn!.pending.slice();
+  for (const id of rest) applyCommand(room, id, { type: 'fold' });
+
+  assert.equal(room.phase, 'round_end');
+  assert.equal(room.result?.winnerId, actor.id);
+  assert.deepEqual(room.result?.revealed, [], '没人接就没有摊牌，不该亮牌');
 });
 
-test('积分不足时梭哈自然退化成把剩下的全推出去', () => {
-  const room = makeRoom(2);
+test('表态阶段只能接或弃，不能加注也不能比牌', () => {
+  const room = makeRoom(3);
   startRound(room, room.hostId);
+  room.roundNo = room.settings.allInFromRound;
   const actor = currentPlayer(room)!;
-  actor.chips = 37;
-  assert.equal(allInCost(room, actor), 37);
+  applyCommand(room, actor.id, { type: 'all_in' });
+  const responder = currentPlayer(room)!;
+  const other = room.players.find((p) => p.status === 'active' && p.id !== responder.id)!;
+  assert.throws(() => applyCommand(room, responder.id, { type: 'raise', unit: 500 }), /只能选择接或者弃牌/);
+  assert.throws(() => applyCommand(room, responder.id, { type: 'compare', targetId: other.id }), /只能选择接或者弃牌/);
+  assert.throws(() => applyCommand(room, responder.id, { type: 'all_in' }), /已经有人梭哈了/);
+});
+
+test('表态阶段超时按不接处理，牌局仍然会结束', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  room.roundNo = room.settings.allInFromRound;
+  applyCommand(room, currentPlayer(room)!.id, { type: 'all_in' });
+  let guard = 0;
+  while (room.phase === 'playing') {
+    assert.ok(guard++ < 10, '表态过程必须收敛');
+    timeoutCurrentPlayer(room);
+  }
+  assert.equal(room.phase, 'round_end');
+});
+
+test('前两轮不能主动梭哈', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  assert.equal(room.roundNo, 1);
+  assert.equal(canAllInNow(room), false);
+  const actor = currentPlayer(room)!;
+  assert.throws(() => applyCommand(room, actor.id, { type: 'all_in' }), /轮起才能主动梭哈/);
+
+  room.roundNo = 2;
+  assert.equal(canAllInNow(room), false);
+
+  room.roundNo = 3;
+  assert.equal(canAllInNow(room), true);
+});
+
+test('梭哈金额取的是在局玩家，已弃牌的短码不算数', () => {
+  const room = makeRoom(3);
+  startRound(room, room.hostId);
+  const folded = room.players.find((p) => p.seat !== room.turnSeat)!;
+  folded.chips = 10;
+  applyCommand(room, folded.id, { type: 'fold' });
+  assert.equal(allInCost(room), 9900, '弃了牌的人不该再压低梭哈金额');
 });
 
 test('还没轮到自己也能弃牌，且不会打乱行动顺序', () => {

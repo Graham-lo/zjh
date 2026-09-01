@@ -6,7 +6,7 @@ import { PlayingCard } from './components/Card.tsx';
 import { Dock } from './components/Dock.tsx';
 import { EmptySeat, Seat } from './components/Seat.tsx';
 import type { NetStatus } from './net.ts';
-import { sound, voice } from './sound.ts';
+import { HAND_VOICE, sound, voice } from './sound.ts';
 
 const fmt = (n: number) => n.toLocaleString('zh-CN');
 
@@ -56,10 +56,15 @@ interface FlyChip {
  */
 function seatPos(k: number, total: number) {
   const angle = Math.PI / 2 + (k * 2 * Math.PI) / Math.max(1, total);
-  // 半径交给 CSS 变量，手机上收紧一点，座位就不会被挤出屏幕
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  // 半径交给 CSS 变量，手机上收紧一点，座位就不会被挤出屏幕。
+  // --deal-x/y 是从桌心指向这个座位的反向量，发牌动画用它让牌从中间飞出来。
   return {
-    left: `calc(50% + var(--seat-rx) * ${Math.cos(angle).toFixed(4)})`,
-    top: `calc(50% + var(--seat-ry) * ${Math.sin(angle).toFixed(4)})`,
+    left: `calc(50% + var(--seat-rx) * ${cos.toFixed(4)})`,
+    top: `calc(50% + var(--seat-ry) * ${sin.toFixed(4)})`,
+    ['--deal-x' as string]: `${(-cos * 260).toFixed(0)}px`,
+    ['--deal-y' as string]: `${(-sin * 150).toFixed(0)}px`,
   };
 }
 
@@ -83,6 +88,8 @@ export function Table({
   const [unread, setUnread] = useState(0);
   const [chips, setChips] = useState<FlyChip[]>([]);
   const [flash, setFlash] = useState<'win' | 'lose' | null>(null);
+  const [fx, setFx] = useState<{ id: number; label: string; kind: string } | null>(null);
+  const fxId = useRef(0);
   const [muted, setMuted] = useState(!sound.enabled);
   const [mutedVoice, setMutedVoice] = useState(!voice.enabled);
   const seen = useRef(0);
@@ -126,27 +133,36 @@ export function Table({
             setTimeout(() => setChips((c) => c.filter((x) => x.id !== id)), 900);
           }
           sound.play('chip');
-          voice.say({ call: '跟注', raise: '加注', all_in: '梭哈', compare: '比牌' }[ev.kind]);
+          voice.play(ev.kind === 'all_in' ? 'allin' : ev.kind);
+          if (ev.kind === 'all_in') {
+            burst('allin', '梭 哈');
+            navigator.vibrate?.([30, 60, 30, 60, 30]);
+          } else if (ev.kind === 'accept') {
+            burst('accept', '接');
+            navigator.vibrate?.([20, 40, 20]);
+          } else if (ev.kind === 'compare') {
+            burst('compare', '比 牌');
+          }
           break;
         }
         case 'look':
           if (ev.playerId === room.viewerId) sound.play('flip');
           break;
         case 'fold':
-          voice.say('弃牌');
+          voice.play('fold');
           break;
         case 'turn':
           if (ev.playerId === room.viewerId) {
             sound.play('turn');
-            voice.say('该你了');
+            voice.play('turn');
             navigator.vibrate?.(30);
           }
           break;
         case 'showdown': {
+          burst('showdown', '开 牌');
           // 开牌这一下是全场最有戏的时刻，直接把赢家的牌型念出来
           const hand = room.result?.hands[ev.winnerId];
-          const winner = room.players.find((p) => p.id === ev.winnerId);
-          if (hand?.length === 3) voice.say(`${evaluateHand(hand).name}，${winner?.name ?? ''} 赢`);
+          if (hand?.length === 3) voice.play(HAND_VOICE[evaluateHand(hand).name] ?? 'sanpai');
           break;
         }
         case 'win': {
@@ -176,6 +192,13 @@ export function Table({
     if (dockOpen) setUnread(0);
   }, [dockOpen]);
 
+  /** 中央砸下一个大字 + 全屏闪光，牌桌上最有戏的几下都走这里 */
+  function burst(kind: string, label: string) {
+    const id = ++fxId.current;
+    setFx({ id, label, kind });
+    setTimeout(() => setFx((f) => (f?.id === id ? null : f)), 1100);
+  }
+
   if (!me) return <div className="loading">正在回到牌桌…</div>;
 
   const invite = () => {
@@ -190,7 +213,7 @@ export function Table({
   const showdownHands = result?.hands ?? {};
 
   return (
-    <main className={`table-shell${flash ? ` flash-${flash}` : ''}`}>
+    <main className={`table-shell${flash ? ` flash-${flash}` : ''}${fx?.kind === 'allin' ? ' shake' : ''}`}>
       <header className="topbar">
         <div className="topbar-left">
           <b>好友炸金花</b>
@@ -242,7 +265,13 @@ export function Table({
 
       <section className="felt-wrap">
         <div className="felt">
-          <div className="felt-ring" />
+          {/* 牌桌本体单独一层并做透视倾斜；座位和底池留在不旋转的平面上，
+              这样桌子有立体感，而文字和牌面不会跟着变形 */}
+          <div className="felt-surface" aria-hidden="true">
+            <div className="felt-cloth">
+              <div className="felt-ring" />
+            </div>
+          </div>
 
           <div className="pot">
             <span>{room.phase === 'round_end' ? '本局彩池' : '底池'}</span>
@@ -337,6 +366,12 @@ export function Table({
               </button>
             )}
           </div>
+        </div>
+      )}
+
+      {fx && (
+        <div className={`fx fx-${fx.kind}`} key={fx.id} aria-hidden="true">
+          <span className="fx-word">{fx.label}</span>
         </div>
       )}
 

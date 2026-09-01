@@ -39,7 +39,10 @@
 html, body {
   margin: 0;
   min-height: 100%;
-  background: radial-gradient(120% 90% at 50% -10%, #17392a 0%, var(--bg-1) 45%, var(--bg-0) 100%) fixed;
+  /* 一间开着顶灯的牌室：头顶一盏暖光，越往外越暗，而不是一片死黑 */
+  background:
+    radial-gradient(58% 38% at 50% -6%, rgba(255, 226, 168, 0.16), transparent 62%),
+    radial-gradient(150% 105% at 50% 42%, #172a21 0%, #0d1a14 38%, #070d0a 72%, #040705 100%) fixed;
   color: var(--text);
   font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   font-size: 15px;
@@ -88,6 +91,18 @@ button { touch-action: manipulation; }
 }
 .btn.look { color: var(--gold-2); border-color: rgba(217, 185, 120, 0.4); }
 .btn.allin { background: linear-gradient(180deg, #e5a765, #bf6f36); border-color: #f0c089; color: #21140a; }
+.btn.accept {
+  background: linear-gradient(180deg, #e79a5a, #c05f2c);
+  border-color: #f5bd85; color: #1e1206; font-weight: 800;
+  box-shadow: 0 8px 26px rgba(200, 110, 50, 0.38);
+}
+/* 表态只有两个选项，给足点击面积，别让人点错 */
+.bar-actions.shove-choice { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.bar-actions.shove-choice .btn { padding: 14px 16px; font-size: 15px; }
+.bar-status strong.shove-call {
+  color: #ffd6a8;
+  animation: pulse 0.9s infinite;
+}
 .btn.danger { color: var(--danger); border-color: rgba(217, 128, 128, 0.35); }
 .link-btn {
   background: none; border: 0; color: var(--muted); text-decoration: underline;
@@ -208,30 +223,80 @@ button { touch-action: manipulation; }
 .felt-wrap { flex: 1; display: grid; place-items: center; padding: 56px 20px 92px; }
 .felt {
   position: relative;
-  width: min(980px, 100%);
-  /* 高度跟着视口走：1280×720 的笔记本上整桌 + 操作条不需要滚动 */
-  height: clamp(280px, 42dvh, 440px);
-  border-radius: 46% / 44%;
-  background:
-    radial-gradient(60% 70% at 50% 34%, rgba(255, 255, 255, 0.07), transparent 70%),
-    linear-gradient(180deg, var(--felt) 0%, var(--felt-2) 100%);
-  border: 10px solid #17251c;
-  box-shadow:
-    inset 0 0 90px rgba(0, 0, 0, 0.5),
-    0 0 0 2px rgba(217, 185, 120, 0.28),
-    0 40px 90px rgba(0, 0, 0, 0.5);
+  width: min(980px, 96%);
+  /* 用长宽比定形状，再用 max-height 兜住矮屏幕；
+     剩下的纵向空间正好留给探出桌沿的座位，不会空一大块 */
+  aspect-ratio: 2.1 / 1;
+  max-height: 100%;
+  /* 透视只作用在桌面那一层，座位和底池留在平面上 */
+  perspective: 1100px;
+  perspective-origin: 50% 34%;
 }
+
+.felt-surface {
+  position: absolute;
+  /* 留一点余量：倾斜后投影会往外扩，贴着边会把护栏切掉 */
+  inset: 4% 2%;
+  transform: rotateX(var(--table-tilt, 21deg));
+  transform-origin: 50% 62%;
+  border-radius: 50% / 46%;
+  /* 外圈护栏：深色皮革，上沿受光、下沿压暗，才有厚度 */
+  background: linear-gradient(180deg, #4e3826 0%, #35251a 40%, #1e1510 76%, #120c08 100%);
+  /* 一叠实心位移投影 = 桌子的侧面厚度，配合上面的倾斜就真的立起来了 */
+  box-shadow:
+    0 4px 0 #241811,
+    0 9px 0 #1d130d,
+    0 14px 0 #170f0a,
+    0 19px 0 #120b07,
+    0 24px 0 #0d0805,
+    0 30px 0 #090604,
+    0 60px 80px -18px rgba(0, 0, 0, 0.85),
+    0 0 0 2px rgba(214, 176, 110, 0.3),
+    0 0 110px rgba(22, 92, 64, 0.32),
+    inset 0 6px 14px rgba(255, 228, 182, 0.26),
+    inset 0 -18px 34px rgba(0, 0, 0, 0.66);
+}
+
+.felt-cloth {
+  position: absolute;
+  inset: clamp(14px, 2.4vw, 26px);
+  border-radius: 50% / 46%;
+  background:
+    radial-gradient(52% 46% at 50% 24%, rgba(255, 246, 218, 0.17), transparent 66%),
+    radial-gradient(125% 120% at 50% 44%, #15734c 0%, #0d5537 46%, #083a26 78%, #052618 100%);
+  box-shadow:
+    inset 0 0 70px rgba(0, 0, 0, 0.5),
+    inset 0 10px 24px rgba(0, 0, 0, 0.46),
+    inset 0 -6px 16px rgba(255, 255, 255, 0.05);
+}
+
+/* 绒布纹理：一小段 SVG 噪声，压在底色上，桌面就不是一块塑料 */
+.felt-cloth::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+  opacity: 0.16;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
 .felt-ring {
-  position: absolute; inset: 26px; border-radius: inherit;
-  border: 1px dashed rgba(255, 255, 255, 0.10); pointer-events: none;
+  position: absolute;
+  inset: clamp(16px, 3vw, 34px);
+  border-radius: inherit;
+  border: 1px dashed rgba(255, 255, 255, 0.09);
+  pointer-events: none;
 }
 
 .pot {
   position: absolute; left: 50%; top: 44%; transform: translate(-50%, -50%);
   display: grid; justify-items: center; gap: 2px; text-align: center;
   padding: 12px 26px; border-radius: 16px;
-  background: rgba(0, 0, 0, 0.32); border: 1px solid rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(4px); min-width: 168px;
+  background: rgba(4, 12, 8, 0.44); border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(6px); min-width: 168px;
+  box-shadow: 0 18px 36px -14px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 .pot span { font-size: 10.5px; letter-spacing: 0.2em; color: var(--muted); text-transform: uppercase; }
 .pot strong { font-size: 30px; color: var(--gold-2); font-variant-numeric: tabular-nums; line-height: 1.1; }
@@ -244,7 +309,8 @@ button { touch-action: manipulation; }
   width: var(--seat-w); display: grid; grid-template-columns: var(--avatar-box) 1fr; gap: 9px;
   align-items: center; padding: 9px 11px;
   background: rgba(6, 14, 11, 0.72); border: 1px solid var(--line);
-  border-radius: 14px; backdrop-filter: blur(6px);
+  border-radius: 14px; backdrop-filter: blur(8px);
+  box-shadow: 0 14px 28px -10px rgba(0, 0, 0, 0.75), 0 2px 0 rgba(255, 255, 255, 0.05) inset;
   transition: border-color 0.2s, box-shadow 0.25s, opacity 0.25s, transform 0.25s var(--ease);
 }
 
@@ -314,8 +380,8 @@ button { touch-action: manipulation; }
   perspective: 700px;
   /* 发牌动画必须放在外层：内层的 transform 是翻面用的，
      两个动画抢同一个属性会让牌在发牌途中露出正面。 */
-  animation: dealIn 0.42s var(--ease) backwards;
-  animation-delay: calc(var(--i, 0) * 70ms);
+  animation: dealIn 0.52s var(--ease) backwards;
+  animation-delay: calc(var(--i, 0) * 90ms);
 }
 .pc-mini { width: var(--card-w); height: var(--card-h); }
 .pc-big { width: var(--card-big-w); height: var(--card-big-h); }
@@ -326,14 +392,18 @@ button { touch-action: manipulation; }
 }
 .pc.is-down .pc-inner { transform: rotateY(180deg); }
 @keyframes dealIn {
-  from { opacity: 0; transform: translateY(-38px) rotate(-14deg) scale(0.82); }
+  from {
+    opacity: 0;
+    transform: translate(var(--deal-x, 0), var(--deal-y, -38px)) rotate(-18deg) scale(0.62);
+  }
+  60% { opacity: 1; }
   to { opacity: 1; transform: none; }
 }
 .pc-face {
   position: absolute; inset: 0; border-radius: 6px;
   backface-visibility: hidden; -webkit-backface-visibility: hidden;
   display: grid; place-items: center;
-  box-shadow: 0 3px 9px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.55), 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 .pc-big .pc-face { border-radius: 9px; }
 .pc-front {
@@ -420,9 +490,17 @@ button { touch-action: manipulation; }
 .bar-actions { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
 .bar-actions .go { margin-left: auto; min-width: 148px; }
 .bar-hint { margin: 10px 0 0; font-size: 12px; color: var(--gold); }
-.raise { display: flex; border: 1px solid var(--line-2); border-radius: 12px; overflow: hidden; }
-.raise select { background: #101d17; border: 0; padding: 10px 8px; outline: 0; }
-.raise .btn { border: 0; border-left: 1px solid var(--line); border-radius: 0; }
+.raise-row {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  border-top: 1px solid var(--line); margin-top: 12px; padding-top: 11px;
+  font-size: 12px; color: var(--muted);
+}
+.raise-row .btn.tier {
+  min-width: 82px; padding: 9px 14px; font-weight: 700;
+  color: var(--gold-2); border-color: rgba(217, 185, 120, 0.32);
+  background: linear-gradient(180deg, rgba(217, 185, 120, 0.16), rgba(217, 185, 120, 0.06));
+}
+.raise-row .btn.tier:hover:not(:disabled) { background: linear-gradient(180deg, rgba(217, 185, 120, 0.3), rgba(217, 185, 120, 0.12)); }
 .compare-row {
   display: flex; gap: 7px; align-items: center; flex-wrap: wrap;
   border-top: 1px solid var(--line); margin-top: 12px; padding-top: 11px;
@@ -440,6 +518,48 @@ button { touch-action: manipulation; }
   transition: transform 0.14s var(--ease), background 0.14s;
 }
 .emote-btn:hover { transform: translateY(-2px) scale(1.06); background: rgba(217, 185, 120, 0.14); }
+
+/* --------------------------------------------------------------- 特效 */
+
+.fx {
+  position: fixed; inset: 0; z-index: 70; display: grid; place-items: center;
+  pointer-events: none;
+}
+.fx::before {
+  content: ""; position: absolute; inset: 0;
+  animation: fxFlash 0.85s ease-out forwards;
+}
+.fx-allin::before { background: radial-gradient(50% 40% at 50% 45%, rgba(255, 168, 84, 0.42), transparent 70%); }
+.fx-accept::before { background: radial-gradient(45% 36% at 50% 45%, rgba(255, 196, 120, 0.3), transparent 70%); }
+.fx-compare::before { background: radial-gradient(50% 40% at 50% 45%, rgba(120, 190, 255, 0.28), transparent 70%); }
+.fx-showdown::before { background: radial-gradient(55% 44% at 50% 45%, rgba(255, 232, 170, 0.36), transparent 70%); }
+@keyframes fxFlash { from { opacity: 1; } to { opacity: 0; } }
+
+.fx-word {
+  font-size: clamp(56px, 12vw, 160px); font-weight: 900; letter-spacing: 0.12em;
+  color: #fff3d6; -webkit-text-stroke: 2px rgba(120, 60, 10, 0.55);
+  text-shadow: 0 0 30px rgba(255, 170, 70, 0.85), 0 10px 40px rgba(0, 0, 0, 0.6);
+  animation: fxStamp 1.05s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  white-space: nowrap;
+}
+.fx-compare .fx-word { color: #e8f4ff; text-shadow: 0 0 30px rgba(120, 190, 255, 0.8), 0 10px 40px rgba(0, 0, 0, 0.6); }
+@keyframes fxStamp {
+  0% { opacity: 0; transform: scale(3.2) rotate(-8deg); filter: blur(14px); }
+  22% { opacity: 1; transform: scale(1) rotate(-3deg); filter: blur(0); }
+  70% { opacity: 1; transform: scale(1.02) rotate(-3deg); }
+  100% { opacity: 0; transform: scale(1.28) rotate(-3deg); filter: blur(3px); }
+}
+
+/* 梭哈的时候整张桌子抖一下 */
+.table-shell.shake .felt-wrap { animation: tableShake 0.45s ease-in-out; }
+@keyframes tableShake {
+  0%, 100% { transform: translate(0, 0); }
+  15% { transform: translate(-7px, 3px); }
+  30% { transform: translate(6px, -4px); }
+  45% { transform: translate(-5px, -2px); }
+  60% { transform: translate(4px, 3px); }
+  80% { transform: translate(-2px, -1px); }
+}
 
 /* --------------------------------------------------------------- 侧栏 */
 
@@ -545,8 +665,8 @@ button { touch-action: manipulation; }
     --seat-ry: 46%;
   }
   /* 宽度用 100% 兜底：右边有常驻侧栏，不能只按视口宽度算 */
-  .felt { width: min(1180px, 100%); height: clamp(320px, 44dvh, 480px); }
-  .felt-wrap { padding: 74px 24px 104px; }
+  .felt { width: min(1140px, 94%); max-height: clamp(340px, 58dvh, 640px); }
+  .felt-wrap { padding: 70px 24px 100px; }
   .bar { width: min(1080px, calc(100% - 36px)); padding: 16px 20px; }
   .bar-status strong { font-size: 17px; }
   .bar-actions > .btn { min-width: 132px; }
@@ -581,8 +701,8 @@ button { touch-action: manipulation; }
     --seat-rx: 40%;
     --seat-ry: 46%;
   }
-  .felt { width: min(1360px, 100%); height: clamp(360px, 46dvh, 540px); }
-  .felt-wrap { padding: 74px 28px 118px; }
+  .felt { width: min(1300px, 94%); max-height: clamp(380px, 64dvh, 760px); }
+  .felt-wrap { padding: 74px 28px 112px; }
   .bar { width: min(1180px, calc(100% - 40px)); }
   .pot strong { font-size: 42px; }
   .table-shell { grid-template-columns: minmax(0, 1fr) 380px; }
@@ -602,12 +722,13 @@ button { touch-action: manipulation; }
 @media (max-width: 780px) {
   .felt-wrap { padding: 34px 8px 94px; }
   .felt {
-    height: clamp(300px, 40dvh, 440px);
-    border-radius: 34% / 22%;
-    border-width: 8px;
+    max-height: clamp(300px, 42dvh, 460px);
     --seat-rx: 33%;
     --seat-ry: 56%;
+    --table-tilt: 10deg;
   }
+  .felt-surface { border-radius: 44% / 30%; }
+  .felt-cloth { border-radius: 44% / 30%; }
   :root {
     --card-w: 24px; --card-h: 34px;
     --card-big-w: 62px; --card-big-h: 88px;
@@ -637,8 +758,7 @@ button { touch-action: manipulation; }
   .bar { border-radius: 16px; padding: 12px; }
   .bar-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .bar-actions .go { grid-column: 1 / -1; margin-left: 0; }
-  .raise { grid-column: 1 / -1; }
-  .raise select { flex: 1; }
+  .raise-row .btn.tier { min-width: 0; flex: 1; padding: 9px 6px; }
   .topbar b { display: none; }
   .emote-btn { width: 36px; height: 36px; font-size: 17px; }
 }

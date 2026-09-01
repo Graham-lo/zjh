@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
-  allInCost as calcAllIn, callCost as calcCall, canAutoStart, canCompareNow, EMOTES, evaluateHand,
-  type GameCommand, type PublicPlayer, type PublicRoom,
+  allInCost as calcAllIn, callCost as calcCall, canAllInNow, canAutoStart, canCompareNow,
+  EMOTES, evaluateHand, type GameCommand, type PublicPlayer, type PublicRoom,
 } from '../../shared/game.ts';
 import { useCountdown } from './TurnRing.tsx';
 
@@ -28,17 +28,15 @@ export function ActionBar({
   const active = room.players.filter((p) => p.status === 'active');
   const compareOpen = canCompareNow(room);
   const canCall = me.chips > cost;
-  // 梭哈现在是随时可选的战术，成本跟着底池走
-  const shovePrice = calcAllIn(room, me);
-  const canShove = me.chips > 0 && active.length > 1;
+  // 梭哈金额由场上最短的一家决定，所有人都跟得起
+  const shovePrice = calcAllIn(room);
+  const shoveOpen = canAllInNow(room);
+  const shoveForced = me.chips <= cost; // 跟不起时随时可以梭哈脱身
+  const canShove = me.chips > 0 && active.length > 1 && (shoveOpen || shoveForced);
   const handType = me.looked && me.hand.length === 3 ? evaluateHand(me.hand).name : null;
+  const shove = room.allIn;
 
   const tiers = room.settings.betOptions.filter((x) => x > room.betUnit);
-  const [tier, setTier] = useState<number | null>(tiers[0] ?? null);
-  useEffect(() => {
-    setTier(room.settings.betOptions.find((x) => x > room.betUnit) ?? null);
-  }, [room.betUnit, room.settings.betOptions]);
-
   // 非自己回合弃牌要点两次 —— 用原生 confirm 会打断节奏，手机上尤其难受
   const [armFold, setArmFold] = useState(false);
   useEffect(() => {
@@ -104,7 +102,19 @@ export function ActionBar({
   return (
     <div className="bar">
       <div className="bar-status">
-        {me.status === 'waiting' ? (
+        {shove ? (
+          me.status !== 'active' ? (
+            <strong className="dim">{shove.initiatorName} 梭哈了 {fmt(shove.amount)}</strong>
+          ) : myTurn ? (
+            <strong className="shove-call">
+              {shove.initiatorName} 梭哈 {fmt(shove.amount)} · 接还是弃？{left}s
+            </strong>
+          ) : (
+            <strong className="dim">
+              {shove.initiatorName} 梭哈了 {fmt(shove.amount)}，等 {room.players.find((p) => p.seat === room.turnSeat)?.name ?? '玩家'} 表态…
+            </strong>
+          )
+        ) : me.status === 'waiting' ? (
           <strong>已入座，等待下一局</strong>
         ) : me.status === 'folded' ? (
           <strong className="dim">你已弃牌，等待本局结束</strong>
@@ -120,7 +130,28 @@ export function ActionBar({
         </span>
       </div>
 
-      {me.status === 'active' && (
+      {me.status === 'active' && shove && (
+        <div className="bar-actions shove-choice">
+          {!me.looked && (
+            <button className="btn look" onClick={() => cmd({ type: 'look' })}>
+              看牌
+            </button>
+          )}
+          {/* 有人梭哈时只有两条路：接，或者弃 */}
+          <button
+            className="btn primary accept"
+            disabled={!myTurn || me.chips < shove.amount}
+            onClick={() => cmd({ type: 'call' })}
+          >
+            接受梭哈 {fmt(shove.amount)}
+          </button>
+          <button className="btn fold" disabled={!myTurn} onClick={() => cmd({ type: 'fold' })}>
+            弃牌
+          </button>
+        </div>
+      )}
+
+      {me.status === 'active' && !shove && (
         <div className="bar-actions">
           {!me.looked && (
             <button className="btn look" onClick={() => cmd({ type: 'look' })}>
@@ -145,36 +176,37 @@ export function ActionBar({
           <button
             className="btn allin"
             disabled={!myTurn || !canShove}
-            title="押上和底池等额的积分，逼所有人开牌"
+            title={
+              canShove
+                ? `你先出 ${fmt(shovePrice)}（场上最少的一家），其他人自己选接或弃`
+                : `第 ${room.settings.allInFromRound} 轮起才能主动梭哈`
+            }
             onClick={() => cmd({ type: 'all_in' })}
           >
-            梭哈 {fmt(shovePrice)}
+            {shoveOpen || shoveForced ? `梭哈 ${fmt(shovePrice)}` : `梭哈 第${room.settings.allInFromRound}轮起`}
           </button>
-          <div className="raise">
-            <select
-              aria-label="加注档位"
-              disabled={!myTurn || !tiers.length}
-              value={tier ?? ''}
-              onChange={(e) => setTier(Number(e.target.value))}
-            >
-              {tiers.map((x) => (
-                <option key={x} value={x}>
-                  {fmt(x)}
-                </option>
-              ))}
-            </select>
-            <button
-              className="btn"
-              disabled={!myTurn || !tier || me.chips <= tier * (me.looked ? 2 : 1)}
-              onClick={() => tier && cmd({ type: 'raise', unit: tier })}
-            >
-              加注
-            </button>
-          </div>
         </div>
       )}
 
-      {myTurn && compareOpen && active.length > 1 && (
+      {/* 加注档位平铺成一排，点一下就走 —— 下拉框要点两次还挡住牌桌 */}
+      {me.status === 'active' && !shove && tiers.length > 0 && (
+        <div className="raise-row">
+          <span>加注到</span>
+          {tiers.map((x) => (
+            <button
+              key={x}
+              className="btn tier"
+              disabled={!myTurn || me.chips <= x * (me.looked ? 2 : 1)}
+              title={`本次需要投入 ${fmt(x * (me.looked ? 2 : 1))}`}
+              onClick={() => cmd({ type: 'raise', unit: x })}
+            >
+              {fmt(x)}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {myTurn && !shove && compareOpen && active.length > 1 && (
         <div className="compare-row">
           <span>比牌 {fmt(comparePrice)}：</span>
           {active

@@ -30,6 +30,8 @@ export interface GameSettings {
   turnSeconds: number;
   /** 本局结束后自动开下一局（所有在线玩家仍处于准备状态时） */
   autoContinue: boolean;
+  /** 第几轮起才允许主动梭哈（跟不起时的被动梭哈不受此限） */
+  allInFromRound: number;
 }
 
 export interface PlayerState {
@@ -104,7 +106,21 @@ export interface RoomState {
   log: LogEntry[];
   chat: ChatEntry[];
   createdAt: number;
+  /** 有人梭哈后等待其他玩家表态；只有接受的人才会进入开牌 */
+  allIn?: PendingAllIn;
   result?: RoundResult;
+}
+
+/** 一次梭哈的表态过程 */
+export interface PendingAllIn {
+  initiatorId: string;
+  initiatorName: string;
+  /** 每家要出的金额，等于发起时场上最短的一家 */
+  amount: number;
+  /** 还没表态的玩家 id，按行动顺序 */
+  pending: string[];
+  /** 已经接受（含发起人）的玩家 id */
+  accepted: string[];
 }
 
 export const DEFAULT_SETTINGS: GameSettings = {
@@ -117,6 +133,7 @@ export const DEFAULT_SETTINGS: GameSettings = {
   escalateFrom: 3,
   turnSeconds: 30,
   autoContinue: true,
+  allInFromRound: 3,
 };
 
 export const AVATARS = ['🐯', '🦊', '🐼', '🐵', '🐸', '🦁', '🐺', '🐷', '🐨', '🦉', '🐲', '🦄'];
@@ -408,18 +425,19 @@ export function compareCost(state: { betUnit: number }, player: { looked: boolea
 }
 
 /**
- * 梭哈（封顶开牌）的成本。
+ * 梭哈的金额：**场上还在局的人里积分最少的那一家**。
  *
- * 押上和底池等额的筹码来逼所有人开牌，输赢对称：赢了净赚一个底池，输了赔一个底池。
- * 下限是比牌价（逼全场开牌总该比只跟一个人比牌贵），上限是你的全部积分 ——
- * 积分不够跟注时，这个公式自然退化成"把剩下的全推出去"。
+ * 用最短的一家封顶，是为了让所有人都跟得起 —— 梭哈会把全部在局玩家按同一金额
+ * 拉进底池然后开牌，如果金额高过某人的身家，那个人就成了被迫破产，不公平。
  */
-export function allInCost(
-  state: { betUnit: number; pot: number },
-  player: { looked: boolean; chips: number },
-): number {
-  const floor = compareCost(state, player);
-  return Math.max(1, Math.min(player.chips, Math.max(state.pot, floor)));
+export function allInCost(state: { players: { status: PlayerStatus; chips: number }[] }): number {
+  const stacks = state.players.filter((p) => p.status === 'active').map((p) => p.chips);
+  return stacks.length ? Math.max(0, Math.min(...stacks)) : 0;
+}
+
+/** 主动梭哈的开放轮次。跟不起时的被动梭哈不受这个限制。 */
+export function canAllInNow(state: { roundNo: number; settings: { allInFromRound: number } }): boolean {
+  return state.roundNo >= state.settings.allInFromRound;
 }
 
 export function canCompareNow(state: {
@@ -562,6 +580,7 @@ export function startRound(state: RoomState, actorId: string | null) {
   state.roundNo = 1;
   state.compareUnlockAt = Math.max(2, entrants.length);
   state.result = undefined;
+  state.allIn = undefined;
 
   for (const p of seated) {
     p.looked = false;
@@ -613,6 +632,17 @@ function doLook(state: RoomState, actorId: string) {
 
 function doCall(state: RoomState, actorId: string) {
   const p = requireTurn(state, actorId);
+  if (state.allIn) {
+    // 表态阶段：跟注就是「接梭哈」，金额是固定的那一份
+    const amount = state.allIn.amount;
+    pay(state, p, amount);
+    p.lastAction = `接梭哈 ${amount}`;
+    pushLog(state, `${p.name} 接下 ${state.allIn.initiatorName} 的梭哈`);
+    state.allIn.accepted.push(p.id);
+    state.allIn.pending = state.allIn.pending.filter((id) => id !== p.id);
+    advanceAllIn(state);
+    return;
+  }
   const cost = callCost(state, p);
   pay(state, p, cost);
   p.lastAction = `跟 ${cost}`;
@@ -626,6 +656,7 @@ function doCall(state: RoomState, actorId: string) {
 
 function doRaise(state: RoomState, actorId: string, newUnit: number) {
   const p = requireTurn(state, actorId);
+  if (state.allIn) throw new GameError('有人梭哈了，只能选择接或者弃牌');
   if (!state.settings.betOptions.includes(newUnit) || newUnit <= state.betUnit) throw new GameError('加注档位无效');
   const cost = newUnit * (p.looked ? 2 : 1);
   if (p.chips <= cost) throw new GameError('积分不足以加注，请选择梭哈或弃牌');
@@ -638,15 +669,67 @@ function doRaise(state: RoomState, actorId: string, newUnit: number) {
 
 function doAllIn(state: RoomState, actorId: string) {
   const p = requireTurn(state, actorId);
+  if (state.allIn) throw new GameError('已经有人梭哈了');
+  const active = activePlayers(state);
+  if (active.length < 2) throw new GameError('没有可以开牌的对手');
   if (p.chips <= 0) throw new GameError('没有可梭哈的积分');
-  if (activePlayers(state).length < 2) throw new GameError('没有可以开牌的对手');
-  const amount = allInCost(state, p);
-  p.chips -= amount;
-  p.bet += amount;
-  state.pot += amount;
+
+  // 跟不起的人任何时候都能梭哈脱身；主动梭哈则要等牌局打开几轮，
+  // 否则一上来就有人掀桌，前两轮的下注博弈就没意义了。
+  const forced = p.chips <= callCost(state, p);
+  if (!forced && !canAllInNow(state)) {
+    throw new GameError(`第 ${state.settings.allInFromRound} 轮起才能主动梭哈`);
+  }
+
+  const amount = allInCost(state);
+  if (amount <= 0) throw new GameError('没有可梭哈的积分');
+
+  // 发起人先把钱押上，然后按行动顺序问其他人接不接。
+  // 金额取的是场上最短的一家，所以每个人都掏得起 —— 但掏不掏是他自己的选择。
+  pay(state, p, amount);
   p.lastAction = `梭哈 ${amount}`;
-  pushLog(state, `${p.name} 梭哈 ${amount}，触发封顶全员开牌`);
-  forceShowdown(state, p, '梭哈封顶，全员开牌');
+  const M = state.settings.maxPlayers;
+  const order = active
+    .filter((q) => q.id !== p.id)
+    .sort((a, b) => ((a.seat - p.seat + M) % M) - ((b.seat - p.seat + M) % M));
+  state.allIn = {
+    initiatorId: p.id,
+    initiatorName: p.name,
+    amount,
+    pending: order.map((q) => q.id),
+    accepted: [p.id],
+  };
+  pushLog(state, `${p.name} 梭哈 ${amount}，等其他人表态`);
+  advanceAllIn(state);
+}
+
+/**
+ * 推进梭哈表态：问下一个人，或者在所有人都表完态后收场。
+ * 每个人只能接或弃，两种都是终态，所以这个过程一定会结束。
+ */
+function advanceAllIn(state: RoomState) {
+  const pendingAllIn = state.allIn;
+  if (!pendingAllIn) return;
+  const stillIn = (id: string) => state.players.find((x) => x.id === id)?.status === 'active';
+  pendingAllIn.pending = pendingAllIn.pending.filter(stillIn);
+  pendingAllIn.accepted = pendingAllIn.accepted.filter(stillIn);
+
+  if (pendingAllIn.pending.length) {
+    const next = playerById(state, pendingAllIn.pending[0]);
+    state.turnSeat = next.seat;
+    touchDeadline(state);
+    return;
+  }
+
+  const initiator = state.players.find((x) => x.id === pendingAllIn.initiatorId);
+  state.allIn = undefined;
+  if (!initiator) return;
+  // 有人接就开牌比大小；一个都没人接，发起人直接收锅且不亮牌
+  if (pendingAllIn.accepted.length >= 2) {
+    forceShowdown(state, initiator, '梭哈开牌');
+  } else {
+    finishRound(state, initiator, '无人接梭哈', []);
+  }
 }
 
 /**
@@ -662,14 +745,22 @@ function doFold(state: RoomState, actorId: string, note = '弃牌') {
   if (p.status !== 'active') throw new GameError('你不在本局中');
   const wasTurn = state.turnSeat === p.seat;
   p.status = 'folded';
-  p.lastAction = note;
-  pushLog(state, `${p.name} ${note}`);
-  if (maybeFinish(state)) return;
+  p.lastAction = state.allIn && p.id !== state.allIn.initiatorId ? '不接梭哈' : note;
+  pushLog(state, `${p.name} ${p.lastAction}`);
+  if (maybeFinish(state)) {
+    state.allIn = undefined;
+    return;
+  }
+  if (state.allIn) {
+    advanceAllIn(state);
+    return;
+  }
   if (wasTurn) advanceTurn(state, p.seat);
 }
 
 function doCompare(state: RoomState, actorId: string, targetId: string) {
   const p = requireTurn(state, actorId);
+  if (state.allIn) throw new GameError('有人梭哈了，只能选择接或者弃牌');
   if (!canCompareNow(state)) throw new GameError('至少完成一轮行动后才能比牌');
   const target = playerById(state, targetId);
   if (target.id === p.id || target.status !== 'active') throw new GameError('比牌对象无效');
@@ -836,6 +927,7 @@ export function resetToLobby(state: RoomState) {
   }
   state.phase = 'lobby';
   state.result = undefined;
+  state.allIn = undefined;
   state.turnSeat = null;
   state.turnDeadline = null;
   state.pot = 0;
@@ -864,6 +956,15 @@ export function botDecision(state: RoomState, bot: PlayerState): GameCommand {
   const active = activePlayers(state);
   const opponents = Math.max(1, active.length - 1);
 
+  // 有人梭哈时只有两条路：接或者弃。先看牌，再按赔率决定。
+  if (state.allIn) {
+    if (!bot.looked) return { type: 'look' };
+    const price = state.allIn.amount;
+    if (bot.chips < price) return { type: 'fold' };
+    const chance = Math.pow(handPercentile(bot.hand), Math.max(1, state.allIn.accepted.length));
+    return chance > price / (state.pot + price) * 0.9 ? { type: 'call' } : { type: 'fold' };
+  }
+
   // 先决定要不要看牌：闷牌便宜，但第二轮开始必须看。
   if (!bot.looked && (state.roundNo >= 2 || Math.random() < 0.55)) return { type: 'look' };
 
@@ -878,7 +979,7 @@ export function botDecision(state: RoomState, bot: PlayerState): GameCommand {
   const bluff = (mood - 0.5) * 0.12;
 
   if (bot.chips <= cost) {
-    // 跟不起了：牌好就梭，牌烂就弃。
+    // 跟不起了：牌好就梭（被动梭哈不受轮次限制），牌烂就弃。
     return equity + bluff > 0.28 ? { type: 'all_in' } : { type: 'fold' };
   }
 
@@ -887,9 +988,7 @@ export function botDecision(state: RoomState, bot: PlayerState): GameCommand {
   if (equity + bluff < foldLine && Math.random() < 0.85) return { type: 'fold' };
 
   // 抓到大牌时偶尔直接梭哈，把所有人拖下水
-  if (
-    bot.looked && equity > 0.9 && state.pot >= allInCost(state, bot) && Math.random() < 0.25
-  ) {
+  if (canAllInNow(state) && bot.looked && equity > 0.9 && Math.random() < 0.25) {
     return { type: 'all_in' };
   }
 

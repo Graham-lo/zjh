@@ -64,6 +64,8 @@ interface Snapshot {
   handNo: number;
   turnSeat: number | null;
   chatSeq: number;
+  /** 变更前是否处在梭哈表态中 —— 用来把「跟注」区分成「接梭哈」 */
+  allIn: boolean;
 }
 
 export class Hub {
@@ -151,6 +153,7 @@ export class Hub {
       handNo: state.handNo,
       turnSeat: state.turnSeat,
       chatSeq: state.chat.at(-1)?.seq ?? 0,
+      allIn: !!state.allIn,
     };
   }
 
@@ -159,7 +162,9 @@ export class Hub {
     if (cmd) {
       const spent = state.pot - before.pot;
       if (spent > 0 && (cmd.type === 'call' || cmd.type === 'raise' || cmd.type === 'all_in' || cmd.type === 'compare')) {
-        events.push({ k: 'bet', playerId: actorId, amount: spent, kind: cmd.type });
+        // 表态阶段的「跟注」其实是接梭哈，播报要不一样
+        const kind = cmd.type === 'call' && before.allIn ? 'accept' : cmd.type;
+        events.push({ k: 'bet', playerId: actorId, amount: spent, kind });
       }
       if (cmd.type === 'look') events.push({ k: 'look', playerId: actorId });
       if (cmd.type === 'fold') events.push({ k: 'fold', playerId: actorId });
