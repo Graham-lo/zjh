@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import type { Card, PublicPlayer } from '../../shared/game.ts';
+import { evaluateHand, type Card, type PublicPlayer } from '../../shared/game.ts';
 import { PlayingCard } from './Card.tsx';
 import { TurnRing } from './TurnRing.tsx';
 
@@ -120,6 +120,9 @@ export function Seat({
         <div className="seat-chips">{fmt(player.chips)}</div>
         {player.lastAction && <div className="seat-action">{player.lastAction}</div>}
       </div>
+
+      {/* 看过牌之后直接把牌型写出来，省得自己在心里对一遍 */}
+      {revealed && <span className="hand-type seat-type">{evaluateHand(hand).name}</span>}
 
       <div className="seat-hand">
         {player.status === 'waiting' ? (

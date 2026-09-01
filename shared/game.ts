@@ -192,15 +192,15 @@ export function evaluateHand(cards: Card[]): HandEval {
   const entries = [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]);
   const special235 = [...ranks].sort((a, b) => a - b).join(',') === '2,3,5' && !flush;
   if (entries[0][1] === 3) return { category: 6, name: '豹子', tiebreak: [entries[0][0]], special235 };
-  if (flush && sh) return { category: 5, name: '同花顺', tiebreak: [sh], special235 };
-  if (flush) return { category: 4, name: '同花', tiebreak: ranks, special235 };
+  if (flush && sh) return { category: 5, name: '顺金', tiebreak: [sh], special235 };
+  if (flush) return { category: 4, name: '金花', tiebreak: ranks, special235 };
   if (sh) return { category: 3, name: '顺子', tiebreak: [sh], special235 };
   if (entries[0][1] === 2) {
     const pair = entries[0][0];
     const kicker = entries.find((e) => e[1] === 1)![0];
     return { category: 2, name: '对子', tiebreak: [pair, kicker], special235 };
   }
-  return { category: 1, name: special235 ? '特殊235' : '单张', tiebreak: ranks, special235 };
+  return { category: 1, name: special235 ? '特殊235' : '散牌', tiebreak: ranks, special235 };
 }
 
 function lexCompare(a: number[], b: number[]): number {
@@ -405,6 +405,21 @@ export function callCost(state: { betUnit: number }, player: { looked: boolean }
 
 export function compareCost(state: { betUnit: number }, player: { looked: boolean }): number {
   return callCost(state, player) * 2;
+}
+
+/**
+ * 梭哈（封顶开牌）的成本。
+ *
+ * 押上和底池等额的筹码来逼所有人开牌，输赢对称：赢了净赚一个底池，输了赔一个底池。
+ * 下限是比牌价（逼全场开牌总该比只跟一个人比牌贵），上限是你的全部积分 ——
+ * 积分不够跟注时，这个公式自然退化成"把剩下的全推出去"。
+ */
+export function allInCost(
+  state: { betUnit: number; pot: number },
+  player: { looked: boolean; chips: number },
+): number {
+  const floor = compareCost(state, player);
+  return Math.max(1, Math.min(player.chips, Math.max(state.pot, floor)));
 }
 
 export function canCompareNow(state: {
@@ -623,11 +638,10 @@ function doRaise(state: RoomState, actorId: string, newUnit: number) {
 
 function doAllIn(state: RoomState, actorId: string) {
   const p = requireTurn(state, actorId);
-  const required = callCost(state, p);
   if (p.chips <= 0) throw new GameError('没有可梭哈的积分');
-  if (p.chips > required) throw new GameError('只有积分不足以跟注时才能梭哈');
-  const amount = p.chips;
-  p.chips = 0;
+  if (activePlayers(state).length < 2) throw new GameError('没有可以开牌的对手');
+  const amount = allInCost(state, p);
+  p.chips -= amount;
   p.bet += amount;
   state.pot += amount;
   p.lastAction = `梭哈 ${amount}`;
@@ -635,12 +649,23 @@ function doAllIn(state: RoomState, actorId: string) {
   forceShowdown(state, p, '梭哈封顶，全员开牌');
 }
 
+/**
+ * 弃牌。
+ *
+ * 和看牌一样不占用行动权：牌太烂想马上退出，不必等轮到自己 ——
+ * 干等着还得盯着别人慢慢想，是最没必要的一种等待。
+ * 只有当弃牌的正好是当前行动者时，才需要把行动权交出去。
+ */
 function doFold(state: RoomState, actorId: string, note = '弃牌') {
-  const p = requireTurn(state, actorId);
+  if (state.phase !== 'playing') throw new GameError('当前不在游戏中');
+  const p = playerById(state, actorId);
+  if (p.status !== 'active') throw new GameError('你不在本局中');
+  const wasTurn = state.turnSeat === p.seat;
   p.status = 'folded';
   p.lastAction = note;
   pushLog(state, `${p.name} ${note}`);
-  if (!maybeFinish(state)) advanceTurn(state, p.seat);
+  if (maybeFinish(state)) return;
+  if (wasTurn) advanceTurn(state, p.seat);
 }
 
 function doCompare(state: RoomState, actorId: string, targetId: string) {
@@ -860,6 +885,13 @@ export function botDecision(state: RoomState, bot: PlayerState): GameCommand {
   // 亏赔率太多就弃牌。闷牌阶段成本低，容忍度高一些。
   const foldLine = bot.looked ? potOdds * 0.75 : potOdds * 0.35;
   if (equity + bluff < foldLine && Math.random() < 0.85) return { type: 'fold' };
+
+  // 抓到大牌时偶尔直接梭哈，把所有人拖下水
+  if (
+    bot.looked && equity > 0.9 && state.pot >= allInCost(state, bot) && Math.random() < 0.25
+  ) {
+    return { type: 'all_in' };
+  }
 
   // 牌很好且开放比牌时，主动开火。
   if (

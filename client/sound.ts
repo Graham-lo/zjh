@@ -92,3 +92,86 @@ class Sound {
 }
 
 export const sound = new Sound();
+
+/**
+ * 牌桌语音播报。
+ *
+ * 用浏览器自带的 speechSynthesis，不打包任何音频文件 —— 装机自带的中文发音就是真人录的，
+ * 首屏不多一个字节，也不用等音频加载。代价是音色随设备走（iOS 是 Siri 音色，
+ * 安卓是 Google TTS，macOS 是"婷婷"一类），不同手机听起来会不一样。
+ */
+class Voice {
+  enabled = (() => {
+    try {
+      return localStorage.getItem('zjh:voice') !== 'off';
+    } catch {
+      return true;
+    }
+  })();
+
+  private picked: SpeechSynthesisVoice | null = null;
+  private primed = false;
+
+  get available() {
+    return typeof speechSynthesis !== 'undefined';
+  }
+
+  setEnabled(on: boolean) {
+    this.enabled = on;
+    try {
+      localStorage.setItem('zjh:voice', on ? 'on' : 'off');
+    } catch {
+      /* ignore */
+    }
+    if (on) this.say('准备好了');
+    else speechSynthesis?.cancel();
+  }
+
+  /** iOS 要求首次发声必须来自用户手势，所以在第一次点击时先热一下身 */
+  unlock() {
+    if (this.primed || !this.available) return;
+    this.primed = true;
+    this.pick();
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0;
+    speechSynthesis.speak(u);
+  }
+
+  private pick() {
+    if (this.picked || !this.available) return;
+    const all = speechSynthesis.getVoices();
+    if (!all.length) {
+      // 有些浏览器要等 voiceschanged 才拿得到列表
+      speechSynthesis.addEventListener('voiceschanged', () => this.pick(), { once: true });
+      return;
+    }
+    this.picked =
+      all.find((v) => v.lang === 'zh-CN' && v.localService) ??
+      all.find((v) => v.lang === 'zh-CN') ??
+      all.find((v) => v.lang.startsWith('zh')) ??
+      null;
+  }
+
+  /**
+   * 说一句话。新的一句会打断上一句 —— 机器人连着行动时，
+   * 排队播报会越落越远，宁可只听到最新的那一下。
+   */
+  say(text: string) {
+    if (!this.enabled || !this.available || !text) return;
+    this.pick();
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      if (this.picked) u.voice = this.picked;
+      u.lang = this.picked?.lang ?? 'zh-CN';
+      u.rate = 1.15;
+      u.pitch = 1.0;
+      u.volume = 0.9;
+      speechSynthesis.speak(u);
+    } catch {
+      /* 播不出来不影响打牌 */
+    }
+  }
+}
+
+export const voice = new Voice();

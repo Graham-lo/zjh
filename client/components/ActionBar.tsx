@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react';
-import { callCost as calcCall, canAutoStart, canCompareNow, EMOTES, type GameCommand, type PublicPlayer, type PublicRoom } from '../../shared/game.ts';
+import {
+  allInCost as calcAllIn, callCost as calcCall, canAutoStart, canCompareNow, EMOTES, evaluateHand,
+  type GameCommand, type PublicPlayer, type PublicRoom,
+} from '../../shared/game.ts';
 import { useCountdown } from './TurnRing.tsx';
 
 const fmt = (n: number) => n.toLocaleString('zh-CN');
@@ -24,14 +27,26 @@ export function ActionBar({
   const comparePrice = cost * 2;
   const active = room.players.filter((p) => p.status === 'active');
   const compareOpen = canCompareNow(room);
-  const canAllIn = me.chips > 0 && me.chips <= cost;
   const canCall = me.chips > cost;
+  // 梭哈现在是随时可选的战术，成本跟着底池走
+  const shovePrice = calcAllIn(room, me);
+  const canShove = me.chips > 0 && active.length > 1;
+  const handType = me.looked && me.hand.length === 3 ? evaluateHand(me.hand).name : null;
 
   const tiers = room.settings.betOptions.filter((x) => x > room.betUnit);
   const [tier, setTier] = useState<number | null>(tiers[0] ?? null);
   useEffect(() => {
     setTier(room.settings.betOptions.find((x) => x > room.betUnit) ?? null);
   }, [room.betUnit, room.settings.betOptions]);
+
+  // 非自己回合弃牌要点两次 —— 用原生 confirm 会打断节奏，手机上尤其难受
+  const [armFold, setArmFold] = useState(false);
+  useEffect(() => {
+    if (!armFold) return;
+    const t = setTimeout(() => setArmFold(false), 3000);
+    return () => clearTimeout(t);
+  }, [armFold]);
+  useEffect(() => setArmFold(false), [room.handNo, myTurn]);
 
   if (room.phase === 'lobby') {
     const seated = room.players.length;
@@ -98,7 +113,8 @@ export function ActionBar({
         ) : (
           <strong className="dim">等待 {turnName} 行动…</strong>
         )}
-        <span>
+        <span className="bar-meta">
+          {handType && <b className="hand-type" title="你的牌型">{handType}</b>}
           第 {room.handNo} 局 · 第 {room.roundNo}/{room.settings.maxRounds} 轮 · 底注 {fmt(room.betUnit)}
           {compareOpen ? ' · 可比牌' : ' · 首轮中'}
         </span>
@@ -111,18 +127,29 @@ export function ActionBar({
               看牌
             </button>
           )}
-          <button className="btn fold" disabled={!myTurn} onClick={() => cmd({ type: 'fold' })}>
-            弃牌
+          {/* 弃牌和看牌一样不占行动权：牌烂就直接走，不用干等别人慢慢想 */}
+          <button
+            className={`btn fold${armFold ? ' armed' : ''}`}
+            onClick={() => {
+              if (myTurn) return cmd({ type: 'fold' });
+              if (!armFold) return setArmFold(true);
+              setArmFold(false);
+              cmd({ type: 'fold' });
+            }}
+          >
+            {armFold ? '再点一次确认' : '弃牌'}
           </button>
-          {canAllIn ? (
-            <button className="btn primary allin" disabled={!myTurn} onClick={() => cmd({ type: 'all_in' })}>
-              梭哈 {fmt(me.chips)}
-            </button>
-          ) : (
-            <button className="btn primary" disabled={!myTurn || !canCall} onClick={() => cmd({ type: 'call' })}>
-              跟注 {fmt(cost)}
-            </button>
-          )}
+          <button className="btn primary" disabled={!myTurn || !canCall} onClick={() => cmd({ type: 'call' })}>
+            跟注 {fmt(cost)}
+          </button>
+          <button
+            className="btn allin"
+            disabled={!myTurn || !canShove}
+            title="押上和底池等额的积分，逼所有人开牌"
+            onClick={() => cmd({ type: 'all_in' })}
+          >
+            梭哈 {fmt(shovePrice)}
+          </button>
           <div className="raise">
             <select
               aria-label="加注档位"

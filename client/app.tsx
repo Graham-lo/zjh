@@ -3,7 +3,7 @@ import { AVATARS, type GameCommand, type PublicRoom } from '../shared/game.ts';
 import type { GameEvent } from '../shared/protocol.ts';
 import { Landing, type Identity } from './components/Landing.tsx';
 import { Net, type Auth, type NetStatus } from './net.ts';
-import { sound } from './sound.ts';
+import { sound, voice } from './sound.ts';
 import { Table } from './table.tsx';
 
 const IDENT_KEY = 'zjh:me';
@@ -130,6 +130,7 @@ export default function App() {
     const net = netRef.current;
     if (!net || !room) return;
     sound.unlock();
+    voice.unlock();
     if (c.type === 'leave') {
       try {
         localStorage.removeItem(authKey(room.code));
@@ -149,6 +150,7 @@ export default function App() {
     const net = netRef.current;
     if (!net) return;
     sound.unlock();
+    voice.unlock();
     setBusy(true);
     setError('');
     net.send(kind === 'create'

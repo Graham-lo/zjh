@@ -41,7 +41,7 @@ export function Landing({
         <h1>好友炸金花</h1>
         <p className="lead">2–6 人私人牌桌。开房、发链接、坐下就打。虚拟积分仅供娱乐，不充值、不转让、不提现、不兑换。</p>
         <div className="rules-strip">
-          {['豹子', '同花顺', '同花', '顺子', '对子', '单张'].map((r, i) => (
+          {['豹子', '顺金', '金花', '顺子', '对子', '散牌'].map((r, i) => (
             <span key={r}>
               {i > 0 && <i>›</i>}
               {r}

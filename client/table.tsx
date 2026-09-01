@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { GameCommand, PublicPlayer, PublicRoom } from '../shared/game.ts';
+import { evaluateHand, type GameCommand, type PublicPlayer, type PublicRoom } from '../shared/game.ts';
 import type { GameEvent } from '../shared/protocol.ts';
 import { ActionBar, EmoteBar } from './components/ActionBar.tsx';
 import { PlayingCard } from './components/Card.tsx';
 import { Dock } from './components/Dock.tsx';
 import { EmptySeat, Seat } from './components/Seat.tsx';
 import type { NetStatus } from './net.ts';
-import { sound } from './sound.ts';
+import { sound, voice } from './sound.ts';
 
 const fmt = (n: number) => n.toLocaleString('zh-CN');
 
@@ -84,6 +84,7 @@ export function Table({
   const [chips, setChips] = useState<FlyChip[]>([]);
   const [flash, setFlash] = useState<'win' | 'lose' | null>(null);
   const [muted, setMuted] = useState(!sound.enabled);
+  const [mutedVoice, setMutedVoice] = useState(!voice.enabled);
   const seen = useRef(0);
   const chipId = useRef(0);
 
@@ -125,17 +126,29 @@ export function Table({
             setTimeout(() => setChips((c) => c.filter((x) => x.id !== id)), 900);
           }
           sound.play('chip');
+          voice.say({ call: '跟注', raise: '加注', all_in: '梭哈', compare: '比牌' }[ev.kind]);
           break;
         }
         case 'look':
           if (ev.playerId === room.viewerId) sound.play('flip');
           break;
+        case 'fold':
+          voice.say('弃牌');
+          break;
         case 'turn':
           if (ev.playerId === room.viewerId) {
             sound.play('turn');
+            voice.say('该你了');
             navigator.vibrate?.(30);
           }
           break;
+        case 'showdown': {
+          // 开牌这一下是全场最有戏的时刻，直接把赢家的牌型念出来
+          const hand = room.result?.hands[ev.winnerId];
+          const winner = room.players.find((p) => p.id === ev.winnerId);
+          if (hand?.length === 3) voice.say(`${evaluateHand(hand).name}，${winner?.name ?? ''} 赢`);
+          break;
+        }
         case 'win': {
           const mine = ev.playerId === room.viewerId;
           const played = me && me.bet > 0;
@@ -193,6 +206,7 @@ export function Table({
           <button
             className="icon-btn"
             aria-label={muted ? '开启音效' : '关闭音效'}
+            title={muted ? '音效已关闭' : '音效已开启'}
             onClick={() => {
               const next = !muted;
               setMuted(next);
@@ -201,6 +215,21 @@ export function Table({
           >
             {muted ? '🔇' : '🔊'}
           </button>
+          {voice.available && (
+            <button
+              className={`icon-btn${mutedVoice ? ' off' : ''}`}
+              aria-label={mutedVoice ? '开启语音播报' : '关闭语音播报'}
+              title={mutedVoice ? '语音播报已关闭' : '语音播报已开启'}
+              onClick={() => {
+                const next = !mutedVoice;
+                setMutedVoice(next);
+                voice.unlock();
+                voice.setEnabled(!next);
+              }}
+            >
+              🗣️
+            </button>
+          )}
           <button
             className="icon-btn danger"
             onClick={() => window.confirm('确定退出房间？') && cmd({ type: 'leave' })}
@@ -281,13 +310,15 @@ export function Table({
                 {result.revealed.map((id) => {
                   const p = room.players.find((x) => x.id === id);
                   if (!p) return null;
+                  const hands = showdownHands[id] ?? [];
                   return (
                     <div key={id} className={`reveal${id === result.winnerId ? ' won' : ''}`}>
                       <span>
                         {p.avatar} {p.name}
+                        <i className="reveal-type">{hands.length === 3 ? evaluateHand(hands).name : ''}</i>
                       </span>
                       <div className="reveal-hand">
-                        {(showdownHands[id] ?? []).map((c, i) => (
+                        {hands.map((c, i) => (
                           <PlayingCard key={i} card={c} faceDown={false} />
                         ))}
                       </div>
