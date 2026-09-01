@@ -1,6 +1,27 @@
 # Caddy 会自动申请并续期 HTTPS 证书，WebSocket 升级也不用额外配置。
 # 安装：sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+
+# --- 情况 A：有域名，且 443 端口空闲（最常见）---
 zjh.example.com {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:8787
 }
+
+# --- 情况 B：没有域名，或 443 已被别的服务占用 ---
+#
+# 没有域名时可以用 sslip.io：<你的IP>.sslip.io 会直接解析到该 IP，
+# Let's Encrypt 认它，所以能拿到真实证书，不用买域名。
+#
+# 443 被占用时，把服务开在别的端口（例如 8443），
+# 证书走 80 端口的 HTTP-01 挑战 —— 必须禁用 TLS-ALPN 挑战，因为它只能用 443。
+# 防火墙需要放行 80 和 8443。
+#
+# https://203.0.113.10.sslip.io:8443 {
+# 	encode zstd gzip
+# 	reverse_proxy 127.0.0.1:8787
+# 	tls {
+# 		issuer acme {
+# 			disable_tlsalpn_challenge
+# 		}
+# 	}
+# }

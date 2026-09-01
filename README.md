@@ -85,6 +85,26 @@ sudo systemctl reload caddy
 用 nginx 的话见 `deploy/nginx.conf` —— **必须显式转发 `Upgrade` / `Connection` 头**，
 否则 WebSocket 连不上，页面会一直显示"重连中"。
 
+### 没有域名，或 443 被占用
+
+两个都能绕过，见 `deploy/Caddyfile` 里的情况 B：
+
+- **没域名**：用 `<你的IP>.sslip.io`。这个域名直接解析到该 IP，Let's Encrypt 认它，
+  能签发真实证书，不用买域名。
+- **443 被占用**：把服务开在别的端口（例如 8443），证书走 **80 端口的 HTTP-01 挑战**，
+  并在 Caddy 里 `disable_tlsalpn_challenge`（TLS-ALPN 挑战只能用 443）。
+  防火墙要同时放行 80 和你选的端口。
+
+当前线上就是这种部署：`https://96.44.162.222.sslip.io:8443`，跑在 archive VPS 上，
+443 留给该机原有的 hysteria 服务。
+
+### Node 的两种装法
+
+- apt / NodeSource：`node` 在 `/usr/bin/node`
+- 官方 tarball 解到 `/opt/node` 再软链到 `/usr/local/bin/node`（不往系统里加第三方 apt 源）
+
+`deploy/zjh.service` 里写的是 `/usr/local/bin/node`，用 apt 装的话改一下这一行即可。
+
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |

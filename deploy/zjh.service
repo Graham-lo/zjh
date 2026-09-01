@@ -11,7 +11,8 @@ Type=simple
 User=zjh
 Group=zjh
 WorkingDirectory=/opt/zjh
-ExecStart=/usr/bin/node /opt/zjh/dist/server.mjs
+# apt / NodeSource 装的是 /usr/bin/node；官方 tarball 装到 /opt/node 时软链到这里
+ExecStart=/usr/local/bin/node /opt/zjh/dist/server.mjs
 Restart=always
 RestartSec=2
 
