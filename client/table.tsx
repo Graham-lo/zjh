@@ -494,7 +494,14 @@ export function Table({
           )}
           <button
             className="icon-btn danger wide"
-            onClick={() => window.confirm('确定退出房间？') && cmd({ type: 'leave' })}
+            onClick={() =>
+              window.confirm(
+                // 牌局进行中退出＝弃牌离场（服务端如此结算），弹窗里要把这层代价说清楚
+                room.phase === 'playing' && me.status === 'active'
+                  ? '正在牌局中，退出将自动弃牌并离开房间。确定？'
+                  : '确定退出房间？',
+              ) && cmd({ type: 'leave' })
+            }
             aria-label="退出房间"
           >
             <IconExit size={15} />

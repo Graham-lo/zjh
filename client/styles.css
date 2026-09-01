@@ -39,6 +39,12 @@
   --seat-w: 190px;
   --avatar: 48px;
   --avatar-box: 58px;
+  /* 全屏特效里那几个"和屏幕一样大"的量：屏幕越宽，它们要跟着一起长，
+     否则 2K 上比牌双方隔着大半张桌子，粒子也只在中间撒一小撮。 */
+  --duel-inset: clamp(16px, 12vw, 220px);
+  --duel-rush: min(30vw, 300px);
+  --fx-burst: 1;
+  --deal-k: 1;
   --shadow: 0 24px 60px -16px rgba(0, 0, 0, 0.75);
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   /* 入场带一点过冲，像有质量的东西落到桌上，而不是匀速滑到位 */
@@ -627,7 +633,8 @@ button { touch-action: manipulation; }
 @keyframes dealIn {
   0% {
     opacity: 0;
-    transform: translate(var(--deal-x, 0), var(--deal-y, -38px))
+    /* --deal-k 把飞出的起点按屏幕档位放大：桌子大了，牌还从原地冒出来就没有"甩"的感觉 */
+    transform: translate(calc(var(--deal-x, 0px) * var(--deal-k, 1)), calc(var(--deal-y, -38px) * var(--deal-k, 1)))
       rotate(calc(-24deg + var(--i, 0) * 9deg)) scale(0.55);
   }
   55% { opacity: 1; }
@@ -971,8 +978,9 @@ button { touch-action: manipulation; }
   border-radius: 50%; border: 2px solid rgba(255, 200, 120, 0.55); opacity: 0;
   box-shadow: 0 0 60px rgba(255, 180, 90, 0.4), inset 0 0 60px rgba(255, 180, 90, 0.2);
 }
-.shove-ring.r1 { width: 560px; height: 340px; }
-.shove-ring.r2 { width: 800px; height: 480px; border-width: 1px; }
+/* 冲击波跟着视口走：写死 560/800 的话，2K 上这两圈只占中间一小块，冲击感全没了 */
+.shove-ring.r1 { width: clamp(560px, 44vw, 1000px); height: clamp(340px, 26.4vw, 600px); }
+.shove-ring.r2 { width: clamp(800px, 62vw, 1440px); height: clamp(480px, 37.2vw, 864px); border-width: 1px; }
 .beat-impact .shove-ring { animation: shockwave 0.7s var(--ease) forwards; }
 .beat-impact .shove-ring.r2 { animation-delay: 0.1s; }
 @keyframes shockwave {
@@ -986,7 +994,12 @@ button { touch-action: manipulation; }
 .beat-impact .shove-spark { animation: burst 0.9s var(--ease) var(--pd) forwards; }
 @keyframes burst {
   0% { opacity: 1; transform: translate(-50%, -50%) scale(var(--ps, 1)); }
-  100% { opacity: 0; transform: translate(-50%, -50%) translate(var(--px), var(--py)) scale(0.2); }
+  /* 粒子的飞散半径由组件算成 px，这里再乘一档屏幕系数，大屏上才撒得开 */
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%)
+      translate(calc(var(--px) * var(--fx-burst, 1)), calc(var(--py) * var(--fx-burst, 1))) scale(0.2);
+  }
 }
 .shove-core { position: absolute; inset: 0; display: grid; place-items: center; align-content: center; text-align: center; }
 .shove-word {
@@ -1034,16 +1047,18 @@ button { touch-action: manipulation; }
   transform: translateY(-50%);
   transition: transform 0.4s cubic-bezier(0.55, 0, 0.35, 1), opacity 0.3s;
 }
-.duel-a { left: clamp(16px, 12vw, 220px); }
-.duel-b { right: clamp(16px, 12vw, 220px); flex-direction: row-reverse; }
+/* 起手内缩与冲刺距离都收进变量：屏幕一宽，两边同时往里挪，
+   否则双方在 2K 上各站一角，冲完还差半个屏幕才碰得到 */
+.duel-a { left: var(--duel-inset); }
+.duel-b { right: var(--duel-inset); flex-direction: row-reverse; }
 /* 拍一：双方后仰蓄势 */
 .duel.beat-charge .duel-a { transform: translateY(-50%) translateX(-40px) rotate(-3deg); }
 .duel.beat-charge .duel-b { transform: translateY(-50%) translateX(40px) rotate(3deg); }
 /* 拍二：斜向冲进中央对撞 */
-.duel.beat-clash .duel-a { transform: translateY(-50%) translateX(min(30vw, 300px)) translateY(-24px) rotate(6deg); }
-.duel.beat-clash .duel-b { transform: translateY(-50%) translateX(max(-30vw, -300px)) translateY(20px) rotate(-6deg); }
-.duel.beat-hold .duel-a { transform: translateY(-50%) translateX(min(26vw, 260px)) translateY(-18px) rotate(4deg); }
-.duel.beat-hold .duel-b { transform: translateY(-50%) translateX(max(-26vw, -260px)) translateY(16px) rotate(-4deg); }
+.duel.beat-clash .duel-a { transform: translateY(-50%) translateX(var(--duel-rush)) translateY(-24px) rotate(6deg); }
+.duel.beat-clash .duel-b { transform: translateY(-50%) translateX(calc(var(--duel-rush) * -1)) translateY(20px) rotate(-6deg); }
+.duel.beat-hold .duel-a { transform: translateY(-50%) translateX(calc(var(--duel-rush) * 0.87)) translateY(-18px) rotate(4deg); }
+.duel.beat-hold .duel-b { transform: translateY(-50%) translateX(calc(var(--duel-rush) * -0.87)) translateY(16px) rotate(-4deg); }
 
 .duel-who { display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .duel-av {
@@ -1056,12 +1071,13 @@ button { touch-action: manipulation; }
 .duel-who i { font-style: normal; font-size: 11px; letter-spacing: 0.24em; color: var(--gold); }
 .duel-b .duel-who i { color: #8ecdfd; }
 
-.duel-fan { position: relative; width: calc(var(--card-big-w) * 1.9); height: calc(var(--card-big-h) * 1.25); }
+/* 牌扇的错位量按牌宽算，不写死 44px —— 牌一放大，写死的间距就会把三张压成一摞 */
+.duel-fan { position: relative; width: calc(var(--card-big-w) * 2); height: calc(var(--card-big-h) * 1.25); }
 .duel-card {
-  position: absolute; top: calc(var(--i) * -9px); left: calc(var(--i) * 44px);
+  position: absolute; top: calc(var(--i) * -9px); left: calc(var(--i) * var(--card-big-w) * 0.48);
   transform: rotate(calc(-14deg + var(--i) * 10deg));
 }
-.duel-b .duel-card { left: auto; right: calc(var(--i) * 44px); transform: rotate(calc(14deg - var(--i) * 10deg)); }
+.duel-b .duel-card { left: auto; right: calc(var(--i) * var(--card-big-w) * 0.48); transform: rotate(calc(14deg - var(--i) * 10deg)); }
 /* 揭晓时对手的牌不再重播发牌动画，直接就位破光翻开 */
 .duel-card .pc { animation: none; }
 
@@ -1379,6 +1395,217 @@ button { touch-action: manipulation; }
   .pot { min-width: 230px; padding: 16px 40px; }
 }
 
+/* ----------------------------- 1920 一族：1920×1080 / 1200 / 1280
+   到这一档屏幕已经比内容大得多了，再让一块定宽的东西居中就是浪费。
+   牌、头像、座位、底池、行动台、聊天栏一起上一号，首页也跟着撑开。
+   注意这一档只对"够高"的 1920 生效：1920×1080 无论满屏还是带浏览器边框，
+   视口高度都在 1150 以内，会掉进后面的 (max-height: 1150px) 子档拿中等牌张
+   —— 别让它拿着 2K 的大牌被行动台盖掉半张。 */
+
+@media (min-width: 1880px) {
+  :root {
+    --card-w: 39px; --card-h: 54px;
+    --card-big-w: 126px; --card-big-h: 176px;
+    --seat-w: 248px; --avatar: 62px; --avatar-box: 78px;
+    /* 座位和牌都长大了，椭圆半径反而要再收一点，才不会顶进顶栏或压到行动台 */
+    --seat-rx: 40%;
+    --seat-ry: 41%;
+    --duel-inset: clamp(16px, 12vw, 300px);
+    --duel-rush: min(16vw, 420px);
+    --fx-burst: 1.3;
+    --deal-k: 1.3;
+  }
+  .table-shell { grid-template-columns: minmax(0, 1fr) 420px; }
+  /* max-height 必须写成实际长度：felt-wrap 的行高是按内容撑的，
+     百分比 max-height 在这种行上解析不出来，等于没写 —— 牌桌会一直按
+     2.1:1 长下去，矮一点的视口上对家就顶进顶栏了。
+     这里的 527 = 顶栏 61 + 页脚 28 + 上边距 48 + 下边距 390。 */
+  .felt { width: min(1560px, 96%); max-height: calc(100dvh - 527px); }
+  /* 下边距吃掉的是牌桌高度：留够 390px，我的三张大牌才不会探到行动台底下；
+     上边距也不能小 —— 座位大了一号，1151~1200 这段高度上对家会顶进顶栏 */
+  .felt-wrap { padding: 48px 30px 390px; }
+  .table-shell > footer { font-size: 11.5px; }
+  .topbar b { font-size: 18px; }
+  .icon-btn { height: 38px; min-width: 38px; font-size: 13.5px; }
+  .room-pill { font-size: 13.5px; padding: 6px 16px; }
+  .score-pill { font-size: 12.5px; }
+
+  .bar {
+    right: 420px; bottom: 88px;
+    width: min(1060px, calc(100% - 490px)); padding: 18px 24px; border-radius: 22px;
+  }
+  .bar-status { margin-bottom: 12px; }
+  .bar-status strong { font-size: 17px; }
+  .bar-status span { font-size: 13px; }
+  .bar-actions { gap: 12px; }
+  .bar-actions .btn { padding: 13px 20px; font-size: 16px; }
+  .bar-actions .btn.call { flex: 1 1 190px; font-size: 17px; }
+  .compare-row { margin-top: 12px; padding-top: 11px; font-size: 13px; }
+  .emote-bar { right: 420px; bottom: 34px; }
+  .emote-btn { width: 38px; height: 38px; font-size: 19px; }
+
+  .pot { min-width: 256px; padding: 18px 44px; }
+  .pot span { font-size: 11.5px; }
+  .pot strong { font-size: 60px; }
+  .pot small { font-size: 12px; }
+  .pot.bumped::after { width: 168px; height: 96px; }
+
+  .seat { gap: 12px; padding: 12px 15px; border-radius: 18px; }
+  .seat-name b { font-size: 15px; }
+  .seat-chips { font-size: 14.5px; }
+  .seat-action { font-size: 12px; }
+  .seat-bet { top: -12px; font-size: 12px; }
+  .seat-type { bottom: -15px; font-size: 13px; padding: 4px 14px; }
+  .hand-type { font-size: 14px; padding: 4px 14px; }
+  .emote-pop { font-size: 32px; }
+  .chip-stack, .chip { width: 30px; height: 30px; }
+  .coin-flow i { width: 16px; height: 16px; }
+  .laurel { width: 62px; height: 40px; }
+
+  /* 侧栏：聊天是这块屏幕上唯一还在用小字的地方，一起放大 */
+  .dock-tabs button { padding: 8px 15px; font-size: 14px; }
+  .dock-body { padding: 16px; gap: 14px; }
+  .chat-row p { padding: 8px 13px; font-size: 14.5px; }
+  .chat-av { font-size: 21px; }
+  .log-row { grid-template-columns: 40px 1fr; font-size: 13px; }
+  .dock-input input { padding: 11px 14px; }
+
+  /* 全屏特效：clamp 的上限在 1880 以上已经全部撞顶了，这里直接给定值 */
+  .fx-word { font-size: 230px; }
+  .shove-word { font-size: 250px; }
+  .shove-who { margin-top: 22px; padding: 12px 30px; font-size: 18px; }
+  .duel-side { gap: 26px; }
+  .duel-av { width: 96px; height: 96px; font-size: 46px; }
+  .duel-who b { font-size: 19px; }
+  .duel-who i { font-size: 12px; }
+  .duel-stamp { font-size: 270px; }
+  .duel-banner { bottom: 52px; padding: 14px 32px; font-size: 16px; }
+
+  .result-light { width: min(860px, 90vw); height: 560px; }
+  .result { width: min(760px, 100%); padding: 46px 50px 36px; }
+  .result-av { width: 112px; height: 112px; font-size: 54px; }
+  .result h2 { font-size: 34px; }
+  .result-reason { font-size: 14.5px; }
+  .result-amount { font-size: 62px; }
+  .my-result { min-width: 360px; padding: 16px 26px; }
+  .my-result strong { font-size: 40px; }
+  .score-table { font-size: 14.5px; }
+  .score-head, .score-row { padding: 11px 15px; }
+  .score-head { font-size: 12px; }
+  .result-next { font-size: 13px; }
+
+  /* ---- 首页同步撑开：入座卡在 2K 上不能还是原来那一小张 ---- */
+  .landing {
+    max-width: 1760px; gap: 120px;
+    grid-template-columns: minmax(0, 1.15fr) minmax(440px, 500px);
+    padding: 72px 72px calc(72px + env(safe-area-inset-bottom));
+  }
+  .brand { max-width: 800px; }
+  .brand h1 { font-size: 112px; }
+  .brand-mark { width: 108px; height: 108px; }
+  .brand-mark span { width: 88px; height: 88px; font-size: 46px; }
+  .eyebrow { margin-top: 40px; font-size: 14px; }
+  .lead { margin-top: 30px; max-width: 640px; font-size: 19px; }
+  .ladder { margin-top: 48px; }
+  .ladder span { padding: 12px 22px; font-size: 14px; }
+  .ladder span.top { padding: 12px 24px; }
+  .hero-cards { margin-top: 56px; gap: 24px; }
+  .wm-a { font-size: 920px; }
+  .wm-b { font-size: 660px; }
+  .entry { padding: 40px 38px 32px; border-radius: 28px; }
+  .entry h2 { font-size: 27px; }
+  .entry-sub { font-size: 13.5px; }
+  .field-label { margin: 22px 0 10px; font-size: 13px; }
+  .text-input { padding: 16px 18px; border-radius: 15px; font-size: 16px; }
+  .avatar-grid { gap: 10px; }
+  .avatar-opt { border-radius: 14px; font-size: 25px; }
+  .code-cell { height: 64px; font-size: 30px; }
+  .invite-target { padding: 15px 18px; font-size: 14px; }
+  .invite-target strong { font-size: 29px; }
+  .btn.lg { padding: 17px; font-size: 17px; }
+  .hint, .divider { font-size: 14px; }
+  .landing .fineprint { font-size: 12px; }
+}
+
+/* ------------------------------------ 2K 及以上：27 寸 2560×1440 这一族
+   1440 的高度足够，不需要再挂矮屏子档；横向反而是主战场，
+   牌桌放到 1900，侧栏 460，桌上每一件东西再上一号。 */
+
+@media (min-width: 2400px) {
+  :root {
+    --card-w: 43px; --card-h: 60px;
+    --card-big-w: 130px; --card-big-h: 182px;
+    --seat-w: 268px; --avatar: 68px; --avatar-box: 84px;
+    --seat-rx: 40%;
+    --seat-ry: 42%;
+    --duel-inset: clamp(16px, 12vw, 380px);
+    --duel-rush: min(16vw, 480px);
+    --fx-burst: 1.55;
+    --deal-k: 1.55;
+  }
+  .table-shell { grid-template-columns: minmax(0, 1fr) 460px; }
+  /* 567 = 顶栏 61 + 页脚 28 + 上边距 62 + 下边距 416 */
+  .felt { width: min(1900px, 96%); max-height: calc(100dvh - 567px); }
+  .felt-wrap { padding: 62px 36px 416px; }
+  .table-shell > footer { font-size: 12px; }
+  .topbar b { font-size: 19px; }
+
+  .bar { right: 460px; bottom: 88px; width: min(1160px, calc(100% - 540px)); padding: 20px 26px; }
+  .bar-status { margin-bottom: 13px; }
+  .bar-status strong { font-size: 18px; }
+  .bar-status span { font-size: 13.5px; }
+  .bar-actions .btn { padding: 14px 22px; font-size: 17px; }
+  .bar-actions .btn.call { flex: 1 1 210px; font-size: 18px; }
+  .emote-bar { right: 460px; bottom: 36px; }
+  .emote-btn { width: 42px; height: 42px; font-size: 21px; }
+
+  .pot { min-width: 290px; padding: 20px 52px; }
+  .pot span { font-size: 12.5px; }
+  .pot strong { font-size: 68px; }
+  .pot small { font-size: 13px; }
+  .pot.bumped::after { width: 190px; height: 110px; }
+
+  .seat { padding: 13px 17px; border-radius: 20px; }
+  .seat-name b { font-size: 16px; }
+  .seat-chips { font-size: 15.5px; }
+  .seat-action { font-size: 13px; }
+  .chip-stack, .chip { width: 34px; height: 34px; }
+  .coin-flow i { width: 18px; height: 18px; }
+  .laurel { width: 70px; height: 45px; }
+
+  .fx-word { font-size: 280px; }
+  .shove-word { font-size: 300px; }
+  .duel-av { width: 108px; height: 108px; font-size: 52px; }
+  .duel-stamp { font-size: 330px; }
+  .duel-rift { width: 4px; }
+  .duel-banner { bottom: 60px; font-size: 17px; }
+
+  .result-light { width: min(980px, 90vw); height: 620px; }
+  .result { width: min(880px, 100%); padding: 52px 56px 40px; }
+  .result-av { width: 124px; height: 124px; font-size: 60px; }
+  .result h2 { font-size: 38px; }
+  .result-amount { font-size: 70px; }
+  .my-result { min-width: 400px; }
+  .my-result strong { font-size: 44px; }
+  .score-table { font-size: 15.5px; }
+
+  .landing {
+    max-width: 2160px; gap: 150px;
+    grid-template-columns: minmax(0, 1.15fr) minmax(500px, 560px);
+    padding: 88px 88px calc(88px + env(safe-area-inset-bottom));
+  }
+  .brand { max-width: 940px; }
+  .brand h1 { font-size: 128px; }
+  .lead { max-width: 720px; font-size: 21px; }
+  .wm-a { font-size: 1080px; }
+  .wm-b { font-size: 780px; }
+  .entry { padding: 46px 44px 38px; }
+  .entry h2 { font-size: 30px; }
+  .text-input { padding: 18px 20px; font-size: 17px; }
+  .code-cell { height: 72px; font-size: 34px; }
+  .btn.lg { padding: 19px; font-size: 18px; }
+}
+
 /* --------------------------------------- 矮桌面：1440×780 这类扁屏幕
    宽够但高不够的笔记本上，牌桌吃满剩余高度后，"我"的座位挂在椭圆最下沿，
    三张大牌整整探出桌沿 200px，直接被浮在上面的行动台盖掉半张。
@@ -1444,6 +1671,110 @@ button { touch-action: manipulation; }
   .pot span { letter-spacing: 0.28em; font-size: 9.5px; }
   .pot strong { font-size: 27px; }
   .pot small { font-size: 9px; }
+}
+
+/* ------------------------------- 又宽又矮：1920+ 宽但高度不够的那些视口
+   上面两档矮屏是给 1440×780 这类笔记本写的，落在 1880+ 上会把牌收得过头。
+   这两块必须排在它们后面：同样匹配时后写的赢，1920 宽的矮视口才拿到
+   「中等牌张 + 收紧的椭圆」，而不是笔记本那一套小牌，也不是 2K 的大牌。
+
+   为什么 1920×1080 会落进这里：满屏 1080 减掉标签页、地址栏、任务栏之后，
+   实际视口大多在 940~990 之间，只有真全屏才够到 1080 —— 两种情况都在
+   (max-height: 1150px) 这一档里，垂直预算按 941 这个下沿推的：
+     顶栏 57 + 上边距 24 + 牌桌 527 → 我的座位底沿 691（含轮到我时 1.075 放大
+     和牌型徽章），行动台顶边在 941 − 56 − 154 = 731，还剩 40px 净空。 */
+
+@media (min-width: 1880px) and (max-height: 1150px) {
+  :root {
+    --card-w: 35px; --card-h: 49px;
+    --card-big-w: 113px; --card-big-h: 158px;
+    --seat-w: 216px; --avatar: 54px; --avatar-box: 68px;
+    /* 椭圆压扁：纵向省下来的每一格都要还给"我"的三张大牌 */
+    --seat-rx: 41%;
+    --seat-ry: 36%;
+  }
+  /* 顶栏退回标准高度：1880 档把图标按钮放到了 38px，这里高度更金贵 */
+  .icon-btn { height: 34px; min-width: 34px; font-size: 12.5px; }
+  /* 414 = 顶栏 57 + 页脚 21 + 上边距 24 + 下边距 312 */
+  .felt { max-height: calc(100dvh - 414px); }
+  .felt-wrap { padding: 24px 30px 312px; }
+  .table-shell > footer { margin: 0 0 4px; font-size: 10px; }
+  .bar { bottom: 56px; padding: 13px 18px; }
+  .bar-status { margin-bottom: 9px; }
+  .bar-status strong { font-size: 16px; }
+  .bar-status span { font-size: 12px; }
+  .bar-actions { gap: 10px; }
+  .bar-actions .btn { padding: 10px 16px; font-size: 15px; }
+  .bar-actions .btn.call { flex: 1 1 170px; font-size: 15.5px; }
+  .bar-actions .btn.tier { padding: 10px 12px; font-size: 13px; }
+  .compare-row { margin-top: 10px; padding-top: 9px; font-size: 12px; }
+  .emote-bar { bottom: 14px; }
+  .emote-btn { width: 32px; height: 32px; font-size: 16px; }
+  .pot { min-width: 200px; padding: 10px 26px; }
+  .pot span { font-size: 10px; }
+  .pot strong { font-size: 40px; }
+  .pot small { font-size: 10.5px; }
+  .pot.bumped::after { width: 140px; height: 82px; }
+  .seat { gap: 10px; padding: 10px 13px; }
+  .seat.is-me .seat-hand { gap: 9px; }
+  .seat-name b { font-size: 14px; }
+  .seat-chips { font-size: 13.5px; }
+  .seat-action { font-size: 11px; }
+  .seat-type { bottom: -13px; font-size: 12px; }
+  /* 结算面板也吃这块高度：90dvh 在矮屏上撑不下 1880 档的大留白 */
+  .result { padding: 34px 38px 28px; }
+  .result-av { width: 96px; height: 96px; font-size: 46px; }
+  .result h2 { font-size: 30px; }
+  .result-amount { font-size: 52px; }
+  .my-result { margin-top: 18px; padding: 12px 20px; }
+  .my-result strong { font-size: 34px; }
+}
+
+/* 再矮一档：940 及以下（把浏览器窗口竖着切一半、或者开着调试面板）。
+   顶栏收紧、页脚让位，牌收到和笔记本档接近但略大一号。 */
+
+@media (min-width: 1880px) and (max-height: 940px) {
+  :root {
+    --card-w: 27px; --card-h: 38px;
+    --card-big-w: 78px; --card-big-h: 109px;
+    --seat-w: 178px; --avatar: 42px; --avatar-box: 52px;
+    --seat-rx: 43%;
+    --seat-ry: 33%;
+  }
+  .topbar { padding: 7px 18px; padding-top: calc(7px + env(safe-area-inset-top)); }
+  .topbar b { font-size: 15px; }
+  .icon-btn { height: 32px; min-width: 32px; font-size: 12px; }
+  .table-shell > footer { display: none; }
+  /* 333 = 顶栏 47 + 页脚 0（已隐藏）+ 上边距 14 + 下边距 272 */
+  .felt { max-height: calc(100dvh - 333px); }
+  .felt-wrap { padding: 14px 26px 272px; }
+  .bar { bottom: 46px; padding: 10px 15px; }
+  .bar-status { margin-bottom: 8px; }
+  .bar-status strong { font-size: 15px; }
+  .bar-actions { gap: 8px; }
+  .bar-actions .btn { padding: 9px 13px; font-size: 14.5px; }
+  .bar-actions .btn.call { flex: 1 1 150px; font-size: 15px; }
+  .bar-actions .btn.tier { padding: 9px 10px; font-size: 12.5px; }
+  .compare-row { margin-top: 8px; padding-top: 7px; font-size: 11.5px; }
+  .emote-bar { bottom: 10px; }
+  .emote-btn { width: 28px; height: 28px; font-size: 14px; }
+  .pot { min-width: 168px; padding: 7px 20px; }
+  .pot span { letter-spacing: 0.28em; font-size: 9.5px; }
+  .pot strong { font-size: 30px; }
+  .pot small { font-size: 9.5px; }
+  .pot.bumped::after { width: 120px; height: 70px; }
+  .seat { gap: 9px; padding: 8px 11px; }
+  .seat.is-me .seat-hand { gap: 8px; }
+  .seat-name b { font-size: 13px; }
+  .seat-chips { font-size: 12.5px; }
+  .seat-action { font-size: 10.5px; }
+  .seat-type { bottom: -12px; font-size: 11px; }
+  .result { padding: 26px 30px 22px; }
+  .result-av { width: 80px; height: 80px; font-size: 38px; }
+  .result h2 { font-size: 27px; }
+  .result-amount { font-size: 44px; }
+  .my-result { margin-top: 16px; }
+  .my-result strong { font-size: 30px; }
 }
 
 /* ----------------------------------------------------------- 响应式 */

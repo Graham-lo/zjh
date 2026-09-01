@@ -449,11 +449,13 @@ export interface RenderInput {
   origin: string;
   account?: AccountInfo | null;
   fx: Fx;
+  /** 自动跟注（挂机）开着没有。开着的时候画面上必须一直看得见，别让人忘了 */
+  auto?: boolean;
 }
 
 /** 渲染成一行一个元素的数组，交给 Screen 做按行 diff */
 export function renderRoom(input: RenderInput): string[] {
-  const { room, latency, status, origin, account, fx } = input;
+  const { room, latency, status, origin, account, fx, auto = false } = input;
   const me = room.players.find((p) => p.id === room.viewerId);
   const L: string[] = [];
   const line = (s = '') => L.push(s);
@@ -620,7 +622,9 @@ export function renderRoom(input: RenderInput): string[] {
     const label = mineTurn
       ? `${C.bold}${hot ? C.red : C.gold}▶ 轮到你${C.reset}`
       : `${C.dim}等待 ${turnP.name} 行动…${C.reset}`;
-    line(`${warn}${label}   ${left != null ? `${hot ? C.red : ''}还剩 ${left}s${C.reset} ` : ''}${bar}`);
+    // 挂机的时候在行动行尾挂一条 dim 的尾巴：牌自己在打，人得随时看得见是谁在动手
+    const auton = auto ? `  ${C.dim}· 挂机中${C.reset}` : '';
+    line(`${warn}${label}   ${left != null ? `${hot ? C.red : ''}还剩 ${left}s${C.reset} ` : ''}${bar}${auton}`);
     line();
   }
 
@@ -634,11 +638,11 @@ export function renderRoom(input: RenderInput): string[] {
     line();
   }
 
-  line(hintLine(room));
+  line(hintLine(room, auto));
   return L;
 }
 
-function hintLine(room: PublicRoom): string {
+function hintLine(room: PublicRoom, auto: boolean): string {
   const me = room.players.find((p) => p.id === room.viewerId);
   if (!me) return '';
   const k = (key: string, label: string) => `${C.gold}[${key}]${C.reset}${label}`;
@@ -680,6 +684,8 @@ function hintLine(room: PublicRoom): string {
   const raises = acts.filter((a) => a.action === 'raise');
   if (raises.length) parts.push(k(`1-${raises.length}`, `加注 ${raises.map((r) => fmt(r.unit!)).join('/')}`));
   if (acts.some((a) => a.action === 'compare')) parts.push(k('v', '比牌'));
+  // 开着的时候不是一个普通提示了，是一个「你现在没在自己打牌」的状态灯，所以整条加粗点亮
+  parts.push(auto ? `${C.bold}${C.gold}[g]● 自动跟注中${C.reset}` : k('g', '自动跟注'));
   parts.push(k('t', '聊天'), k('e', '表情'), k(':', '命令'), k('?', '帮助'));
   return parts.join('  ');
 }

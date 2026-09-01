@@ -47,6 +47,11 @@ const MIME: Record<string, string> = {
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8',
+  // 语音包（/voice/*）—— 已经是压缩格式，不进 COMPRESSIBLE
+  '.m4a': 'audio/mp4',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.wav': 'audio/wav',
 };
 const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.json', '.svg', '.txt']);
 

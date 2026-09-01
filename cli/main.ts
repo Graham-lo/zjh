@@ -12,10 +12,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { AVATARS, EMOTES, type GameCommand, type PublicRoom } from '../shared/game.ts';
+import { AVATARS, callCost, EMOTES, type GameCommand, type PublicRoom } from '../shared/game.ts';
 import { legalActions, parseTarget, RoomClient, type Auth } from '../shared/client.ts';
 import type { GameEvent } from '../shared/protocol.ts';
-import { ANIM, C, DUEL_TTL, FRAME, newFx, renderRoom, Screen, TTY, type Fx } from './render.ts';
+import { ANIM, C, DUEL_TTL, fmt, FRAME, newFx, renderRoom, Screen, TTY, type Fx } from './render.ts';
 
 const KEY = { ctrlC: '\u0003', esc: '\u001B', backspace: '\u007F' };
 
@@ -209,6 +209,8 @@ function onRoomUpdate(events: GameEvent[]) {
         break;
     }
   }
+  // 挂机的定时器挂在这条事件路径上：房间一变就重新上弦，一个回合只上一次
+  armAuto();
   draw();
 }
 
@@ -219,6 +221,9 @@ const client = new RoomClient(target, {
   status: (s) => {
     // 断线重连回来那一下，顶栏的绿点多亮一帧，人才注意得到「回来了」
     if (s === 'online' && wasOffline) fx.online = Date.now();
+    // 断过线就把挂机关掉：断线期间桌上发生了什么无从得知，
+    // 回来第一件事不该是替人下注 —— 简单、安全优先
+    if (s !== 'online' && auto) autoOff(`${C.dim}断线了，自动跟注已关闭${C.reset}`);
     wasOffline = s !== 'online';
     draw();
   },
@@ -246,6 +251,7 @@ function draw() {
     origin: target.origin,
     account: client.account,
     fx,
+    auto,
   });
   if (mode === 'chat') lines.push('', `${C.gold}说点什么 >${C.reset} ${buffer}${C.dim}_${C.reset}`);
   else if (mode === 'cmd') lines.push('', `${C.gold}:${C.reset}${buffer}${C.dim}_${C.reset}`);
@@ -286,11 +292,78 @@ const compareTargets = () =>
   client.room ? client.room.players.filter((p) => p.status === 'active' && p.id !== client.room!.viewerId) : [];
 const raiseTiers = () => (client.room ? legalActions(client.room).filter((a) => a.action === 'raise') : []);
 
+/* ----------------------------------------------------------- 自动跟注（挂机） */
+
+/**
+ * 挂机跟注。语义和网页版（client/components/ActionBar.tsx）完全一致：
+ * 轮到自己就跟，跟不起就梭哈脱身，一分没有就弃牌 —— 「钱没了自动梭哈比牌」。
+ *
+ * 有人梭哈时**自动关掉、把决定交还给人**：接不接一个全场开牌的注，
+ * 不该由一个开关替你决定。开关本身跨局保持，直到手动关或者被上面这条关掉。
+ */
+const AUTO_DELAY = 450; // 留一下手感：让人看清是挂机在动手，而不是画面自己跳了
+let auto = false;
+/** 已经为哪个回合排过队。同一回合房间会更新很多次（别人聊天、倒计时），只能触发一次 */
+let autoFired = '';
+let autoTimer: ReturnType<typeof setTimeout> | null = null;
+
+function autoOff(msg?: string) {
+  auto = false;
+  autoFired = '';
+  if (autoTimer) clearTimeout(autoTimer);
+  autoTimer = null;
+  if (msg) say(msg);
+}
+
+/**
+ * 在**事件驱动的路径上**给下一次自动行动上弦（收到房间更新时调用一次），
+ * 决策不放在 80ms 的渲染循环里 —— 渲染只负责画，不负责替人下注。
+ */
+function armAuto() {
+  const r = client.room;
+  if (!auto || !r) return;
+  if (r.allIn) return autoOff(`${C.gold}有人梭哈了，自动跟注已关闭 —— 这一手你自己定${C.reset}`);
+  if (!client.myTurn) return;
+  const token = `${r.handNo}:${r.turnCount}`;
+  if (autoFired === token) return;
+  autoFired = token;
+  if (autoTimer) clearTimeout(autoTimer);
+  autoTimer = setTimeout(autoAct, AUTO_DELAY);
+}
+
+/** 真正动手的那一下。450ms 里桌面可能已经变了，所以所有条件在这里重新查一遍 */
+function autoAct() {
+  autoTimer = null;
+  const r = client.room;
+  const m = client.me;
+  if (!auto || !r || !m || r.allIn || !client.myTurn) return;
+  const cost = callCost(r, m); // 和服务端同源，不会「显示能跟、发过去说钱不够」
+  if (m.chips > cost) {
+    send({ type: 'call' });
+    say(`${C.dim}自动跟注 ${fmt(cost)}${C.reset}`, 2500);
+  } else if (m.chips > 0) {
+    send({ type: 'all_in' });
+    say(`${C.dim}跟不起了，自动梭哈${C.reset}`, 2500);
+  } else {
+    send({ type: 'fold' });
+    say(`${C.dim}没分了，自动弃牌${C.reset}`, 2500);
+  }
+}
+
+function toggleAuto() {
+  if (auto) return autoOff(`${C.dim}自动跟注已关闭${C.reset}`);
+  auto = true;
+  autoFired = '';
+  say(`${C.gold}● 自动跟注中${C.reset}${C.dim}　跟不起会梭哈；有人梭哈会自动交还给你${C.reset}`);
+  armAuto(); // 可能正好就轮到自己，别等到下一个事件
+}
+
 const HELP = [
   `${C.bold}按键${C.reset}`,
   `  ${C.gold}k${C.reset} 看牌    ${C.gold}c${C.reset} 跟注/接受梭哈    ${C.gold}f${C.reset} 弃牌（随时可弃）    ${C.gold}a${C.reset} 梭哈    ${C.gold}v${C.reset} 比牌    ${C.gold}1-4${C.reset} 加注档位`,
   `  ${C.gold}r${C.reset} 准备    ${C.gold}s${C.reset} 开始    ${C.gold}b${C.reset} 加电脑    ${C.gold}n${C.reset} 下一局    ${C.gold}m${C.reset} 补分    ${C.gold}i${C.reset} 邀请链接`,
-  `  ${C.gold}t${C.reset} 聊天    ${C.gold}e${C.reset} 表情    ${C.gold}:${C.reset} 命令    ${C.gold}?${C.reset} 帮助    ${C.gold}q${C.reset} 退出`,
+  `  ${C.gold}t${C.reset} 聊天    ${C.gold}e${C.reset} 表情    ${C.gold}:${C.reset} 命令    ${C.gold}?${C.reset} 帮助    ${C.gold}q${C.reset} 退出${C.dim}（牌局中退出＝自动弃牌离场）${C.reset}`,
+  `  ${C.gold}g${C.reset} 自动跟注（挂机）：轮到自己就跟，跟不起自动梭哈，没分了弃牌；${C.dim}有人梭哈会自动关掉交还给你${C.reset}`,
   `${C.bold}命令${C.reset}`,
   `  ${C.gold}:name 昵称${C.reset}   ${C.gold}:avatar 🐯${C.reset}   ${C.gold}:kick 座位号${C.reset}   ${C.gold}:log${C.reset}   ${C.gold}:invite${C.reset}`,
   `  ${C.gold}:set turn=60 rounds=8 allin=3 auto=on${C.reset}   房规（房主）`,
@@ -328,6 +401,9 @@ function handleKey(key: string) {
       return say(`${C.gold}邀请链接${C.reset} ${target.origin}/?room=${r.code}`, 8000);
     case '?':
       return say(HELP, 10000);
+    case 'g':
+      // 提示行只在 playing 里显示，但按键任何阶段都认：牌局间隙先挂上，开局就自己打
+      return toggleAuto();
   }
 
   if (r.phase === 'lobby') {

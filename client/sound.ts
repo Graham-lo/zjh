@@ -54,6 +54,38 @@ class Sound {
     osc.stop(ctx.currentTime + at + dur + 0.02);
   }
 
+  /**
+   * 钟琴 / 马林巴质感的一颗音。
+   *
+   * 裸正弦听起来像寻呼机，是因为它只有基频、而且起音一刀切。真实的敲击体
+   * 有两个特征：一是泛音**不成整数倍**（钟类乐器的第一个泛音大约在 2.76 倍，
+   * 这个"不和谐"正是金属的味道），二是泛音衰减得比基频快得多，所以敲下去
+   * 那一瞬是"叮"、余下的是干净的嗡。同度叠一层三角波补一点木头的暖，
+   * 免得整颗音太玻璃。起音留 8ms 而不是 0，避免爆音。
+   */
+  private bell(freq: number, at: number, dur = 0.6, gain = 0.1) {
+    const ctx = this.ctx!;
+    const t0 = ctx.currentTime + at;
+    // [波形, 频率倍数, 增益占比, 衰减占比] —— 泛音只活到基频的四成时长
+    const parts: [OscillatorType, number, number, number][] = [
+      ['sine', 1, 1, 1],
+      ['sine', 2.76, 0.35, 0.4],
+      ['triangle', 1, 0.25, 0.7],
+    ];
+    for (const [type, mul, level, decay] of parts) {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq * mul, t0);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(gain * level, t0 + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur * decay);
+      osc.connect(g).connect(ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + dur * decay + 0.02);
+    }
+  }
+
   private swish(at: number, dur = 0.16, gain = 0.12, from = 2600, to = 700) {
     const ctx = this.ctx!;
     const src = ctx.createBufferSource();
@@ -106,8 +138,10 @@ class Sound {
         this.tone(62, 0, 0.14, 0.2, 'sine');
         return this.tone(58, 0.19, 0.18, 0.15, 'sine');
       case 'turn':
-        this.tone(880, 0, 0.12, 0.12, 'sine');
-        return this.tone(1320, 0.11, 0.16, 0.1, 'sine');
+        // 轮到你了：E5→A5 一个上行小琶音，像轻轻敲了下门铃，而不是响警报。
+        // 第二颗略轻、拖得略长，尾音自然落下去，催促感全靠上行而不是音量。
+        this.bell(659.25, 0, 0.5, 0.1);
+        return this.bell(880, 0.09, 0.5, 0.085);
       case 'win':
         return [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => this.tone(f, i * 0.075, 0.3, 0.13, 'triangle'));
       case 'lose':
@@ -149,7 +183,8 @@ export const VOICE_LINES: Record<string, { text: string; rate?: number; pitch?: 
   accept: { text: '接！', rate: 1.4, pitch: 1.3, volume: 1 },
   compare: { text: '比牌', rate: 1.2, pitch: 1.1 },
   fold: { text: '弃牌', rate: 1.05, pitch: 0.95 },
-  turn: { text: '该你了' },
+  // 「该你啦」比「该你了」软一点 —— 提醒本来就不该听着像催命
+  turn: { text: '该你啦' },
   baozi: { text: '豹子！', rate: 1.4, pitch: 1.45, volume: 1 },
   shunjin: { text: '顺金！', rate: 1.35, pitch: 1.35, volume: 1 },
   jinhua: { text: '金花', rate: 1.2, pitch: 1.15 },
