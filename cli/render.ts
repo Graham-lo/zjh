@@ -113,12 +113,12 @@ export function renderRoom(
   const rule = () => line(`${C.dim}${'─'.repeat(74)}${C.reset}`);
 
   const net = status === 'online' ? `${C.green}●${C.reset} ${latency}ms` : `${C.red}●${C.reset} ${status}`;
-  const acc = account
-    ? (() => {
-        const v = account.chips - account.granted;
-        return `   ${v >= 0 ? C.green : C.red}净战绩 ${v >= 0 ? '+' : ''}${fmt(v)}${C.reset}`;
-      })()
-    : '';
+  // 用牌桌上的实时数据算，账户快照只是入座那一刻的
+  const lifetime = me ? me.chips - me.granted : account ? account.chips - account.granted : null;
+  const acc =
+    lifetime == null
+      ? ''
+      : `   ${lifetime >= 0 ? C.green : C.red}净战绩 ${lifetime >= 0 ? '+' : ''}${fmt(lifetime)}${C.reset}`;
   line(`${C.bold}${C.gold}好友炸金花${C.reset}  房间 ${C.bold}${room.code}${C.reset}   ${net}${acc}`);
   line(`${C.dim}邀请链接 ${origin}/?room=${room.code}${C.reset}`);
   line();

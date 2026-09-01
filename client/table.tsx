@@ -253,15 +253,20 @@ export function Table({
           </button>
         </div>
         <div className="topbar-right">
-          {account && (
-            <span
-              className={`score-pill ${account.chips - account.granted >= 0 ? 'up' : 'down'}`}
-              title={`累计发放 ${fmt(account.granted)}，当前 ${fmt(account.chips)}。换房间也接着算。`}
-            >
-              净战绩 {account.chips - account.granted >= 0 ? '+' : ''}
-              {fmt(account.chips - account.granted)}
-            </span>
-          )}
+          {(() => {
+            // 用牌桌上的实时数据算，而不是入座时那份账户快照 —— 否则打完一局数字还是旧的
+            const lifetime = me ? me.chips - me.granted : account ? account.chips - account.granted : null;
+            if (lifetime == null) return null;
+            return (
+              <span
+                className={`score-pill ${lifetime >= 0 ? 'up' : 'down'}`}
+                title={`累计发放 ${fmt(me ? me.granted : account!.granted)}，当前 ${fmt(me ? me.chips : account!.chips)}。换房间也接着算。`}
+              >
+                净战绩 {lifetime >= 0 ? '+' : ''}
+                {fmt(lifetime)}
+              </span>
+            );
+          })()}
           <span className={`net-pill net-${status}`} title={`延迟 ${latency}ms`}>
             <i />
             {status === 'online' ? `${latency}ms` : status === 'connecting' ? '连接中' : '重连中'}
