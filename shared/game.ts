@@ -46,6 +46,8 @@ export interface PlayerState {
   looked: boolean;
   hand: Card[];
   isBot: boolean;
+  /** 由外部 AI（MCP 客户端）驱动的真人席位。牌桌上会明示，避免有人挂 AI 代打别人不知道 */
+  isAgent?: boolean;
   online: boolean;
   /** 本局已投入，用于座位上的筹码显示 */
   bet: number;
@@ -285,7 +287,13 @@ export function cleanAvatar(avatar: string): string {
   return AVATARS.includes(avatar) ? avatar : AVATARS[0];
 }
 
-export function createHumanPlayer(name: string, avatar: string, seat: number, tokenHash: string): PlayerState {
+export function createHumanPlayer(
+  name: string,
+  avatar: string,
+  seat: number,
+  tokenHash: string,
+  isAgent = false,
+): PlayerState {
   return {
     id: randomId('p'),
     name: cleanName(name),
@@ -297,6 +305,7 @@ export function createHumanPlayer(name: string, avatar: string, seat: number, to
     looked: false,
     hand: [],
     isBot: false,
+    isAgent,
     online: true,
     bet: 0,
     wins: 0,
@@ -834,13 +843,14 @@ export type GameCommand =
   | { type: 'remove_player'; targetId: string }
   | { type: 'top_up' }
   | { type: 'new_round' }
+  | { type: 'settings'; turnSeconds?: number; allInFromRound?: number; maxRounds?: number; autoContinue?: boolean }
   | { type: 'chat'; text: string }
   | { type: 'emote'; id: string }
   | { type: 'leave' };
 
 export const COMMAND_TYPES = new Set<GameCommand['type']>([
   'ready', 'rename', 'start', 'look', 'call', 'all_in', 'raise', 'fold', 'compare',
-  'add_bot', 'remove_player', 'top_up', 'new_round', 'chat', 'emote', 'leave',
+  'add_bot', 'remove_player', 'top_up', 'new_round', 'chat', 'emote', 'leave', 'settings',
 ]);
 
 export function applyCommand(state: RoomState, actorId: string, command: GameCommand): void {
@@ -870,6 +880,31 @@ export function applyCommand(state: RoomState, actorId: string, command: GameCom
     case 'raise': return doRaise(state, actorId, command.unit);
     case 'fold': return doFold(state, actorId);
     case 'compare': return doCompare(state, actorId, command.targetId);
+    case 'settings': {
+      requireHost(state, actorId);
+      if (state.phase === 'playing') throw new GameError('牌局进行中不能改房规');
+      const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(v)));
+      const changed: string[] = [];
+      // AI 玩家一轮要想好几秒，行动时限得能调大
+      if (typeof command.turnSeconds === 'number') {
+        state.settings.turnSeconds = clamp(command.turnSeconds, 10, 180);
+        changed.push(`行动时限 ${state.settings.turnSeconds} 秒`);
+      }
+      if (typeof command.allInFromRound === 'number') {
+        state.settings.allInFromRound = clamp(command.allInFromRound, 1, 8);
+        changed.push(`第 ${state.settings.allInFromRound} 轮起可梭哈`);
+      }
+      if (typeof command.maxRounds === 'number') {
+        state.settings.maxRounds = clamp(command.maxRounds, 2, 20);
+        changed.push(`${state.settings.maxRounds} 轮封顶`);
+      }
+      if (typeof command.autoContinue === 'boolean') {
+        state.settings.autoContinue = command.autoContinue;
+        changed.push(command.autoContinue ? '自动续局开' : '自动续局关');
+      }
+      if (changed.length) pushLog(state, `房规调整：${changed.join('、')}`);
+      return;
+    }
     case 'chat': {
       pushChat(state, actor, command.text);
       return;

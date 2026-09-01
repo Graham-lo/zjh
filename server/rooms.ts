@@ -283,7 +283,7 @@ export class Hub {
     return room;
   }
 
-  async create(conn: Conn, name: string, avatar: string) {
+  async create(conn: Conn, name: string, avatar: string, agent = false) {
     if (this.rooms.size >= MAX_ROOMS) throw new GameError('服务器房间已满，请稍后再试', 503);
     const token = newToken();
     const hash = await hashToken(token);
@@ -294,7 +294,7 @@ export class Hub {
     }
     if (!code) throw new GameError('创建房间失败，请重试', 503);
 
-    const host = createHumanPlayer(name, avatar, 0, hash);
+    const host = createHumanPlayer(name, avatar, 0, hash, agent);
     const state = createInitialRoom(code, host);
     const room: Room = { state, conns: new Set(), timer: null, hostTimer: null, saveTimer: null, touchedAt: Date.now() };
     this.rooms.set(code, room);
@@ -303,7 +303,7 @@ export class Hub {
     this.broadcast(room);
   }
 
-  async join(conn: Conn, code: string, name: string, avatar: string) {
+  async join(conn: Conn, code: string, name: string, avatar: string, agent = false) {
     const room = this.room(code);
     const s = room.state;
     if (s.players.length >= s.settings.maxPlayers) throw new GameError('房间已满');
@@ -315,7 +315,7 @@ export class Hub {
 
     let finalName = cleanName(name);
     if (s.players.some((p) => p.name === finalName)) finalName = `${finalName}·${seat + 1}`;
-    const player = createHumanPlayer(finalName, cleanAvatar(avatar), seat, hash);
+    const player = createHumanPlayer(finalName, cleanAvatar(avatar), seat, hash, agent);
     s.players.push(player);
     claimHostIfVacant(s, player.id);
     const suffix = s.phase === 'playing' ? '，等待下一局' : '';

@@ -366,6 +366,7 @@ button { touch-action: manipulation; }
 .tag { font-size: 9.5px; padding: 1px 5px; border-radius: 5px; white-space: nowrap; }
 .tag.host { background: rgba(217, 185, 120, 0.18); color: var(--gold-2); }
 .tag.bot { background: rgba(120, 160, 220, 0.16); color: #a9c6ea; }
+.tag.agent { background: rgba(190, 130, 240, 0.2); color: #d9b6f5; }
 .tag.off { background: rgba(217, 128, 128, 0.16); color: var(--danger); }
 .seat-chips { font-size: 12.5px; color: #cfd9d3; font-variant-numeric: tabular-nums; }
 .seat-action { font-size: 10.5px; color: var(--gold); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -755,7 +756,7 @@ button { touch-action: manipulation; }
   .bar-meta .hand-type { margin-right: 6px; font-size: 11px; }
   .seat.is-me .seat-hand { gap: 6px; }
   .seat-type { bottom: -10px; font-size: 10px; }
-  .tag.bot { display: none; }
+  .tag.bot { display: none; } /* AI 标记不隐藏：对面是不是 AI 必须看得见 */
   .pot { top: 54%; }
   .emote-bar { padding-right: 54px; gap: 4px; flex-wrap: nowrap; }
   .emote-btn { width: 32px; height: 32px; font-size: 16px; }

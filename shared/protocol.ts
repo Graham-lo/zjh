@@ -3,6 +3,8 @@ import type { GameCommand, PublicRoom } from './game.ts';
 export interface ClientHello {
   name: string;
   avatar: string;
+  /** 由 AI 驱动的席位。牌桌上会明示，不允许静默代打 */
+  agent?: boolean;
 }
 
 export type ClientMsg =
