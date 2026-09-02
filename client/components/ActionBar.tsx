@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  allInCost as calcAllIn, callCost as calcCall, canAllInNow, canAutoStart, canCompareNow,
+  allInBase as calcAllInBase, allInCost as calcAllIn, callCost as calcCall, canAllInNow, canAutoStart, canCompareNow,
   EMOTES, evaluateHand, type GameCommand, type PublicPlayer, type PublicRoom,
 } from '../../shared/game.ts';
 import { handRarity } from './Card.tsx';
@@ -31,13 +31,21 @@ export function ActionBar({
   const active = room.players.filter((p) => p.status === 'active');
   const compareOpen = canCompareNow(room);
   const canCall = me.chips > cost;
-  // 梭哈金额由场上最短的一家决定，所有人都跟得起
-  const shovePrice = calcAllIn(room);
+  // 梭哈也走「闷牌一份、看牌两份」：这里是**我**发起要掏的数。
+  // 单价上限由场上最短的一家决定（按各自倍率折算），所以人人都掏得起自己那份。
+  const shovePrice = calcAllIn(room, me);
   const shoveOpen = canAllInNow(room);
   const shoveForced = me.chips <= cost; // 跟不起时随时可以梭哈脱身
   const canShove = me.chips > 0 && active.length > 1 && (shoveOpen || shoveForced);
   const handType = me.looked && me.hand.length === 3 ? evaluateHand(me.hand).name : null;
+  const shoveBase = calcAllInBase(room);
   const shove = room.allIn;
+  /**
+   * 表态阶段我自己要掏的数。看牌是自由动作、不占行动权，所以在这里点一下看牌，
+   * 倍率立刻从 1 跳到 2，这个数也就当场翻倍 —— 翻过身家就夹到全部筹码，
+   * 和服务端 doCall 的算法逐字一致，不会出现「按钮显示能接、点了说钱不够」。
+   */
+  const acceptPrice = shove ? Math.min(shove.base * (me.looked ? 2 : 1), me.chips) : 0;
   // 兜底：万一房间是老快照，别把 undefined 显示出来
   const allInFrom = room.settings.allInFromRound ?? 3;
 
@@ -174,13 +182,21 @@ export function ActionBar({
               看牌
             </button>
           )}
-          {/* 有人梭哈时只有两条路：接，或者弃 */}
+          {/* 有人梭哈时只有两条路：接，或者弃。
+              按钮上写的是**我自己**要掏的数，和播报里发起人的金额本来就可以不一样 ——
+              闷牌半价、看牌双倍。上面那个「看牌」按下去，这个数会当场变成两倍。 */}
           <button
             className="btn primary accept"
-            disabled={!myTurn || me.chips < shove.amount}
+            disabled={!myTurn || acceptPrice <= 0}
+            title={
+              me.looked
+                ? `看过牌，接梭哈是双倍：${fmt(acceptPrice)}`
+                : `闷牌半价：${fmt(acceptPrice)}；现在看牌的话这一份会变成 ${fmt(Math.min(shove.base * 2, me.chips))}`
+            }
             onClick={() => cmd({ type: 'call' })}
           >
-            接受梭哈 {fmt(shove.amount)}
+            接受梭哈 {fmt(acceptPrice)}
+            {!me.looked && <small className="hint-half"> 闷牌半价</small>}
           </button>
           <button className="btn fold" disabled={!myTurn} onClick={() => cmd({ type: 'fold' })}>
             弃牌
@@ -229,7 +245,10 @@ export function ActionBar({
             <button
               className="btn allin"
               disabled={!myTurn}
-              title={`你先出 ${fmt(shovePrice)}（场上最少的一家），其他人自己选接或弃`}
+              title={
+                `你先出 ${fmt(shovePrice)}：闷牌一份 ${fmt(shoveBase)}、看牌两份 ${fmt(shoveBase * 2)}` +
+                `，单价上限由场上最短的一家决定。其他人按各自的倍率选接或弃`
+              }
               onClick={() => cmd({ type: 'all_in' })}
             >
               梭哈 {fmt(shovePrice)}

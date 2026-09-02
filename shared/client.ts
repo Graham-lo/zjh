@@ -277,7 +277,10 @@ export function legalActions(room: PublicRoom): LegalAction[] {
   if (!myTurn) return out;
 
   if (room.allIn) {
-    out.push({ action: 'accept', label: `接受梭哈`, cost: room.allIn.amount });
+    // 接梭哈的价按**自己**的倍率算：闷牌半价、看牌双倍。
+    // 上面的看牌是自由动作，点完这个数就会翻倍 —— 翻过头就夹到自己的全部筹码。
+    const price = Math.min(room.allIn.base * (me.looked ? 2 : 1), me.chips);
+    out.push({ action: 'accept', label: me.looked ? '接受梭哈' : '接受梭哈（闷牌半价）', cost: price });
     return out;
   }
 
@@ -290,7 +293,7 @@ export function legalActions(room: PublicRoom): LegalAction[] {
   if (me.chips > 0 && (canAllInNow(room) || me.chips <= cost)) {
     const active = room.players.filter((p) => p.status === 'active');
     if (active.length > 1) {
-      out.push({ action: 'all_in', label: '梭哈（其他人可以接或弃）', cost: allInCost(room) });
+      out.push({ action: 'all_in', label: '梭哈（其他人可以接或弃）', cost: allInCost(room, me) });
     }
   }
   if (canCompareNow(room)) {
@@ -355,7 +358,15 @@ export function tableView(room: PublicRoom) {
       ? { who: turn.name, isMe: turn.id === room.viewerId, secondsLeft: room.turnDeadline ? Math.max(0, Math.round((room.turnDeadline - Date.now()) / 1000)) : null }
       : null,
     allIn: room.allIn
-      ? { by: room.allIn.initiatorName, amount: room.allIn.amount, waitingOn: room.allIn.pending.length, accepted: room.allIn.accepted.length }
+      ? {
+          by: room.allIn.initiatorName,
+          // amount 是发起人自己押上的数，只用来复述「他梭了多少」；
+          // 轮到自己要掏多少看 my_cost —— 闷牌半价、看牌双倍，两个数本来就不一样。
+          amount: room.allIn.amount,
+          my_cost: me ? Math.min(room.allIn.base * (me.looked ? 2 : 1), me.chips) : null,
+          waitingOn: room.allIn.pending.length,
+          accepted: room.allIn.accepted.length,
+        }
       : null,
     // 结算明细：谁投了多少、这局赢输多少、坐下以来累计多少
     result: room.result

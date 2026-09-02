@@ -140,7 +140,16 @@ export interface RoomState {
 export interface PendingAllIn {
   initiatorId: string;
   initiatorName: string;
-  /** 每家要出的金额，等于发起时场上最短的一家 */
+  /**
+   * 梭哈的**闷牌单价**，发起时定死。每家实际要掏 `base * (looked ? 2 : 1)` ——
+   * 和跟注、加注、比牌一样的 1:2 定价，闷牌半价、看牌双倍。
+   */
+  base: number;
+  /**
+   * **发起人自己押上的金额**（= base × 他当时的倍率），只用于播报展示
+   * 「XX 梭哈了 890」。**不要拿它当成每家要付的数** —— 闷牌的人付一半，
+   * 看牌的人付两倍，各家的价要用 base 现算。
+   */
   amount: number;
   /** 还没表态的玩家 id，按行动顺序 */
   pending: string[];
@@ -392,6 +401,9 @@ export function migrateRoom(state: RoomState): RoomState {
     p.bared ??= false;
     p.online ??= false;
   }
+  // base 是「闷牌半价」上线后才有的字段。老快照里存的 amount 就是当时人人同价的那个数，
+  // 拿它当基准恢复出来，正在表态的那一局还能按老规则打完，不会中途报价崩掉。
+  if (state.allIn) state.allIn.base ??= state.allIn.amount;
   return state;
 }
 
@@ -498,14 +510,30 @@ export function compareCost(state: { betUnit: number }, player: { looked: boolea
 }
 
 /**
- * 梭哈的金额：**场上还在局的人里积分最少的那一家**。
+ * 梭哈的**闷牌单价**：在保证每个还在局的人都掏得起自己那一份的前提下，
+ * 能取到的最大闷牌价。每家实付 `base * (looked ? 2 : 1)`。
  *
- * 用最短的一家封顶，是为了让所有人都跟得起 —— 梭哈会把全部在局玩家按同一金额
- * 拉进底池然后开牌，如果金额高过某人的身家，那个人就成了被迫破产，不公平。
+ * 用最短的一家封顶，是为了让所有人都跟得起 —— 梭哈会把全部在局玩家拉进底池然后开牌，
+ * 如果金额高过某人的身家，那个人就成了被迫破产，不公平。
+ * 但「跟得起」要按各自的倍率算：看牌的人一份要掏两倍，所以他能撑住的闷牌价只有 chips/2。
+ * 拿 floor(chips / 倍率) 取最小，才是真正人人掏得起的那条线。
  */
-export function allInCost(state: { players: { status: PlayerStatus; chips: number }[] }): number {
-  const stacks = state.players.filter((p) => p.status === 'active').map((p) => p.chips);
-  return stacks.length ? Math.max(0, Math.min(...stacks)) : 0;
+export function allInBase(state: { players: { status: PlayerStatus; chips: number; looked: boolean }[] }): number {
+  const caps = state.players
+    .filter((p) => p.status === 'active')
+    .map((p) => Math.floor(p.chips / (p.looked ? 2 : 1)));
+  return caps.length ? Math.max(0, Math.min(...caps)) : 0;
+}
+
+/**
+ * 某个玩家梭哈要掏多少 —— 闷牌一份、看牌两份，和 callCost/compareCost 同一套比例。
+ * 梭哈过去是全场同价，那是这套定价里唯一的例外，现在补上了。
+ */
+export function allInCost(
+  state: { players: { status: PlayerStatus; chips: number; looked: boolean }[] },
+  player: { looked: boolean },
+): number {
+  return allInBase(state) * (player.looked ? 2 : 1);
 }
 
 /**
@@ -744,8 +772,13 @@ function doLook(state: RoomState, actorId: string) {
 function doCall(state: RoomState, actorId: string) {
   const p = requireTurn(state, actorId);
   if (state.allIn) {
-    // 表态阶段：跟注就是「接梭哈」，金额是固定的那一份
-    const amount = state.allIn.amount;
+    // 表态阶段：跟注就是「接梭哈」，价钱按自己的倍率算 —— 闷牌半价，看牌双倍。
+    const price = state.allIn.base * (p.looked ? 2 : 1);
+    // 看牌不占行动权，所以闷牌的人可以在表态阶段先看牌再决定，倍率当场从 1 跳到 2，
+    // 有可能超过他的身家（base 是按他闷牌时算出来的）。这时把实付夹到他的全部筹码：
+    // 「看牌把自己的价翻倍了」就该推光筹码，这本来就是 all-in 的本义，
+    // 比给他一个点下去只会报错的按钮好。
+    const amount = Math.min(price, p.chips);
     pay(state, p, amount);
     p.lastAction = `接梭哈 ${amount}`;
     pushLog(state, `${p.name} 接下 ${state.allIn.initiatorName} 的梭哈`);
@@ -792,11 +825,12 @@ function doAllIn(state: RoomState, actorId: string) {
     throw new GameError(`第 ${state.settings.allInFromRound} 轮起才能主动梭哈`);
   }
 
-  const amount = allInCost(state);
-  if (amount <= 0) throw new GameError('没有可梭哈的积分');
+  const base = allInBase(state);
+  if (base <= 0) throw new GameError('没有可梭哈的积分');
+  const amount = base * (p.looked ? 2 : 1);
 
-  // 发起人先把钱押上，然后按行动顺序问其他人接不接。
-  // 金额取的是场上最短的一家，所以每个人都掏得起 —— 但掏不掏是他自己的选择。
+  // 发起人先按自己的倍率把钱押上，然后按行动顺序问其他人接不接。
+  // base 是按各家倍率封顶算出来的，所以每个人都掏得起自己那一份 —— 但掏不掏是他自己的选择。
   pay(state, p, amount);
   p.lastAction = `梭哈 ${amount}`;
   const M = state.settings.maxPlayers;
@@ -806,6 +840,7 @@ function doAllIn(state: RoomState, actorId: string) {
   state.allIn = {
     initiatorId: p.id,
     initiatorName: p.name,
+    base,
     amount,
     pending: order.map((q) => q.id),
     accepted: [p.id],
@@ -1110,8 +1145,10 @@ export function botDecision(state: RoomState, bot: PlayerState): GameCommand {
   // 有人梭哈时只有两条路：接或者弃。先看牌，再按赔率决定。
   if (state.allIn) {
     if (!bot.looked) return { type: 'look' };
-    const price = state.allIn.amount;
-    if (bot.chips < price) return { type: 'fold' };
+    // 上一步已经保证看过牌了，所以这里的价一定是双倍那一档 —— 别拿发起人的实付当自己的价。
+    // 刚才那一下看牌可能把价顶过了身家，接受时服务端会夹到全部筹码，赔率也按这个实付算。
+    if (bot.chips <= 0) return { type: 'fold' };
+    const price = Math.min(state.allIn.base * 2, bot.chips);
     const chance = Math.pow(handPercentile(bot.hand), Math.max(1, state.allIn.accepted.length));
     return chance > price / (state.pot + price) * 0.9 ? { type: 'call' } : { type: 'fold' };
   }

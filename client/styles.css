@@ -142,6 +142,11 @@ button { touch-action: manipulation; }
   border-color: #f5bd85; color: #1e1206; font-weight: 900; letter-spacing: 0.06em;
   box-shadow: 0 12px 30px rgba(200, 110, 50, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
+/* 闷牌的人看到的数只有别人的一半，不写一句会以为是 bug —— 压在按钮上小一号，不抢金额本身 */
+.btn.accept .hint-half {
+  display: block; margin-top: 2px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em; opacity: 0.72;
+}
 /* 表态只有两个选项，给足点击面积，别让人点错 */
 .bar-actions.shove-choice { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
 .bar-actions.shove-choice .btn { padding: 17px 16px; font-size: 16px; }

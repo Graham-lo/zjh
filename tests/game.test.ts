@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  allInCost, applyCommand, botDecision, canAllInNow, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
+  allInBase, allInCost, applyCommand, botDecision, canAllInNow, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
   compareHands, createHumanPlayer, createInitialRoom, currentPlayer, evaluateHand,
   handPercentile, migrateRoom, sanitizeRoom, startRound, timeoutCurrentPlayer, transferHost,
   type Card, type RoomState,
@@ -146,7 +146,7 @@ test('梭哈金额由场上最短的一家决定，接的人都掏得起', () =>
   const others = room.players.filter((p) => p.id !== actor.id);
   // 人为造出一个短码：金额应该跟着他走，而不是跟着梭哈的人
   others[0].chips = 1500;
-  assert.equal(allInCost(room), 1500);
+  assert.equal(allInCost(room, actor), 1500, '人人闷牌时，每家都是这个数');
 
   const potBefore = room.pot;
   const stacksBefore = new Map(room.players.map((p) => [p.id, p.chips]));
@@ -298,10 +298,148 @@ test('梭哈金额取的是在局玩家，已弃牌的短码不算数', () => {
   folded.chips = 10;
   applyCommand(room, folded.id, { type: 'fold' });
   assert.equal(
-    allInCost(room),
+    allInCost(room, currentPlayer(room)!),
     room.settings.startingChips - room.settings.ante,
     '弃了牌的人不该再压低梭哈金额',
   );
+});
+
+/* ------------------------------------------- 梭哈的闷牌半价 / 看牌双倍 */
+
+/** 把房间推到「可以主动梭哈」的状态，并返回行动人和其他人 */
+function shoveReady(humans = 3) {
+  const room = makeRoom(humans);
+  startRound(room, room.hostId);
+  room.roundNo = room.settings.allInFromRound;
+  const actor = currentPlayer(room)!;
+  return { room, actor, others: room.players.filter((p) => p.id !== actor.id) };
+}
+
+/**
+ * 按表态顺序走完一轮，返回每个人实际掏了多少。lookFirst 里的人先看牌再接。
+ * 看的是 bet 而不是 chips：最后一个接的人会在同一次调用里开牌收锅，
+ * 用 chips 差算等于把奖池也算进投入。
+ */
+function settleShove(room: RoomState, opts: { fold?: string[]; lookFirst?: string[] } = {}) {
+  const paid = new Map<string, number>();
+  let guard = 0;
+  while (room.allIn) {
+    assert.ok(guard++ < 10, '表态过程必须收敛');
+    const p = currentPlayer(room)!;
+    if (opts.fold?.includes(p.id)) {
+      applyCommand(room, p.id, { type: 'fold' });
+      continue;
+    }
+    if (opts.lookFirst?.includes(p.id) && !p.looked) applyCommand(room, p.id, { type: 'look' });
+    const before = p.bet;
+    applyCommand(room, p.id, { type: 'call' });
+    paid.set(p.id, p.bet - before);
+  }
+  return paid;
+}
+
+test('梭哈发起人：闷牌实付正好是看牌实付的一半', () => {
+  // 同一个局面各跑一遍，唯一的差别是发起人有没有看牌。
+  // 单价由别人（3000 的短码）压住，所以发起人的倍率是唯一变量。
+  const dark = shoveReady();
+  dark.others[0].chips = 3000;
+  const darkBefore = dark.actor.bet;
+  applyCommand(dark.room, dark.actor.id, { type: 'all_in' });
+  const darkPaid = dark.actor.bet - darkBefore;
+
+  const lit = shoveReady();
+  lit.others[0].chips = 3000;
+  applyCommand(lit.room, lit.actor.id, { type: 'look' });
+  const litBefore = lit.actor.bet;
+  applyCommand(lit.room, lit.actor.id, { type: 'all_in' });
+  const litPaid = lit.actor.bet - litBefore;
+
+  assert.equal(dark.room.allIn!.base, 3000, '闷牌单价由场上最短的一家决定');
+  assert.equal(lit.room.allIn!.base, 3000, '看牌不改变单价，只改变自己的倍率');
+  assert.equal(darkPaid, 3000, '闷牌一份');
+  assert.equal(litPaid, 6000, '看牌两份');
+  assert.equal(darkPaid * 2, litPaid, '闷牌是看牌的一半');
+  assert.equal(dark.room.allIn!.amount, darkPaid, 'amount 记的是发起人自己押上的数');
+  assert.equal(lit.room.allIn!.amount, litPaid);
+});
+
+test('接受梭哈：闷牌接的人实付正好是看牌接的人的一半', () => {
+  const { room, actor, others } = shoveReady(4);
+  const short = others[0];
+  short.chips = 3000; // 由他把闷牌单价压到 3000
+  applyCommand(room, actor.id, { type: 'all_in' });
+  assert.equal(room.allIn!.base, 3000);
+
+  const responders = room.allIn!.pending.filter((id) => id !== short.id);
+  const [darkId, litId] = responders;
+  const paid = settleShove(room, { fold: [short.id], lookFirst: [litId] });
+
+  assert.equal(paid.get(darkId), 3000, '闷牌接受只付一份');
+  assert.equal(paid.get(litId), 6000, '看牌接受要付两份');
+  assert.equal(paid.get(darkId)! * 2, paid.get(litId), '闷牌接受是看牌接受的一半');
+});
+
+test('闷牌单价保证人人掏得起：看牌的短码按 chips/2 卡住，而不是按 chips', () => {
+  const { room, actor, others } = shoveReady();
+  others[0].chips = 1000;
+  applyCommand(room, others[0].id, { type: 'look' }); // 看牌的人筹码最少
+  others[1].chips = 900; // 闷牌的人筹码更少一点，但只按一倍算
+
+  // 老规则会取 min(chips) = 900，看牌那家就要掏 1800，比身家还多 —— 被迫破产。
+  assert.equal(allInBase(room), 500, '要被看牌那家的 chips/2 卡住');
+  assert.equal(allInCost(room, others[0]), 1000, '看牌的短码正好推光筹码');
+  assert.equal(allInCost(room, actor), 500, '闷牌的人只掏一份');
+  for (const p of room.players.filter((x) => x.status === 'active')) {
+    assert.ok(
+      allInBase(room) * (p.looked ? 2 : 1) <= p.chips,
+      `${p.name} 应付超过了自己的身家，不该发生`,
+    );
+  }
+
+  applyCommand(room, actor.id, { type: 'all_in' });
+  settleShove(room);
+  assert.equal(room.phase, 'round_end');
+  for (const p of room.players) assert.ok(p.chips >= 0, '不该有人被打成负数');
+});
+
+test('表态时先看牌再接受的人要付两倍；翻倍翻过身家就推光筹码', () => {
+  // 甲：家底厚，看牌把自己的价从 3000 抬到 6000，照付
+  const rich = shoveReady();
+  rich.others[0].chips = 3000;
+  applyCommand(rich.room, rich.actor.id, { type: 'all_in' });
+  const richId = rich.room.allIn!.pending.find((id) => id !== rich.others[0].id)!;
+  const richPaid = settleShove(rich.room, { fold: [rich.others[0].id], lookFirst: [richId] });
+  assert.equal(richPaid.get(richId), 6000, '表态阶段看牌，价当场翻倍');
+
+  // 乙：他自己就是那个短码，看牌后 6000 已经超过身家 3000 —— 推光筹码，而不是报错
+  const broke = shoveReady();
+  const shortId = broke.others[0].id;
+  broke.others[0].chips = 3000;
+  applyCommand(broke.room, broke.actor.id, { type: 'all_in' });
+  assert.equal(broke.room.allIn!.base, 3000);
+  const brokePaid = settleShove(broke.room, { lookFirst: [shortId] });
+  assert.equal(brokePaid.get(shortId), 3000, '夹到全部筹码，一分不多');
+  // 这里不能断言 chips === 0：最后一个接的人会在同一次 applyCommand 里开牌收锅，
+  // 他要是赢了，奖池当场就发回到 chips 上（牌是随机发的，断言 0 会时过时不过）。
+  // 「推光了」的证据是上面那行：实付正好等于他的全部身家，而不是翻倍后的 6000。
+  for (const p of broke.room.players) assert.ok(p.chips >= 0, '谁都不该被扣成负数');
+});
+
+test('梭哈的底池等于各家实付之和', () => {
+  const { room, actor, others } = shoveReady(4);
+  const short = others[0];
+  short.chips = 3000;
+  const potBefore = room.pot;
+  const actorBefore = actor.bet;
+  applyCommand(room, actor.id, { type: 'all_in' });
+  const actorPaid = actor.bet - actorBefore;
+  assert.equal(room.pot, potBefore + actorPaid, '先只有发起人掏钱');
+
+  const litId = room.allIn!.pending.find((id) => id !== short.id)!;
+  const paid = settleShove(room, { fold: [short.id], lookFirst: [litId] });
+  const total = actorPaid + [...paid.values()].reduce((a, b) => a + b, 0);
+  assert.equal(total, 3000 + 3000 + 6000, '一份 + 一份 + 两份');
+  assert.equal(room.result!.potWon, potBefore + total, '底池就是各家实付之和，一分不差');
 });
 
 test('还没轮到自己也能弃牌，且不会打乱行动顺序', () => {
