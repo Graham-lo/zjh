@@ -5,7 +5,7 @@
  * 和网页版连的是**同一台服务器、同一批房间** —— 朋友把邀请链接发给你，
  * 你在终端里就能和他们坐同一张桌子。功能与网页版对齐：
  * 准备、加电脑、看牌、随时弃牌、跟注、分档加注、梭哈与表态、比牌、
- * 补分、聊天、表情、改名、房规、牌桌记录、断线重连恢复座位。
+ * 补分、表情、改名、房规、牌桌记录、断线重连恢复座位。
  *
  * 依赖为零：Node 22 起内置全局 WebSocket。
  */
@@ -118,7 +118,7 @@ const avatar = flag('avatar') ?? ident.avatar;
 
 /* --------------------------------------------------------------- 画面 */
 
-type Mode = 'play' | 'chat' | 'cmd' | 'compare' | 'emote';
+type Mode = 'play' | 'cmd' | 'compare' | 'emote';
 let mode: Mode = 'play';
 let buffer = '';
 let notice = '';
@@ -253,8 +253,7 @@ function draw() {
     fx,
     auto,
   });
-  if (mode === 'chat') lines.push('', `${C.gold}说点什么 >${C.reset} ${buffer}${C.dim}_${C.reset}`);
-  else if (mode === 'cmd') lines.push('', `${C.gold}:${C.reset}${buffer}${C.dim}_${C.reset}`);
+  if (mode === 'cmd') lines.push('', `${C.gold}:${C.reset}${buffer}${C.dim}_${C.reset}`);
   else if (mode === 'compare') {
     lines.push(
       '',
@@ -303,7 +302,7 @@ const raiseTiers = () => (client.room ? legalActions(client.room).filter((a) => 
  */
 const AUTO_DELAY = 450; // 留一下手感：让人看清是挂机在动手，而不是画面自己跳了
 let auto = false;
-/** 已经为哪个回合排过队。同一回合房间会更新很多次（别人聊天、倒计时），只能触发一次 */
+/** 已经为哪个回合排过队。同一回合房间会更新很多次（别人发表情、倒计时），只能触发一次 */
 let autoFired = '';
 let autoTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -362,7 +361,7 @@ const HELP = [
   `${C.bold}按键${C.reset}`,
   `  ${C.gold}k${C.reset} 看牌    ${C.gold}c${C.reset} 跟注/接受梭哈    ${C.gold}f${C.reset} 弃牌（随时可弃）    ${C.gold}a${C.reset} 梭哈    ${C.gold}v${C.reset} 比牌    ${C.gold}1-4${C.reset} 加注档位`,
   `  ${C.gold}r${C.reset} 准备    ${C.gold}s${C.reset} 开始    ${C.gold}b${C.reset} 加电脑    ${C.gold}n${C.reset} 下一局    ${C.gold}m${C.reset} 补分    ${C.gold}i${C.reset} 邀请链接`,
-  `  ${C.gold}t${C.reset} 聊天    ${C.gold}e${C.reset} 表情    ${C.gold}:${C.reset} 命令    ${C.gold}?${C.reset} 帮助    ${C.gold}q${C.reset} 退出${C.dim}（牌局中退出＝自动弃牌离场）${C.reset}`,
+  `  ${C.gold}e${C.reset} 表情    ${C.gold}:${C.reset} 命令    ${C.gold}?${C.reset} 帮助    ${C.gold}q${C.reset} 退出${C.dim}（牌局中退出＝自动弃牌离场）${C.reset}`,
   `  ${C.gold}g${C.reset} 自动跟注（挂机）：轮到自己就跟，跟不起自动梭哈，没分了弃牌；${C.dim}有人梭哈会自动关掉交还给你${C.reset}`,
   `${C.bold}命令${C.reset}`,
   `  ${C.gold}:name 昵称${C.reset}   ${C.gold}:avatar 🐯${C.reset}   ${C.gold}:kick 座位号${C.reset}   ${C.gold}:log${C.reset}   ${C.gold}:invite${C.reset}`,
@@ -386,10 +385,6 @@ function handleKey(key: string) {
   switch (key) {
     case 'q':
       return quit();
-    case 't':
-      mode = 'chat';
-      buffer = '';
-      return draw();
     case ':':
       mode = 'cmd';
       buffer = '';
@@ -527,7 +522,6 @@ function onData(chunk: Buffer) {
     const was = mode;
     mode = 'play';
     buffer = '';
-    if (was === 'chat' && text.trim()) send({ type: 'chat', text });
     if (was === 'cmd' && text.trim()) runCommand(text);
     return draw();
   }

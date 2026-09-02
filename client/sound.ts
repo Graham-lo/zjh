@@ -13,7 +13,7 @@ export {
 } from './voice-lines.ts';
 
 type Name =
-  | 'deal' | 'flip' | 'chip' | 'turn' | 'win' | 'lose' | 'msg' | 'tap'
+  | 'deal' | 'flip' | 'chip' | 'turn' | 'win' | 'lose' | 'tap'
   // 重构后新增的几下：比牌对撞、梭哈闷响、金币流、好牌提示、末段心跳
   | 'clash' | 'shove' | 'coin' | 'ding' | 'heart' | 'hurry'
   // 升级：亮主拍牌、收圈横扫、倍数戳记（DESIGN 3.6）
@@ -166,8 +166,6 @@ class Sound {
       case 'lose':
         this.tone(330, 0, 0.2, 0.1, 'sine');
         return this.tone(247, 0.13, 0.28, 0.09, 'sine');
-      case 'msg':
-        return this.tone(1400, 0, 0.09, 0.07, 'sine');
       case 'slam':
         // 亮主：一张牌被拍到桌面上。木头的闷响 + 一点纸面擦过的高频
         this.tone(140, 0, 0.18, 0.26, 'sine');

@@ -10,7 +10,7 @@
 
 import {
   AVATARS, EMOTES, GameError, cleanAvatar, cleanName, createHumanPlayer, randomId,
-  type ChatEntry, type LogEntry, type PlayerState,
+  type LogEntry, type PlayerState,
 } from '../game.ts';
 import { SJ_VARIANTS, type SjKind, ladderOf } from '../games.ts';
 import {
@@ -113,7 +113,6 @@ export interface SjRoomState {
   hostId: string;
   createdAt: number;
   log: LogEntry[];
-  chat: ChatEntry[];
   actionSeq: number;
   settings: SjSettings;
   players: SjPlayer[];
@@ -193,7 +192,6 @@ export type SjEvent =
   | { k: 'sj_hand_end'; defenderPoints: number; outcome: SjOutcome }
   | { k: 'sj_match_end'; winnerTeam: 0 | 1 }
   | { k: 'sj_turn'; playerId: string }
-  | { k: 'sj_chat'; seq: number }
   | { k: 'sj_emote'; playerId: string; id: string };
 
 /* --------------------------------------------------------------- 常量 */
@@ -218,7 +216,7 @@ const BOT_AVATARS = ['🤖', '👾', '🎩', '🕶️'];
 const now_ = (opts?: SjEngineOpts) => opts?.now ?? Date.now();
 
 /**
- * 日志/聊天的追加。炸金花的 `pushLog` 签名吃的是 `RoomState`，
+ * 日志的追加。炸金花的 `pushLog` 签名吃的是 `RoomState`，
  * 而任务要求 game.ts 除了 `kind` 之外不动，所以这里写两个同形状的小函数，
  * 语义（seq 单调、上限截断）与炸金花完全一致。
  */
@@ -226,14 +224,6 @@ export function sjLog(state: SjRoomState, text: string, at?: number) {
   state.actionSeq += 1;
   state.log.push({ seq: state.actionSeq, at: at ?? Date.now(), text });
   if (state.log.length > 80) state.log.splice(0, state.log.length - 80);
-}
-
-export function sjChat(state: SjRoomState, player: SjPlayer, text: string, at?: number) {
-  const body = text.trim().slice(0, 80);
-  if (!body) return;
-  state.actionSeq += 1;
-  state.chat.push({ seq: state.actionSeq, at: at ?? Date.now(), playerId: player.id, name: player.name, avatar: player.avatar, text: body });
-  if (state.chat.length > 60) state.chat.splice(0, state.chat.length - 60);
 }
 
 export function teamOf(seat: number): 0 | 1 {
@@ -321,7 +311,6 @@ export function createSjRoom(kind: SjKind, code: string, host: SjPlayer): SjRoom
     hostId: host.id,
     createdAt: Date.now(),
     log: [],
-    chat: [],
     actionSeq: 0,
     settings: { ...SJ_DEFAULT_SETTINGS },
     players: [host],
@@ -878,13 +867,12 @@ export type SjCommand =
     type: 'settings';
     turnSeconds?: number; kouSeconds?: number; chaoSeconds?: number; autoContinue?: boolean;
   }
-  | { type: 'chat'; text: string }
   | { type: 'emote'; id: string }
   | { type: 'leave' };
 
 export const SJ_COMMAND_TYPES = new Set<SjCommand['type']>([
   'ready', 'rename', 'seat', 'start', 'add_bot', 'remove_player', 'declare', 'pass',
-  'kou', 'chao', 'pass_chao', 'play', 'new_hand', 'new_match', 'settings', 'chat', 'emote', 'leave',
+  'kou', 'chao', 'pass_chao', 'play', 'new_hand', 'new_match', 'settings', 'emote', 'leave',
 ]);
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(v)));
@@ -1016,10 +1004,6 @@ export function applySjCommand(
       if (changed.length) sjLog(state, `房规调整：${changed.join('、')}`, now_(opts));
       return;
     }
-    case 'chat': {
-      sjChat(state, actor, command.text, now_(opts));
-      return;
-    }
     case 'emote': {
       if (!EMOTES.includes(command.id)) throw new GameError('无效的表情');
       actor.emote = { id: command.id, at: now_(opts) };
@@ -1125,7 +1109,6 @@ export function migrateSjRoom(state: SjRoomState): SjRoomState {
   state.kind ??= 'sj_510k';
   state.settings = { ...SJ_DEFAULT_SETTINGS, ...(state.settings ?? {}) };
   state.log ??= [];
-  state.chat ??= [];
   state.actionSeq ??= 0;
   state.createdAt ??= Date.now();
   state.levels ??= [ladder[0], ladder[0]];
@@ -1261,8 +1244,6 @@ export function deriveSjEvents(
   if (after.matchWinner !== undefined && before.matchWinner === undefined) {
     events.push({ k: 'sj_match_end', winnerTeam: after.matchWinner });
   }
-  const lastChat = after.chat.at(-1);
-  if (lastChat && lastChat.seq > (before.chat.at(-1)?.seq ?? 0)) events.push({ k: 'sj_chat', seq: lastChat.seq });
   if (cmd?.type === 'emote') events.push({ k: 'sj_emote', playerId: actorId, id: cmd.id });
   if (after.turnSeat != null && after.turnSeat !== before.turnSeat) {
     events.push({ k: 'sj_turn', playerId: nameOf(after.turnSeat) });

@@ -138,7 +138,6 @@ export function Table({
 }) {
   const me = room.players.find((p) => p.id === room.viewerId);
   const [dockOpen, setDockOpen] = useState(false);
-  const [unread, setUnread] = useState(0);
   const [chips, setChips] = useState<FlyChip[]>([]);
   const [flash, setFlash] = useState<'win' | 'lose' | null>(null);
   const [rain, setRain] = useState(0);
@@ -274,19 +273,11 @@ export function Table({
           // 交给下面的「开牌亮相」那一拍统一起爆，见 revealAt。
           setPendingWin({ id: ++chipId.current, playerId: ev.playerId, amount: ev.amount });
           break;
-        case 'chat':
-          if (!dockOpen) setUnread((u) => u + 1);
-          sound.play('msg');
-          break;
         default:
           break;
       }
     }
   }, [batch.seq]);
-
-  useEffect(() => {
-    if (dockOpen) setUnread(0);
-  }, [dockOpen]);
 
   /**
    * 开牌亮相的起算点：结算已经开始，且比牌/梭哈的全屏特效已经让开
@@ -590,7 +581,7 @@ export function Table({
       <ActionBar room={room} me={me as PublicPlayer} cmd={cmd} onInvite={invite} onInviteCli={inviteCli} />
       <EmoteBar cmd={cmd} />
 
-      <Dock room={room} cmd={cmd} open={dockOpen} onToggle={setDockOpen} unread={unread} />
+      <Dock room={room} open={dockOpen} onToggle={setDockOpen} />
 
       {/* 面板要等牌桌把开牌演完再升起来：直接盖上去，摊牌那几秒全场都白演了 */}
       {room.phase === 'round_end' && result && panelUp && (

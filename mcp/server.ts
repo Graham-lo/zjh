@@ -277,17 +277,15 @@ server.tool(
 );
 
 server.tool(
-  'zjh_say',
-  '在牌桌上说话或发表情。朋友局的乐趣有一半在这儿，别只顾着算牌。',
+  'zjh_emote',
+  '在牌桌上发一个表情。朋友局的乐趣有一半在这儿，别只顾着算牌。',
   {
-    text: z.string().optional().describe('聊天内容，最多 80 字'),
-    emote: z.string().optional().describe(`表情，可选：${EMOTES.join(' ')}`),
+    emote: z.string().describe(`表情，可选：${EMOTES.join(' ')}`),
   },
-  async ({ text, emote }) => {
+  async ({ emote }) => {
     try {
-      if (emote && EMOTES.includes(emote)) await act({ type: 'emote', id: emote }, `发表情 ${emote}`);
-      if (text?.trim()) return await act({ type: 'chat', text: text.trim() }, '发言');
-      return ok(snapshot());
+      if (!EMOTES.includes(emote)) return fail(`没有这个表情，可选：${EMOTES.join(' ')}`);
+      return await act({ type: 'emote', id: emote }, `发表情 ${emote}`);
     } catch (e) {
       return fail((e as Error).message);
     }

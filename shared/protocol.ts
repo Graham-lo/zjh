@@ -65,7 +65,6 @@ export type ZjhEvent =
   | { k: 'showdown'; winnerId: string }
   | { k: 'win'; playerId: string; amount: number }
   | { k: 'emote'; playerId: string; id: string }
-  | { k: 'chat'; seq: number }
   | { k: 'turn'; playerId: string }
   | { k: 'presence'; playerId: string; online: boolean };
 

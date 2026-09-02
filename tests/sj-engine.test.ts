@@ -895,13 +895,11 @@ test('事件从前后两份状态里派生出来，够客户端演一遍', () =>
   assert.ok(events.some((e) => e.k === 'sj_hand_end'), '结算要有事件');
 });
 
-test('聊天与表情也会派生事件', () => {
+test('表情也会派生事件', () => {
   const room = makeSjRoom();
   const before = structuredClone(room);
-  applySjCommand(room, room.hostId, { type: 'chat', text: '开一把' });
   applySjCommand(room, room.hostId, { type: 'emote', id: '👍' });
   const events = deriveSjEvents(before, room, room.hostId, { type: 'emote', id: '👍' });
-  assert.ok(events.some((e) => e.k === 'sj_chat'));
   assert.ok(events.some((e) => e.k === 'sj_emote'));
   assert.throws(() => applySjCommand(room, room.hostId, { type: 'emote', id: '💩' }), /无效的表情/);
 });

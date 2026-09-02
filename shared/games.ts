@@ -164,9 +164,6 @@ function deriveZjhEvents(
     if (cmd.type === 'fold') events.push({ k: 'fold', playerId: actorId });
     if (cmd.type === 'emote') events.push({ k: 'emote', playerId: actorId, id: cmd.id });
   }
-  const lastChat = state.chat.at(-1);
-  if (lastChat && lastChat.seq > (before.chat.at(-1)?.seq ?? 0)) events.push({ k: 'chat', seq: lastChat.seq });
-
   if (state.phase === 'playing' && (before.phase !== 'playing' || state.handNo !== before.handNo)) {
     events.push({
       k: 'deal', handNo: state.handNo,

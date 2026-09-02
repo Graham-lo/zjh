@@ -149,12 +149,10 @@ test('下发的房间视图里不含 seen 记账', () => {
   assert.equal('seen' in sanitizeRoom(room, a.id), false);
 });
 
-test('视图带上了牌桌记录和聊天，命令行才有氛围', () => {
+test('视图带上了牌桌记录，命令行才有氛围', () => {
   const room = table(2);
-  applyCommand(room, room.hostId, { type: 'chat', text: '来了老弟' });
   startRound(room, room.hostId);
   const view = tableView(sanitizeRoom(room, room.hostId));
   assert.ok(view.log.length > 0);
-  assert.ok(view.chat.some((c) => c.includes('来了老弟')));
   assert.equal(view.round, `1/${room.settings.maxRounds}`);
 });

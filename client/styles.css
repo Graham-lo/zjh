@@ -1184,12 +1184,11 @@ button { touch-action: manipulation; }
   border: 1px solid var(--line-2); background: rgba(14, 26, 20, 0.92); backdrop-filter: blur(8px);
   box-shadow: var(--shadow);
 }
-.dock-toggle .badge {
-  position: absolute; top: -3px; right: -3px; background: var(--danger); color: #2a0d0d;
-  font-size: 10px; font-weight: 800; font-style: normal; border-radius: 999px; padding: 1px 5px;
-}
+/* 抽屉里只有牌桌记录一件东西，所以它是一块「按内容长」的面板：
+   高度顶到 max-height 就滚动，内容少时就只有内容那么高 —— 记录还没几条
+   的时候不该在屏幕上挂一整条空槽。 */
 .dock {
-  position: fixed; right: 0; top: 0; bottom: 0; width: 320px; z-index: 45;
+  position: fixed; right: 0; top: 0; bottom: 0; width: 268px; z-index: 45;
   display: flex; flex-direction: column;
   background: rgba(6, 11, 9, 0.96); border-left: 1px solid var(--gold-line);
   backdrop-filter: blur(16px);
@@ -1197,30 +1196,21 @@ button { touch-action: manipulation; }
   padding-top: env(safe-area-inset-top);
 }
 .dock.open { transform: none; }
-.dock-tabs { display: flex; gap: 4px; padding: 14px 14px 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
-.dock-tabs button {
-  background: none; border: 0; color: var(--muted); cursor: pointer;
-  padding: 6px 13px; border-radius: 9px; font-size: 13px;
+.dock-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 13px 14px 11px; border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
-.dock-tabs button.on { background: rgba(227, 200, 143, 0.12); color: var(--gold-2); font-weight: 600; }
-.dock-close { margin-left: auto; display: grid; place-items: center; }
-.dock-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
-.dock-empty { color: var(--dim); font-size: 12px; text-align: center; margin-top: 20px; }
-.chat-row { display: flex; align-items: flex-start; gap: 8px; }
-.chat-row.mine { flex-direction: row-reverse; }
-.chat-row.mine > div { text-align: right; }
-.chat-row b { font-size: 11px; color: var(--muted); font-weight: 600; }
-.chat-row p { margin: 3px 0 0; font-size: 13.5px; background: rgba(255, 255, 255, 0.05); padding: 7px 11px; border-radius: 11px; display: inline-block; word-break: break-word; }
-.chat-row.mine p { background: rgba(227, 200, 143, 0.16); }
-.chat-av { font-size: 18px; }
-.log-row { display: grid; grid-template-columns: 34px 1fr; gap: 6px; font-size: 12px; }
+.dock-head b { font-size: 12px; letter-spacing: 0.16em; color: var(--gold-2); font-weight: 600; }
+.dock-close { display: grid; place-items: center; }
+.dock-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 9px;
+}
+.dock-empty { color: var(--dim); font-size: 12px; text-align: center; margin: 14px 0; }
+.log-row { display: grid; grid-template-columns: 32px 1fr; gap: 6px; font-size: 12px; }
 .log-row span { color: var(--dim); }
 .log-row p { margin: 0; color: #adb9b3; }
-.dock-input { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid rgba(255, 255, 255, 0.06); padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
-.dock-input input {
-  flex: 1; min-width: 0; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 11px; padding: 9px 12px; outline: none;
-}
 
 /* ------------------------------------------------------------- 结算层 */
 
@@ -1354,7 +1344,7 @@ button { touch-action: manipulation; }
   /* 整屏只有一屏：牌桌吃掉所有剩余空间，行动台浮在桌沿上 */
   .table-shell {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 340px;
+    grid-template-columns: minmax(0, 1fr) 268px;
     grid-template-rows: auto minmax(0, 1fr) auto;
     height: 100dvh;
     overflow: hidden;
@@ -1366,19 +1356,23 @@ button { touch-action: manipulation; }
   .table-shell > footer { grid-area: 3 / 1 / 4 / 2; margin: 0 0 8px; font-size: 10.5px; }
   /* 行动台是一座浮岛，压在桌沿下方而不是另起一行 */
   .bar {
-    position: absolute; left: 0; right: 340px; bottom: 84px; margin: 0 auto;
-    width: min(880px, calc(100% - 400px)); z-index: 12; padding: 16px 20px;
+    position: absolute; left: 0; right: 268px; bottom: 84px; margin: 0 auto;
+    width: min(880px, calc(100% - 328px)); z-index: 12; padding: 16px 20px;
   }
   .emote-bar {
-    position: absolute; left: 0; right: 340px; bottom: 36px; margin: 0 auto;
+    position: absolute; left: 0; right: 268px; bottom: 36px; margin: 0 auto;
     width: fit-content; z-index: 12;
   }
   .bar-status strong { font-size: 16px; }
   .pot { min-width: 200px; }
-  /* 空出来的右边直接给聊天和记录，不用再点按钮拉抽屉 */
+  /* 空出来的右边直接给牌桌记录，不用再点按钮拉抽屉。
+     align-self: start —— 面板贴着顶栏往下长，记录不满一屏时下面是牌桌的
+     背景而不是一块空面板。 */
   .dock {
     position: static; transform: none; width: auto; grid-area: 2 / 2 / 4 / 3;
+    align-self: start; max-height: 100%; overflow: hidden;
     background: rgba(6, 11, 9, 0.55); padding-top: 0;
+    border-bottom: 1px solid var(--gold-line); border-radius: 0 0 0 16px;
   }
   .dock-toggle, .dock-close { display: none; }
 }
@@ -1391,18 +1385,18 @@ button { touch-action: manipulation; }
     --seat-rx: 41%;
     --seat-ry: 45%;
   }
-  .table-shell { grid-template-columns: minmax(0, 1fr) 380px; }
+  .table-shell { grid-template-columns: minmax(0, 1fr) 300px; }
   .felt { width: min(1400px, 96%); }
   .felt-wrap { padding: 36px 34px 272px; }
-  .bar { right: 380px; width: min(980px, calc(100% - 440px)); }
-  .emote-bar { right: 380px; }
+  .bar { right: 300px; width: min(980px, calc(100% - 360px)); }
+  .emote-bar { right: 300px; }
   .pot strong { font-size: 52px; }
   .pot { min-width: 230px; padding: 16px 40px; }
 }
 
 /* ----------------------------- 1920 一族：1920×1080 / 1200 / 1280
    到这一档屏幕已经比内容大得多了，再让一块定宽的东西居中就是浪费。
-   牌、头像、座位、底池、行动台、聊天栏一起上一号，首页也跟着撑开。
+   牌、头像、座位、底池、行动台、记录栏一起上一号，首页也跟着撑开。
    注意这一档只对"够高"的 1920 生效：1920×1080 无论满屏还是带浏览器边框，
    视口高度都在 1150 以内，会掉进后面的 (max-height: 1150px) 子档拿中等牌张
    —— 别让它拿着 2K 的大牌被行动台盖掉半张。 */
@@ -1420,7 +1414,7 @@ button { touch-action: manipulation; }
     --fx-burst: 1.3;
     --deal-k: 1.3;
   }
-  .table-shell { grid-template-columns: minmax(0, 1fr) 420px; }
+  .table-shell { grid-template-columns: minmax(0, 1fr) 330px; }
   /* max-height 必须写成实际长度：felt-wrap 的行高是按内容撑的，
      百分比 max-height 在这种行上解析不出来，等于没写 —— 牌桌会一直按
      2.1:1 长下去，矮一点的视口上对家就顶进顶栏了。
@@ -1436,8 +1430,8 @@ button { touch-action: manipulation; }
   .score-pill { font-size: 12.5px; }
 
   .bar {
-    right: 420px; bottom: 88px;
-    width: min(1060px, calc(100% - 490px)); padding: 18px 24px; border-radius: 22px;
+    right: 330px; bottom: 88px;
+    width: min(1060px, calc(100% - 400px)); padding: 18px 24px; border-radius: 22px;
   }
   .bar-status { margin-bottom: 12px; }
   .bar-status strong { font-size: 17px; }
@@ -1446,7 +1440,7 @@ button { touch-action: manipulation; }
   .bar-actions .btn { padding: 13px 20px; font-size: 16px; }
   .bar-actions .btn.call { flex: 1 1 190px; font-size: 17px; }
   .compare-row { margin-top: 12px; padding-top: 11px; font-size: 13px; }
-  .emote-bar { right: 420px; bottom: 34px; }
+  .emote-bar { right: 330px; bottom: 34px; }
   .emote-btn { width: 38px; height: 38px; font-size: 19px; }
 
   .pot { min-width: 256px; padding: 18px 44px; }
@@ -1467,13 +1461,11 @@ button { touch-action: manipulation; }
   .coin-flow i { width: 16px; height: 16px; }
   .laurel { width: 62px; height: 40px; }
 
-  /* 侧栏：聊天是这块屏幕上唯一还在用小字的地方，一起放大 */
-  .dock-tabs button { padding: 8px 15px; font-size: 14px; }
-  .dock-body { padding: 16px; gap: 14px; }
-  .chat-row p { padding: 8px 13px; font-size: 14.5px; }
-  .chat-av { font-size: 21px; }
+  /* 侧栏：记录是这块屏幕上唯一还在用小字的地方，一起放大 */
+  .dock-head { padding: 15px 16px 12px; }
+  .dock-head b { font-size: 13px; }
+  .dock-body { padding: 14px 16px; gap: 11px; }
   .log-row { grid-template-columns: 40px 1fr; font-size: 13px; }
-  .dock-input input { padding: 11px 14px; }
 
   /* 全屏特效：clamp 的上限在 1880 以上已经全部撞顶了，这里直接给定值 */
   .fx-word { font-size: 230px; }
@@ -1548,20 +1540,20 @@ button { touch-action: manipulation; }
     --fx-burst: 1.55;
     --deal-k: 1.55;
   }
-  .table-shell { grid-template-columns: minmax(0, 1fr) 460px; }
+  .table-shell { grid-template-columns: minmax(0, 1fr) 360px; }
   /* 567 = 顶栏 61 + 页脚 28 + 上边距 62 + 下边距 416 */
   .felt { width: min(1900px, 96%); max-height: calc(100dvh - 567px); }
   .felt-wrap { padding: 62px 36px 416px; }
   .table-shell > footer { font-size: 12px; }
   .topbar b { font-size: 19px; }
 
-  .bar { right: 460px; bottom: 88px; width: min(1160px, calc(100% - 540px)); padding: 20px 26px; }
+  .bar { right: 360px; bottom: 88px; width: min(1160px, calc(100% - 440px)); padding: 20px 26px; }
   .bar-status { margin-bottom: 13px; }
   .bar-status strong { font-size: 18px; }
   .bar-status span { font-size: 13.5px; }
   .bar-actions .btn { padding: 14px 22px; font-size: 17px; }
   .bar-actions .btn.call { flex: 1 1 210px; font-size: 18px; }
-  .emote-bar { right: 460px; bottom: 36px; }
+  .emote-bar { right: 360px; bottom: 36px; }
   .emote-btn { width: 42px; height: 42px; font-size: 21px; }
 
   .pot { min-width: 290px; padding: 20px 52px; }
@@ -1800,7 +1792,11 @@ button { touch-action: manipulation; }
   .wm-a { font-size: 460px; top: 40px; left: -120px; }
   .wm-b { display: none; }
   .entry { padding: 26px 22px 22px; }
-  .dock { width: 100%; top: auto; height: 68dvh; border-left: 0; border-top: 1px solid var(--gold-line); border-radius: 20px 20px 0 0; transform: translateY(100%); }
+  .dock {
+    width: 100%; top: auto; height: auto; max-height: 62dvh;
+    border-left: 0; border-top: 1px solid var(--gold-line); border-radius: 20px 20px 0 0;
+    transform: translateY(100%);
+  }
   .dock.open { transform: none; }
   .duel-side { gap: 10px; }
   .duel-av { width: 60px; height: 60px; font-size: 28px; }

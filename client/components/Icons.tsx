@@ -72,16 +72,13 @@ export const IconExit = (p: P) => (
   </Svg>
 );
 
-export const IconSend = (p: P) => (
+/** 牌桌记录：一沓带条目的纸，右侧抽屉和它的开关都用这个 */
+export const IconLog = (p: P) => (
   <Svg {...p}>
-    <path d="m22 2-7 20-4-9-9-4Z" />
-    <path d="M22 2 11 13" />
-  </Svg>
-);
-
-export const IconChat = (p: P) => (
-  <Svg {...p}>
-    <path d="M20 15a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2Z" />
+    <path d="M5 4a2 2 0 0 1 2-2h8l4 4v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2Z" />
+    <path d="M14 2v5h5" />
+    <path d="M9 12h6" />
+    <path d="M9 16h4" />
   </Svg>
 );
 

@@ -80,15 +80,6 @@ export interface LogEntry {
   text: string;
 }
 
-export interface ChatEntry {
-  seq: number;
-  at: number;
-  playerId: string;
-  name: string;
-  avatar: string;
-  text: string;
-}
-
 export interface RoundResult {
   winnerId: string;
   winnerName: string;
@@ -125,7 +116,6 @@ export interface RoomState {
   handNo: number;
   actionSeq: number;
   log: LogEntry[];
-  chat: ChatEntry[];
   createdAt: number;
   /**
    * 定向可见：seen[观看者id] = 他有权看到底牌的玩家 id 列表。
@@ -372,7 +362,6 @@ export function createInitialRoom(code: string, host: PlayerState): RoomState {
     handNo: 0,
     actionSeq: 0,
     log: [],
-    chat: [],
     createdAt: Date.now(),
   };
 }
@@ -390,7 +379,6 @@ export function migrateRoom(state: RoomState): RoomState {
   state.kind ??= 'zjh';
   state.settings = { ...DEFAULT_SETTINGS, ...(state.settings ?? {}) };
   state.log ??= [];
-  state.chat ??= [];
   state.roundNo ??= 0;
   state.seen ??= {};
   state.firstActorSeat ??= 0;
@@ -441,14 +429,6 @@ export function pushLog(state: RoomState, text: string) {
   state.actionSeq += 1;
   state.log.push({ seq: state.actionSeq, at: Date.now(), text });
   if (state.log.length > 80) state.log.splice(0, state.log.length - 80);
-}
-
-export function pushChat(state: RoomState, player: PlayerState, text: string) {
-  const body = text.trim().slice(0, 80);
-  if (!body) return;
-  state.actionSeq += 1;
-  state.chat.push({ seq: state.actionSeq, at: Date.now(), playerId: player.id, name: player.name, avatar: player.avatar, text: body });
-  if (state.chat.length > 60) state.chat.splice(0, state.chat.length - 60);
 }
 
 export function playerById(state: RoomState, id: string): PlayerState {
@@ -955,13 +935,12 @@ export type GameCommand =
   | { type: 'top_up' }
   | { type: 'new_round' }
   | { type: 'settings'; turnSeconds?: number; allInFromRound?: number; maxRounds?: number; autoContinue?: boolean }
-  | { type: 'chat'; text: string }
   | { type: 'emote'; id: string }
   | { type: 'leave' };
 
 export const COMMAND_TYPES = new Set<GameCommand['type']>([
   'ready', 'rename', 'start', 'look', 'call', 'all_in', 'raise', 'fold', 'compare',
-  'add_bot', 'remove_player', 'top_up', 'new_round', 'chat', 'emote', 'leave', 'settings',
+  'add_bot', 'remove_player', 'top_up', 'new_round', 'emote', 'leave', 'settings',
 ]);
 
 export function applyCommand(state: RoomState, actorId: string, command: GameCommand): void {
@@ -1014,10 +993,6 @@ export function applyCommand(state: RoomState, actorId: string, command: GameCom
         changed.push(command.autoContinue ? '自动续局开' : '自动续局关');
       }
       if (changed.length) pushLog(state, `房规调整：${changed.join('、')}`);
-      return;
-    }
-    case 'chat': {
-      pushChat(state, actor, command.text);
       return;
     }
     case 'emote': {

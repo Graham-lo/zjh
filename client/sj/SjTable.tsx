@@ -205,7 +205,6 @@ export function SjTable({
   const [hintIdx, setHintIdx] = useState(0);
   const [peek, setPeek] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
-  const [unread, setUnread] = useState(0);
   const [muted, setMuted] = useState(!sound.enabled);
   const [mutedVoice, setMutedVoice] = useState(!voice.enabled);
   const [dealAt, setDealAt] = useState(0);
@@ -285,9 +284,6 @@ export function SjTable({
     // 函数式更新：清空选牌的那个 effect 排在前面，这里看到的一定是清空之后的状态
     setSelected((s) => (s.size ? s : new Set(only)));
   }, [turnKey, myTurn, hints.length]);
-  useEffect(() => {
-    if (dockOpen) setUnread(0);
-  }, [dockOpen]);
   /**
    * 结算面板等牌桌把这一拍演完再升起来（沿用炸金花开牌亮相的两拍节奏）。
    * 抠底那一段自己就要 4.4s，所以不是定长等待，而是等特效队列清空。
@@ -460,10 +456,6 @@ export function SjTable({
             sound.play('turn');
             navigator.vibrate?.(30);
           }
-          break;
-        case 'sj_chat':
-          if (!dockOpen) setUnread((u) => u + 1);
-          sound.play('msg');
           break;
         default:
           break;
@@ -862,7 +854,7 @@ export function SjTable({
         )}
       </section>
 
-      <Dock room={room as never} cmd={cmd as never} open={dockOpen} onToggle={setDockOpen} unread={unread} />
+      <Dock room={room as never} open={dockOpen} onToggle={setDockOpen} />
 
       <div className="emote-bar sj-emotes">
         {EMOTES.map((e) => (

@@ -66,9 +66,9 @@
 .sj-left { display: none; }
 
 @media (min-width: 1200px) {
-  /* 三栏：记分板 250 / 牌桌 / 记录聊天 300，两侧常驻，中间吃满剩下的宽度 */
+  /* 三栏：记分板 250 / 牌桌 / 牌桌记录 244，两侧常驻，中间吃满剩下的宽度 */
   .table-shell.sj {
-    grid-template-columns: 250px minmax(0, 1fr) 300px;
+    grid-template-columns: 250px minmax(0, 1fr) 244px;
     grid-template-rows: auto minmax(0, 1fr) auto;
     gap: 0 28px;
     padding: 0 28px;
@@ -76,7 +76,11 @@
   .sj .topbar { grid-area: 1 / 1 / 2 / 4; margin: 0 -28px; }
   .sj .sj-left { grid-area: 2 / 1 / 3 / 2; display: block; overflow-y: auto; padding: 22px 0 12px; }
   .sj .sj-mid { grid-area: 2 / 2 / 3 / 3; padding-top: 14px; }
-  .sj .dock { grid-area: 2 / 3 / 4 / 4; background: rgba(6, 11, 9, 0.55); }
+  .sj .dock {
+    grid-area: 2 / 3 / 4 / 4; background: rgba(6, 11, 9, 0.55);
+    border: 1px solid var(--line); border-radius: 16px;
+    margin: 22px 0 12px; max-height: calc(100% - 34px); overflow: hidden;
+  }
   .sj .emote-bar.sj-emotes { grid-area: 3 / 2 / 4 / 3; position: static; width: fit-content; margin: 0 auto 10px; }
 }
 
@@ -631,7 +635,7 @@
 
 @media (min-width: 1600px) {
   .sj { --sj-card-hand-w: 78px; --sj-card-hand-h: 108px; --sj-card-play-w: 54px; --sj-card-play-h: 76px; --sj-card-tiny-w: 26px; --sj-card-tiny-h: 36px; }
-  .table-shell.sj { grid-template-columns: 290px minmax(0, 1fr) 340px; }
+  .table-shell.sj { grid-template-columns: 290px minmax(0, 1fr) 276px; }
   .sj-felt { width: min(1040px, 100%); }
   .sj-seat { width: 214px; padding: 10px 14px; }
   .sj-seat-av { width: 64px; height: 64px; }
@@ -645,7 +649,7 @@
 @media (min-width: 1880px) {
   /* DESIGN 3.3：≥1880 手牌卡 92px */
   .sj { --sj-card-hand-w: 92px; --sj-card-hand-h: 128px; --sj-card-play-w: 62px; --sj-card-play-h: 86px; --sj-card-tiny-w: 30px; --sj-card-tiny-h: 42px; }
-  .table-shell.sj { grid-template-columns: 330px minmax(0, 1fr) 400px; gap: 0 34px; padding: 0 34px; }
+  .table-shell.sj { grid-template-columns: 330px minmax(0, 1fr) 306px; gap: 0 34px; padding: 0 34px; }
   .sj .topbar { margin: 0 -34px; }
   .sj-felt { width: min(1240px, 100%); }
   .sj-seat { width: 248px; padding: 12px 16px; border-radius: 18px; }
@@ -672,7 +676,7 @@
 
 @media (min-width: 2400px) {
   .sj { --sj-card-hand-w: 104px; --sj-card-hand-h: 145px; --sj-card-play-w: 70px; --sj-card-play-h: 98px; }
-  .table-shell.sj { grid-template-columns: 380px minmax(0, 1fr) 460px; }
+  .table-shell.sj { grid-template-columns: 380px minmax(0, 1fr) 340px; }
   .sj-felt { width: min(1500px, 100%); }
   .sj-seat { width: 276px; }
   .sj-ring { width: 140px; height: 140px; }

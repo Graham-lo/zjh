@@ -21,7 +21,7 @@
 | `desktop-12-tongguan.png` | 5.2-4 打通关房间从 2 开始 |
 | `desktop-13-zjh.png` | 5.2-4 炸金花房间照常 |
 | `mobile-*.png` | 5.2-3 手机 390×844 的同一套流程 |
-| `wide-01-home.png` / `wide-02-playing.png` | 5.2-5 1920×1080：记分板与聊天常驻两侧，手牌卡 92px |
+| `wide-01-home.png` / `wide-02-playing.png` | 5.2-5 1920×1080：记分板与牌桌记录常驻两侧，手牌卡 92px |
 | `anim-kou-fly.png` | 3.5 扣底飞牌（旁观视角）：8 张牌背沿弧线飞向庄家 |
 | `anim-kou-fly-dealer.png` | 3.5 扣底飞牌（庄家视角）：落到手牌区、逐张翻面，扇子里仍是 25 张 |
 | `anim-throw-back.png` | 3.5 甩牌失败：退回的牌抖两下后飞回手牌扇，出牌区只留强制的最小单位 |

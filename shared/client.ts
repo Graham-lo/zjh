@@ -399,6 +399,5 @@ export function tableView(room: PublicRoom) {
       : null,
     legalActions: legalActions(room),
     log: room.log.slice(-10).map((l) => l.text),
-    chat: room.chat.slice(-8).map((c) => `${c.name}: ${c.text}`),
   };
 }

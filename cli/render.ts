@@ -633,13 +633,12 @@ export function renderRoom(input: RenderInput): string[] {
     line();
   }
 
-  // 牌局日志和聊天：命令行里这是唯一的「氛围」来源，别省
-  const logs = room.log.slice(-7);
-  const chats = room.chat.slice(-4);
-  if (logs.length || chats.length) {
+  // 牌局日志：命令行里这是唯一的「氛围」来源，别省。
+  // 一条都没有就连分隔线一起不画 —— 终端里空着的行就是纯浪费。
+  const logs = room.log.slice(-9);
+  if (logs.length) {
     line(`${C.dim}── 牌桌记录 ${'─'.repeat(WIDTH - 12)}${C.reset}`);
     for (const l of logs) line(`  ${C.dim}·${C.reset} ${l.text}`);
-    for (const c of chats) line(`  ${C.blue}${c.avatar} ${c.name}${C.reset}：${c.text}`);
     line();
   }
 
@@ -660,7 +659,6 @@ function hintLine(room: PublicRoom, auto: boolean): string {
       host ? k('o', '房规') : '',
       k('m', '补分'),
       k('i', '邀请'),
-      k('t', '聊天'),
       k(':', '命令'),
       k('q', '退出'),
     ]
@@ -671,7 +669,6 @@ function hintLine(room: PublicRoom, auto: boolean): string {
     const host = room.hostId === me.id;
     return [
       host ? k('n', '下一局') : `${C.dim}等待下一局${C.reset}`,
-      k('t', '聊天'),
       k('e', '表情'),
       k(':', '命令'),
       k('q', '退出'),
@@ -691,6 +688,6 @@ function hintLine(room: PublicRoom, auto: boolean): string {
   if (acts.some((a) => a.action === 'compare')) parts.push(k('v', '比牌'));
   // 开着的时候不是一个普通提示了，是一个「你现在没在自己打牌」的状态灯，所以整条加粗点亮
   parts.push(auto ? `${C.bold}${C.gold}[g]● 自动跟注中${C.reset}` : k('g', '自动跟注'));
-  parts.push(k('t', '聊天'), k('e', '表情'), k(':', '命令'), k('?', '帮助'));
+  parts.push(k('e', '表情'), k(':', '命令'), k('?', '帮助'));
   return parts.join('  ');
 }

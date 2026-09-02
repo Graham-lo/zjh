@@ -279,7 +279,7 @@ tests/
 ```ts
 // ClientMsg
 | ({ t: 'create'; kind?: GameKind } & ClientHello)   // 缺省 'zjh'
-// AnyPublicRoom = PublicRoom(zjh) | SjPublicRoom；两者都有 kind、code、viewerId、players、phase、log、chat
+// AnyPublicRoom = PublicRoom(zjh) | SjPublicRoom；两者都有 kind、code、viewerId、players、phase、log
 // GameEvent |= SjEvent
 type SjEvent =
   | { k: 'sj_deal'; handNo: number; dealerSeat: number }
@@ -302,7 +302,7 @@ type SjEvent =
 
 ```ts
 interface SjRoomState {
-  kind: 'sj_510k' | 'sj_2a'; id; code; hostId; createdAt; log; chat; actionSeq;
+  kind: 'sj_510k' | 'sj_2a'; id; code; hostId; createdAt; log; actionSeq;
   settings: { turnSeconds: number; kouSeconds: number; chaoSeconds: number; autoContinue: boolean };
   players: SjPlayer[];           // seat 0-3；team = seat % 2；hand: SjCard[]（服务端）
   phase: 'lobby'|'dealing'|'declaring'|'kou'|'chao'|'playing'|'hand_end'|'match_end';
@@ -377,7 +377,7 @@ interface SjRoomState {
 
 ### 3.3 布局
 
-**桌面（≥1200px）**：三栏。左栏 **记分板**（两队级别徽章、庄家标记、主花色大徽章、闲家得分环 0→80→200、分牌堆缩略、底牌 8 张牌背、圈数与已出张数「第 n 圈 · 已出 m/25 张」）；中栏牌桌；右栏 记录/聊天（沿用 Dock 常驻）。
+**桌面（≥1200px）**：三栏。左栏 **记分板**（两队级别徽章、庄家标记、主花色大徽章、闲家得分环 0→80→200、分牌堆缩略、底牌 8 张牌背、圈数与已出张数「第 n 圈 · 已出 m/25 张」）；中栏牌桌；右栏 牌桌记录（沿用 Dock 常驻）。
 牌桌：对家在上、左右为对手、我在下。每个座位前有一个**出牌区**，当前圈四手牌各落在各自座位前。
 我的手牌：**底部扇形**（25 张，自动排序：主牌在左 → 副牌按 ♠♥♣♦），可横向缩放，卡片间距随宽度自适应；选中抬起 14px。
 操作条在手牌上方：`提示` `出牌`（只在选牌合法时点亮）`看上一轮`。
@@ -401,7 +401,7 @@ interface SjRoomState {
 - 看上一轮：按住显示上一圈四手牌与赢家。
 - 轮到你：座位呼吸环（复用 TurnRing）+ 手牌整体轻微上浮 + 语音「该你啦」。
 - 分牌：闲家赢到的分牌堆在记分板里可展开看具体牌。
-- 断线/重连、房主移交、聊天、表情、改名、房规（turnSeconds、kouSeconds、autoContinue）与炸金花对齐。
+- 断线/重连、房主移交、表情、改名、房规（turnSeconds、kouSeconds、autoContinue）与炸金花对齐。
 
 ### 3.5 动效编排（"蓄力 → 冲击 → 收束"，每一拍都有对应事件）
 
@@ -488,7 +488,7 @@ CLI 打印后退出（exit 1），MCP 把它作为工具错误返回。CLI/MCP �
 2. 发牌动画、亮主按钮随牌到手出现、亮主后桌面变色、反主撞飞、扣底 8 槽、首出、跟牌非法时的说明文字、提示按钮循环、定圈飞牌与分牌入堆、抠底翻牌与倍数戳记、结算翻级、下一局自动开始。
 3. 刷新页面恢复座位与手牌；手机端手牌可滚可选可出。
 4. 打通关房间从 2 开始；两个房间同时存在互不影响；炸金花房间照常。
-5. 大屏（≥1880px）内容按比例放大，记分板与聊天常驻两侧。
+5. 大屏（≥1880px）内容按比例放大，记分板与牌桌记录常驻两侧。
 
 ### 5.3 线上验收（P4）
 
