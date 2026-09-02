@@ -22,6 +22,7 @@ export function Hand({
   rows = 1,
   disabled,
   lifted,
+  hidden,
 }: {
   cards: SjCard[];
   selected: Set<string>;
@@ -33,6 +34,11 @@ export function Hand({
   disabled?: boolean;
   /** 轮到我时整手牌轻微上浮 6px */
   lifted?: boolean;
+  /**
+   * 还在半空中、暂时不该出现在扇子里的牌（扣底那 8 张）。
+   * 飞完把它们放出来，FLIP 就顺势把整手牌重排一遍 —— 25→33 不会瞬间变多。
+   */
+  hidden?: Set<string>;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [step, setStep] = useState(32);
@@ -46,7 +52,7 @@ export function Hand({
     const measure = () => {
       const card = wrap.querySelector<HTMLElement>('.sj-hand-card');
       const cw = card?.offsetWidth || 62;
-      const perRow = Math.ceil(cards.length / rows) || 1;
+      const perRow = Math.ceil((cards.length - (hidden?.size ?? 0)) / rows) || 1;
       const avail = wrap.clientWidth - 16;
       const raw = perRow > 1 ? (avail - cw) / (perRow - 1) : cw;
       setStep(Math.round(Math.min(cw * 0.62, Math.max(cw * 0.26, raw))));
@@ -55,7 +61,7 @@ export function Hand({
     const ro = new ResizeObserver(measure);
     ro.observe(wrap);
     return () => ro.disconnect();
-  }, [cards.length, rows]);
+  }, [cards.length, rows, hidden?.size]);
 
   /* FLIP：排序变了就从旧位置滑回来 */
   useLayoutEffect(() => {
@@ -91,9 +97,10 @@ export function Hand({
     };
   }, []);
 
+  const shown = hidden?.size ? cards.filter((c) => !hidden.has(c.id)) : cards;
   const chunks: SjCard[][] = [];
-  const perRow = Math.ceil(cards.length / rows) || 1;
-  for (let i = 0; i < cards.length; i += perRow) chunks.push(cards.slice(i, i + perRow));
+  const perRow = Math.ceil(shown.length / rows) || 1;
+  for (let i = 0; i < shown.length; i += perRow) chunks.push(shown.slice(i, i + perRow));
   if (!chunks.length) chunks.push([]);
 
   return (

@@ -708,3 +708,87 @@
 .sj-res-lv { display: inline-flex; align-items: baseline; gap: 8px; }
 .sj-res-lv s { font-family: var(--font-num); font-size: 26px; color: var(--muted); }
 .sj-res-lv em { font-style: normal; color: var(--gold-3); font-size: 15px; }
+
+/* =========================================================================
+   扣底飞牌 与 甩牌弹回（DESIGN 3.5 的最后两拍）
+   ========================================================================= */
+
+/* ---- 扣底：8 张底牌从桌心飞向庄家 ---- */
+
+.sj-kou-fly { position: absolute; left: 50%; top: 44%; z-index: 8; pointer-events: none; }
+.sj-kou-fly-card { position: absolute; left: 0; top: 0; }
+/* 非庄家视角：沿弧线飞向庄家座位，70ms 一张，--spring 落地 */
+.sj-kou-fly:not(.to-me) .sj-kou-fly-card {
+  animation: sjKouFly 0.62s var(--spring) backwards;
+  animation-delay: calc(var(--i) * 70ms);
+}
+.sj-kou-fly[data-to="top"] { --kx: 0px; --ky: -132px; }
+.sj-kou-fly[data-to="left"] { --kx: -250px; --ky: 12px; }
+.sj-kou-fly[data-to="right"] { --kx: 250px; --ky: 12px; }
+@keyframes sjKouFly {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.72) rotate(-14deg); }
+  14% { opacity: 1; }
+  /* 中间抬高一点，走的是弧不是直线 */
+  55% { transform: translate(calc(-50% + var(--kx) * 0.55), calc(-50% + var(--ky) * 0.55 - 46px)) scale(1.06) rotate(6deg); }
+  85% { opacity: 1; }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--kx)), calc(-50% + var(--ky))) scale(0.82) rotate(calc(10deg + var(--i) * 3deg)); }
+}
+
+/* 庄家视角：从屏幕中央落到手牌区，落地前逐张翻面 */
+.sj-kou-fly.to-me { position: fixed; left: 50%; top: 42%; z-index: 40; }
+.sj-kou-fly.to-me .sj-kou-fly-card {
+  animation: sjKouFlyMe 1.05s var(--spring) backwards;
+  animation-delay: calc(var(--i) * 70ms);
+}
+/* 翻面比落地早一点点，牌是「翻着落下来」的 */
+.sj-kou-fly.to-me .pc-inner { transition-delay: calc(var(--i) * 70ms + 240ms); }
+@keyframes sjKouFlyMe {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.7) rotate(-16deg); }
+  12% { opacity: 1; }
+  55% { transform: translate(calc(-50% + (var(--i) - 3.5) * 22px), calc(-50% + 14vh)) scale(1.14) rotate(4deg); }
+  94% { opacity: 1; }
+  /* 落点就是手牌扇的位置，落到了才淡出 —— 视觉上是"并进扇子里" */
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + (var(--i) - 3.5) * 30px), calc(-50% + 40vh)) scale(0.9) rotate(0deg);
+  }
+}
+
+/* ---- 甩牌失败：退回的牌抖两下再飞回手牌扇 ---- */
+
+.sj-throw-back { position: absolute; z-index: 9; display: flex; pointer-events: none; }
+.sj-throw-back-me { left: 50%; top: 64%; transform: translateX(-50%); }
+.sj-throw-back-top { left: 50%; top: 21%; transform: translateX(-50%); }
+.sj-throw-back-left { left: 26%; top: 60%; }
+.sj-throw-back-right { right: 26%; top: 60%; }
+.sj-throw-back-card { flex: none; }
+.sj-throw-back-card + .sj-throw-back-card { margin-left: calc(var(--sj-card-play-w) * -0.32); }
+/* 600ms = 抖 180ms（±3° 两下）+ 飞回 420ms，和 DESIGN 3.5 的数字一致 */
+.sj-throw-back-card {
+  animation: sjThrowBack 0.6s cubic-bezier(0.36, 0.66, 0.3, 1) forwards;
+  animation-delay: calc(var(--i) * 30ms);
+}
+@keyframes sjThrowBack {
+  0% { transform: rotate(0deg); }
+  7% { transform: rotate(-3deg); }
+  15% { transform: rotate(3deg); }
+  22% { transform: rotate(-3deg); }
+  30% { transform: rotate(0deg); }
+  /* 抛物线：先往上再落到手牌扇 */
+  62% { transform: translate(calc((var(--i) - 1) * 26px), -34px) rotate(calc(var(--i) * 6deg)) scale(1.04); }
+  100% { opacity: 0; transform: translate(calc((var(--i) - 1) * 42px), 190px) rotate(calc(var(--i) * 10deg)) scale(0.86); }
+}
+
+@media (max-width: 780px) {
+  .sj-kou-fly[data-to="left"] { --kx: -140px; }
+  .sj-kou-fly[data-to="right"] { --kx: 140px; }
+  .sj-kou-fly[data-to="top"] { --ky: -104px; }
+  .sj-throw-back-me { top: 74%; }
+  .sj-throw-back-left { left: 16%; top: 58%; }
+  .sj-throw-back-right { right: 16%; top: 58%; }
+}
+
+/* 关掉动效的人只看到结果，不看过程 */
+@media (prefers-reduced-motion: reduce) {
+  .sj-kou-fly, .sj-throw-back { display: none; }
+}

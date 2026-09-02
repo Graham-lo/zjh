@@ -5,6 +5,7 @@ import { cardFromId, levelLabel, sortSjHand } from '../../shared/sj/cards.ts';
 import type { SjCommand, SjPublicPlayer, SjPublicRoom, SjTrickRecord } from '../../shared/sj/engine.ts';
 import { suggest } from '../../shared/sj/bot.ts';
 import type { AccountInfo, AnyGameCommand, GameEvent } from '../../shared/protocol.ts';
+import { PlayingCard } from '../components/Card.tsx';
 import { Dock } from '../components/Dock.tsx';
 import { GoldRain } from '../components/Fx.tsx';
 import { IconCopy, IconExit, IconSoundOff, IconSoundOn, IconVoice, Laurel } from '../components/Icons.tsx';
@@ -189,6 +190,14 @@ export function SjTable({
   const [mutedVoice, setMutedVoice] = useState(!voice.enabled);
   const [dealAt, setDealAt] = useState(0);
   const [collect, setCollect] = useState<{ id: number; rec: SjTrickRecord } | null>(null);
+  /** 扣底：8 张底牌从桌心飞向庄家（DESIGN 3.5） */
+  const [kouFly, setKouFly] = useState<{ id: number; to: SjSpot; ids: string[] } | null>(null);
+  /** 甩牌失败被退回的牌：抖两下再飞回手牌扇（DESIGN 3.5） */
+  const [throwBack, setThrowBack] = useState<{ id: number; spot: SjSpot; cards: ReturnType<typeof cardFromId>[] } | null>(null);
+  /** 我最后一次提交的出牌，甩牌被打回时用来算「哪几张退回来了」 */
+  const lastPlay = useRef<string[]>([]);
+  const prevPhase = useRef(room.phase);
+  const prevHandIds = useRef<string[]>([]);
   /** 被反主撞飞的旧亮主牌：旋转滑出 900ms（DESIGN 3.5） */
   const [knocked, setKnocked] = useState<{ id: number; spot: SjSpot; cards: ReturnType<typeof cardFromId>[] } | null>(null);
   const prevDecl = useRef<{ id: string; cards: ReturnType<typeof cardFromId>[] } | null>(null);
@@ -311,10 +320,22 @@ export function SjTable({
           }
           break;
         }
-        case 'sj_throw_fail':
+        case 'sj_throw_fail': {
           sound.play('stamp');
+          // 退回的牌 = 我提交的那一把减去被强制留下的最小单位。
+          // 别人甩失败时客户端看不到他试图甩了什么（手牌是暗的），只演戳记。
+          if (ev.playerId === room.viewerId) {
+            const back = lastPlay.current.filter((id) => !ev.forcedIds.includes(id));
+            if (back.length) {
+              const id = ++uid.current;
+              setThrowBack({ id, spot: spotOf(mySeat, mySeat), cards: back.map(cardFromId) });
+              setTimeout(() => sound.play('shove'), 190);
+              setTimeout(() => setThrowBack((t) => (t?.id === id ? null : t)), 820);
+            }
+          }
           pushFx({ kind: 'throwFail', who: nameOf(ev.playerId), penalty: ev.penalty });
           break;
+        }
         case 'sj_trick': {
           sound.play('sweep');
           if (room.lastTrick) setCollect({ id: ++uid.current, rec: room.lastTrick });
@@ -375,6 +396,31 @@ export function SjTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [batch.seq]);
 
+  /**
+   * 扣底：底牌是在服务端直接并进庄家手牌的，客户端只会看到手牌一下从 25 变 33。
+   * 所以用 phase 进入 kou 这一下自己补一段飞牌 —— 非庄家看到 8 张牌背沿弧线
+   * 飞向庄家座位，庄家看到它们飞到手牌区、逐张翻面，飞完才放进扇子里（随后 FLIP 重排）。
+   */
+  useEffect(() => {
+    const was = prevPhase.current;
+    prevPhase.current = room.phase;
+    if (room.phase !== 'kou' || was === 'kou') return;
+    const to = spotOf(room.dealerSeat, mySeat);
+    const ids = to === 'me' ? hand.filter((c) => !prevHandIds.current.includes(c.id)).map((c) => c.id) : [];
+    const id = ++uid.current;
+    setKouFly({ id, to, ids });
+    for (let i = 0; i < 8; i++) setTimeout(() => sound.play('deal', i), i * 70);
+    const ms = to === 'me' ? 1700 : 1200;
+    const t = setTimeout(() => setKouFly((k) => (k?.id === id ? null : k)), ms);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.phase]);
+
+  /* 这一句声明在上面那个 effect 之后，所以它读到的 prevHandIds 还是上一轮的手牌 */
+  useEffect(() => {
+    prevHandIds.current = hand.map((c) => c.id);
+  });
+
   /* 记下「现在谁亮着什么牌」，下一次有人反主时拿它演撞飞。
      这个 effect 声明在事件 effect 之后，所以同一次提交里事件读到的仍是上一轮的值 */
   useEffect(() => {
@@ -423,7 +469,9 @@ export function SjTable({
 
   const doPlay = () => {
     if (!check.ok) return;
-    send({ type: 'play', cardIds: hand.filter((c) => selected.has(c.id)).map((c) => c.id) });
+    const ids = hand.filter((c) => selected.has(c.id)).map((c) => c.id);
+    lastPlay.current = ids;
+    send({ type: 'play', cardIds: ids });
     setSelected(new Set());
   };
 
@@ -561,6 +609,28 @@ export function SjTable({
             ))}
             {knocked && <DeclaredCards key={knocked.id} spot={knocked.spot} cards={knocked.cards} knocked />}
 
+            {/* 扣底飞牌（非庄家视角）：8 张牌背从桌心沿弧线飞向庄家 */}
+            {kouFly && kouFly.to !== 'me' && (
+              <div className="sj-kou-fly" data-to={kouFly.to} key={kouFly.id} aria-hidden="true">
+                {Array.from({ length: 8 }, (_, i) => (
+                  <span key={i} className="sj-kou-fly-card" style={{ ['--i' as string]: i }}>
+                    <PlayingCard faceDown size="play" />
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* 甩牌被打回：退回的牌抖两下再沿弧线飞回手牌扇 */}
+            {throwBack && (
+              <div className={`sj-throw-back sj-throw-back-${throwBack.spot}`} key={throwBack.id} aria-hidden="true">
+                {throwBack.cards.map((c, i) => (
+                  <span key={c.id} className="sj-throw-back-card" style={{ ['--i' as string]: i }}>
+                    <PlayingCard card={c} faceDown={false} size="play" />
+                  </span>
+                ))}
+              </div>
+            )}
+
             {/* 当前圈：每手牌落在各自座位前 */}
             {!collect &&
               room.trick.map((play) => {
@@ -682,6 +752,7 @@ export function SjTable({
               cards={hand}
               selected={selected}
               hinted={undefined}
+              hidden={kouFly?.to === 'me' ? new Set(kouFly.ids) : undefined}
               onToggle={toggle}
               onSelectMany={selectMany}
               rows={typeof window !== 'undefined' && window.innerWidth <= 780 ? 2 : 1}
@@ -702,12 +773,36 @@ export function SjTable({
         ))}
       </div>
 
+      {/* 扣底飞牌（庄家视角）：飞到手牌区上方，逐张翻面，飞完才并进扇子 */}
+      {kouFly && kouFly.to === 'me' && <KouFlyToMe key={kouFly.id} ids={kouFly.ids} />}
+
       {showResult && <SjResult room={room} mySeat={mySeat} cmd={send} />}
 
       {fx && <SjFx key={fx.id} job={fx.job} onDone={endFx} />}
       {rain > 0 && <GoldRain key={rain} />}
       {shake > 0 && <span hidden key={shake} />}
     </main>
+  );
+}
+
+/**
+ * 庄家看到的扣底飞牌：8 张牌背从屏幕中央（桌心）沿弧线落到手牌区，
+ * 每张之间 70ms，落地前逐张翻面。飞完由 SjTable 把它们交还给手牌扇。
+ */
+function KouFlyToMe({ ids }: { ids: string[] }) {
+  const [up, setUp] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setUp(true), 300);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <div className="sj-kou-fly to-me" aria-hidden="true">
+      {ids.map((id, i) => (
+        <span key={id} className="sj-kou-fly-card" style={{ ['--i' as string]: i }}>
+          <PlayingCard card={cardFromId(id)} faceDown={!up} size="play" />
+        </span>
+      ))}
+    </div>
   );
 }
 
