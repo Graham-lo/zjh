@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
+import { sound } from '../sound.ts';
+
 const R = 27;
 const C = 2 * Math.PI * R;
 
@@ -43,6 +45,24 @@ export function TurnRing({ deadline, total }: { deadline: number | null; total: 
 }
 
 /** 只给"轮到我"时用的秒数文字 */
+/**
+ * 自己的回合只剩 5 秒时补一记很轻的滴答（DESIGN 3.6）。
+ *
+ * 轮转本身只有一颗提示音、没有语音，低头在手牌里挑牌时又看不见倒计时环 ——
+ * 这一下是唯一的补救。只响一次、音量只有 `turn` 的三分之一，是提醒不是催命。
+ */
+export function useHurryTick(deadline: number | null, mine: boolean) {
+  useEffect(() => {
+    if (!deadline || !mine) return;
+    const at = deadline - 5000 - Date.now();
+    // 回合开始时就已经不足 5 秒（断线回来、超时代打接管）就不补了，
+    // 立刻响一下只会吓人一跳，信息量还是零。
+    if (at <= 0) return;
+    const id = setTimeout(() => sound.play('hurry'), at);
+    return () => clearTimeout(id);
+  }, [deadline, mine]);
+}
+
 export function useCountdown(deadline: number | null) {
   const [left, setLeft] = useState(0);
   useEffect(() => {

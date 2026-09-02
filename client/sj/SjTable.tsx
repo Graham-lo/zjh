@@ -9,7 +9,7 @@ import { PlayingCard } from '../components/Card.tsx';
 import { Dock } from '../components/Dock.tsx';
 import { GoldRain } from '../components/Fx.tsx';
 import { IconCopy, IconExit, IconSoundOff, IconSoundOn, IconVoice, Laurel } from '../components/Icons.tsx';
-import { TurnRing, useCountdown } from '../components/TurnRing.tsx';
+import { TurnRing, useCountdown, useHurryTick } from '../components/TurnRing.tsx';
 import type { NetStatus } from '../net.ts';
 import { sound, voice } from '../sound.ts';
 import { ChaoBar } from './ChaoBar.tsx';
@@ -21,8 +21,9 @@ import { SjFx, type SjFxJob } from './SjFx.tsx';
 import { DeclaredCards, LastTrick, PlayZone } from './Trick.tsx';
 import { useCountUp } from './useCountUp.ts';
 import {
-  TRUMP_TINT, TRUMP_VOICE, checkPlay, ctxOf, leadShape, leadText, seatBySpot, smartPickForCard, spotOf,
-  teamOfSeat, throwFailText, trickPointsOf, trumpGlyph, trumpText, type SjSpot,
+  TRUMP_TINT, TRUMP_VOICE, checkPlay, ctxOf, declareVoice, handEndVoice, leadShape, leadText, playVoice,
+  seatBySpot, smartPickForCard, spotOf, teamOfSeat, throwFailText, trickPointsOf, trumpGlyph, trumpText,
+  type SjSpot,
 } from './util.ts';
 
 /** 发牌动画的总长，和服务端的 SJ_DEAL_MS 是同一个数（45ms/张 × 25 张 + 余量） */
@@ -243,6 +244,8 @@ export function SjTable({
   const myTurn = room.phase === 'playing' && room.turnSeat === mySeat;
   // 扣底的不一定是庄家：抄底成功的人也要重新扣一次（DESIGN 1.4b）
   const kouMine = room.phase === 'kou' && mySeat === room.kouSeat;
+  // 出牌、扣底、抄底询问都走同一个 turnDeadline，快到点时补一记轻滴答
+  useHurryTick(room.turnDeadline, myTurn || kouMine || (room.phase === 'chao' && room.chaoSeat === mySeat));
   const check = useMemo(
     () => checkPlay(hand, selectedCards, lead, ctx),
     [hand, selectedCards, lead, ctx.trump, ctx.level],
@@ -343,7 +346,7 @@ export function SjTable({
             setTimeout(() => setKnocked((k) => (k?.id === id ? null : k)), 900);
           }
           sound.play('slam');
-          voice.play(ev.strength >= 2 && ev.trump !== 'NT' ? 'trump_pair' : TRUMP_VOICE[ev.trump]);
+          voice.play(...declareVoice(ev, { override: !!prev && prev.id !== ev.playerId }));
           navigator.vibrate?.([20, 40, 30]);
           pushFx({
             kind: 'declare', trump: ev.trump, who: nameOf(ev.playerId),
@@ -353,7 +356,7 @@ export function SjTable({
         }
         case 'sj_flip': {
           sound.play('flip');
-          voice.play(TRUMP_VOICE[ev.trump]);
+          voice.play('sj_flip', TRUMP_VOICE[ev.trump]);
           pushFx({ kind: 'flip', card: ev.card, trump: ev.trump });
           break;
         }
@@ -365,6 +368,9 @@ export function SjTable({
             setKnocked({ id, spot: spotOf(seatOf(prev.id), mySeat), cards: prev.cards });
             setTimeout(() => setKnocked((k) => (k?.id === id ? null : k)), 900);
           }
+          sound.play('slam');
+          setTimeout(() => sound.play('stamp'), 240);
+          voice.play(...declareVoice(ev, { chao: true }));
           navigator.vibrate?.([30, 50, 40]);
           pushFx({
             kind: 'chao', trump: ev.trump, who: nameOf(ev.playerId),
@@ -374,19 +380,20 @@ export function SjTable({
         }
         case 'sj_kou_done':
           sound.play('sweep');
-          if (ev.playerId === room.viewerId) voice.play('kou');
+          if (ev.playerId === room.viewerId) voice.play('sj_kou');
           break;
         case 'sj_play': {
           sound.play('deal', ev.cardIds.length);
           if (ev.trumped) {
             sound.play('clash');
-            voice.play('bi');
             navigator.vibrate?.([25, 45]);
           }
+          voice.play(...playVoice(room, ev));
           break;
         }
         case 'sj_throw_fail': {
           sound.play('stamp');
+          voice.play('sj_shuai_fail');
           // 退回的牌 = 我提交的那一把减去被强制留下的最小单位。
           // 别人甩失败时客户端看不到他试图甩了什么（手牌是暗的），只演戳记。
           if (ev.playerId === room.viewerId) {
@@ -415,12 +422,14 @@ export function SjTable({
           if (ev.points > 0) {
             const n = Math.min(6, Math.max(1, Math.round(ev.points / 5)));
             for (let i = 0; i < n; i++) setTimeout(() => sound.play('ding', i), 420 + i * 110);
+            // 15 分起才值得喊 —— 每圈 5 分都报一次就成了背景噪音
+            if (ev.points >= 15) setTimeout(() => voice.play('sj_fen'), 420);
           }
           break;
         }
         case 'sj_dig':
           sound.play('stamp');
-          voice.play('dig');
+          voice.play(ev.multiplier >= 4 ? 'sj_dig2' : 'sj_dig');
           navigator.vibrate?.([40, 60, 40, 120]);
           pushFx({
             kind: 'dig', who: nameOf(ev.winnerId), base: ev.base,
@@ -429,11 +438,7 @@ export function SjTable({
           break;
         case 'sj_hand_end': {
           const o = ev.outcome;
-          voice.play(
-            o.label === '大光' ? 'daguang'
-              : o.label === '小光' ? 'xiaoguang'
-                : o.defendersWin ? 'shangtai' : 'levelup',
-          );
+          voice.play(...handEndVoice(o));
           sound.play(o.defendersWin === (teamOfSeat(mySeat) !== teamOfSeat(room.dealerSeat)) ? 'win' : 'lose');
           pushFx({
             kind: 'handEnd', label: o.label,
@@ -444,15 +449,15 @@ export function SjTable({
         }
         case 'sj_match_end': {
           const mine = ev.winnerTeam === teamOfSeat(mySeat);
-          voice.play('tongguan');
+          voice.play('sj_tongguan');
           if (mine) setRain((n) => n + 1);
           pushFx({ kind: 'matchEnd', mine });
           break;
         }
         case 'sj_turn':
+          // 只有提示音，没有语音（DESIGN 3.6）
           if (ev.playerId === room.viewerId) {
             sound.play('turn');
-            voice.play('turn');
             navigator.vibrate?.(30);
           }
           break;
@@ -614,7 +619,7 @@ export function SjTable({
                 const next = !mutedVoice;
                 setMutedVoice(next);
                 voice.unlock();
-                voice.setEnabled(!next);
+                voice.setEnabled(!next, 'sj_pair');
               }}
             >
               <IconVoice />

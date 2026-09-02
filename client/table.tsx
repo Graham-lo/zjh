@@ -6,6 +6,7 @@ import { Dock } from './components/Dock.tsx';
 import { ChipStack, CompareDuel, GoldRain, ShoveFx, type DuelSide } from './components/Fx.tsx';
 import { IconCopy, IconExit, IconSoundOff, IconSoundOn, IconVoice, Laurel } from './components/Icons.tsx';
 import { EmptySeat, Seat } from './components/Seat.tsx';
+import { useHurryTick } from './components/TurnRing.tsx';
 import type { NetStatus } from './net.ts';
 import { HAND_VOICE, sound, voice } from './sound.ts';
 
@@ -187,6 +188,8 @@ export function Table({
   const result = room.result;
   const showdownHands = result?.hands ?? {};
 
+  useHurryTick(room.turnDeadline, room.phase === 'playing' && !!me && room.turnSeat === me.seat);
+
   /**
    * 开牌的翻牌顺序：其他人先翻，赢家压轴。
    * 每家差 200ms，靠一个 CSS 变量传给牌的翻面 transition-delay。
@@ -253,9 +256,9 @@ export function Table({
           voice.play('fold');
           break;
         case 'turn':
+          // 只有提示音，没有语音 —— 「该你啦」每局要念几十遍，是最先被关掉的一句
           if (ev.playerId === room.viewerId) {
             sound.play('turn');
-            voice.play('turn');
             navigator.vibrate?.(30);
           }
           break;
@@ -486,7 +489,7 @@ export function Table({
                 const next = !mutedVoice;
                 setMutedVoice(next);
                 voice.unlock();
-                voice.setEnabled(!next);
+                voice.setEnabled(!next, 'call');
               }}
             >
               <IconVoice />

@@ -2,10 +2,20 @@
  * 全部音效都是 WebAudio 现场合成的 —— 没有音频文件，
  * 首屏不多一个字节，也不用等资源加载就能出声。
  */
+import {
+  VOICE_LINES,
+  type VoiceKey,
+} from './voice-lines.ts';
+
+export {
+  HAND_VOICE, SJ_VOICE_LINES, VOICE_LINES, ZJH_VOICE_LINES,
+  type SjVoiceKey, type VoiceKey, type VoiceLine, type ZjhVoiceKey,
+} from './voice-lines.ts';
+
 type Name =
   | 'deal' | 'flip' | 'chip' | 'turn' | 'win' | 'lose' | 'msg' | 'tap'
   // 重构后新增的几下：比牌对撞、梭哈闷响、金币流、好牌提示、末段心跳
-  | 'clash' | 'shove' | 'coin' | 'ding' | 'heart'
+  | 'clash' | 'shove' | 'coin' | 'ding' | 'heart' | 'hurry'
   // 升级：亮主拍牌、收圈横扫、倍数戳记（DESIGN 3.6）
   | 'slam' | 'sweep' | 'stamp';
 
@@ -142,8 +152,15 @@ class Sound {
       case 'turn':
         // 轮到你了：E5→A5 一个上行小琶音，像轻轻敲了下门铃，而不是响警报。
         // 第二颗略轻、拖得略长，尾音自然落下去，催促感全靠上行而不是音量。
+        //
+        // **这是轮转的唯一提示，两个游戏都不再配语音。**「该你啦」那句每局要念
+        // 几十遍，是最先被玩家关掉的一句；一颗铃给到的信息完全一样。
         this.bell(659.25, 0, 0.5, 0.1);
         return this.bell(880, 0.09, 0.5, 0.085);
+      case 'hurry':
+        // 自己回合只剩 5 秒：一颗很轻的高音滴答。低头选牌时看不见倒计时环，
+        // 但也不该被吓一跳，所以音量只有 turn 的三分之一。
+        return this.tone(1760, 0, 0.06, 0.035, 'triangle');
       case 'win':
         return [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => this.tone(f, i * 0.075, 0.3, 0.13, 'triangle'));
       case 'lose':
@@ -186,61 +203,6 @@ export const sound = new Sound();
  * 怎么做语音包见 README 的「语音包」一节。
  */
 
-/**
- * 需要发声的全部台词。key 同时是音频文件名。
- *
- * rate / pitch 只在退回浏览器 TTS 时生效 —— 梭哈和豹子是牌桌上最上头的两下，
- * 语速和音高都往上推，别念得像在报站。用真人语音包时情绪由录音本身决定。
- */
-export const VOICE_LINES: Record<string, { text: string; rate?: number; pitch?: number; volume?: number }> = {
-  call: { text: '跟注' },
-  raise: { text: '加注', rate: 1.25, pitch: 1.1 },
-  allin: { text: '梭哈！全下！', rate: 1.45, pitch: 1.45, volume: 1 },
-  accept: { text: '接！', rate: 1.4, pitch: 1.3, volume: 1 },
-  compare: { text: '比牌', rate: 1.2, pitch: 1.1 },
-  fold: { text: '弃牌', rate: 1.05, pitch: 0.95 },
-  // 「该你啦」比「该你了」软一点 —— 提醒本来就不该听着像催命
-  turn: { text: '该你啦' },
-  baozi: { text: '豹子！', rate: 1.4, pitch: 1.45, volume: 1 },
-  shunjin: { text: '顺金！', rate: 1.35, pitch: 1.35, volume: 1 },
-  jinhua: { text: '金花', rate: 1.2, pitch: 1.15 },
-  shunzi: { text: '顺子', rate: 1.15, pitch: 1.05 },
-  duizi: { text: '对子' },
-  sanpai: { text: '散牌', rate: 1.0, pitch: 0.95 },
-
-  /* ---- 升级（DESIGN 3.6） ---- */
-  trump_s: { text: '黑桃主', rate: 1.25, pitch: 1.1 },
-  trump_h: { text: '红桃主', rate: 1.25, pitch: 1.1 },
-  trump_c: { text: '梅花主', rate: 1.25, pitch: 1.1 },
-  trump_d: { text: '方块主', rate: 1.25, pitch: 1.1 },
-  trump_pair: { text: '一对，主！', rate: 1.35, pitch: 1.25, volume: 1 },
-  nt: { text: '无主！', rate: 1.4, pitch: 1.35, volume: 1 },
-  kou: { text: '扣底', rate: 1.05 },
-  bi: { text: '毙！', rate: 1.45, pitch: 1.35, volume: 1 },
-  dig: { text: '抠底！', rate: 1.45, pitch: 1.4, volume: 1 },
-  levelup: { text: '升级！', rate: 1.3, pitch: 1.2 },
-  daguang: { text: '大光！', rate: 1.4, pitch: 1.4, volume: 1 },
-  xiaoguang: { text: '小光！', rate: 1.35, pitch: 1.3, volume: 1 },
-  shangtai: { text: '上台！', rate: 1.35, pitch: 1.3, volume: 1 },
-  tongguan: { text: '通关！', rate: 1.45, pitch: 1.45, volume: 1 },
-};
-
-export type VoiceKey =
-  | 'call' | 'raise' | 'allin' | 'accept' | 'compare' | 'fold' | 'turn'
-  | 'baozi' | 'shunjin' | 'jinhua' | 'shunzi' | 'duizi' | 'sanpai'
-  | 'trump_s' | 'trump_h' | 'trump_c' | 'trump_d' | 'trump_pair' | 'nt'
-  | 'kou' | 'bi' | 'dig' | 'levelup' | 'daguang' | 'xiaoguang' | 'shangtai' | 'tongguan';
-
-/** 牌型名 → 语音 key */
-export const HAND_VOICE: Record<string, VoiceKey> = {
-  豹子: 'baozi',
-  顺金: 'shunjin',
-  金花: 'jinhua',
-  顺子: 'shunzi',
-  对子: 'duizi',
-  散牌: 'sanpai',
-  特殊235: 'sanpai',
-};
 
 interface Manifest {
   format: string;
@@ -272,14 +234,15 @@ class Voice {
     return typeof speechSynthesis !== 'undefined' ? 'tts' : 'none';
   }
 
-  setEnabled(on: boolean) {
+  /** `preview` 是打开语音时试听的那一句，由各自的牌桌给一句自己的台词 */
+  setEnabled(on: boolean, preview: VoiceKey) {
     this.enabled = on;
     try {
       localStorage.setItem('zjh:voice', on ? 'on' : 'off');
     } catch {
       /* ignore */
     }
-    if (on) this.play('turn');
+    if (on) this.play(preview);
     else this.stop();
   }
 
@@ -352,40 +315,54 @@ class Voice {
    * 播一句台词。新的一句会打断上一句 —— 机器人连着行动时，
    * 排队播报会越落越远，宁可只听到最新的那一下。
    */
-  play(key: VoiceKey) {
-    if (!this.enabled) return;
-    const clip = this.clips.get(key);
+  play(...keys: VoiceKey[]) {
+    if (!this.enabled || !keys.length) return;
     const ctx = sound.context;
-    if (clip && ctx) {
+    const clips = keys.map((k) => this.clips.get(k));
+    if (ctx && clips.every((c): c is AudioBuffer => !!c)) {
       this.stop();
-      const src = ctx.createBufferSource();
-      const gain = ctx.createGain();
-      gain.gain.value = 0.9;
-      src.buffer = clip;
-      src.connect(gain).connect(ctx.destination);
-      src.onended = () => {
-        if (this.playing === src) this.playing = null;
-      };
-      src.start();
-      this.playing = src;
+      // 连读：整串排进同一条时间线，`playing` 指向最后一段，
+      // 这样下一次 play 依然能一刀切断整串（机器人连着行动时不能越积越多）。
+      let at = ctx.currentTime + 0.02;
+      let last: AudioBufferSourceNode | null = null;
+      for (const clip of clips) {
+        const src = ctx.createBufferSource();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.9;
+        src.buffer = clip;
+        src.connect(gain).connect(ctx.destination);
+        src.start(at);
+        at += clip.duration + 0.06;
+        last = src;
+      }
+      if (last) {
+        last.onended = () => {
+          if (this.playing === last) this.playing = null;
+        };
+        this.playing = last;
+      }
       return;
     }
-    this.speak(key);
+    this.speak(keys);
   }
 
-  private speak(key: VoiceKey) {
-    const line = VOICE_LINES[key];
-    if (typeof speechSynthesis === 'undefined' || !line) return;
+  private speak(keys: VoiceKey[]) {
+    if (typeof speechSynthesis === 'undefined') return;
     this.pickVoice();
     try {
+      // 先 cancel 再整串排进去 —— 一串里的几句要连着念完，不能互相打断
       speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(line.text);
-      if (this.picked) u.voice = this.picked;
-      u.lang = this.picked?.lang ?? 'zh-CN';
-      u.rate = line.rate ?? 1.15;
-      u.pitch = line.pitch ?? 1;
-      u.volume = line.volume ?? 0.9;
-      speechSynthesis.speak(u);
+      for (const key of keys) {
+        const line = VOICE_LINES[key];
+        if (!line) continue;
+        const u = new SpeechSynthesisUtterance(line.text);
+        if (this.picked) u.voice = this.picked;
+        u.lang = this.picked?.lang ?? 'zh-CN';
+        u.rate = line.rate ?? 1.15;
+        u.pitch = line.pitch ?? 1;
+        u.volume = line.volume ?? 0.9;
+        speechSynthesis.speak(u);
+      }
     } catch {
       /* 播不出来不影响打牌 */
     }

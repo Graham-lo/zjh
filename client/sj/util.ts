@@ -5,7 +5,7 @@
  * 跟牌合法性（甩牌除外，那要别人的手牌，由服务端裁决），所以这里不重写任何规则。
  */
 import {
-  SUIT_NAME, SUIT_SYMBOL, cardFromId, cardsLabel, groupOf, levelLabel,
+  SUIT_NAME, SUIT_SYMBOL, cardFromId, cardsLabel, groupOf, levelLabel, sumPoints,
   type SjCard, type SjCtx, type SjPlainSuit, type SjTrumpSuit,
 } from '../../shared/sj/cards.ts';
 import type { SjPublicPlayer, SjPublicRoom, SjTrumpState } from '../../shared/sj/engine.ts';
@@ -14,7 +14,7 @@ import {
   followRequirement, legalDeclarations, shapeLabel, unitLabel, validateFollow, validateLead,
   type SjDeclKind,
 } from '../../shared/sj/rules.ts';
-import type { VoiceKey } from '../sound.ts';
+import type { SjVoiceKey } from '../voice-lines.ts';
 
 /** 桌面顶灯的光池色随主花色变 —— 整桌最强的记忆点（DESIGN 3.2） */
 export const TRUMP_TINT: Record<SjTrumpSuit, string> = {
@@ -32,9 +32,84 @@ export function trumpText(t: SjTrumpSuit | null, level: number): string {
   return t === 'NT' ? `无主 · 打 ${levelLabel(level)}` : `${SUIT_SYMBOL[t]} 主 · 打 ${levelLabel(level)}`;
 }
 
-export const TRUMP_VOICE: Record<SjTrumpSuit, VoiceKey> = {
-  S: 'trump_s', H: 'trump_h', C: 'trump_c', D: 'trump_d', NT: 'nt',
+export const TRUMP_VOICE: Record<SjTrumpSuit, SjVoiceKey> = {
+  S: 'sj_trump_s', H: 'sj_trump_h', C: 'sj_trump_c', D: 'sj_trump_d', NT: 'sj_nt',
 };
+
+/* ------------------------------------------------------- 语音（DESIGN 3.6） */
+
+/**
+ * 亮主 / 加固 / 反主 / 抄底 念什么。
+ *
+ * 花色和事件各自是一句短台词，靠 `voice.play(a, b)` 连读成「反主！红桃主」，
+ * 而不是为每个组合单录一句 —— 4 个花色 × 4 种事件会变成 16 句。
+ */
+export function declareVoice(
+  ev: { trump: SjTrumpSuit; strength: number; reinforce?: boolean },
+  opts: { chao?: boolean; override?: boolean } = {},
+): SjVoiceKey[] {
+  const suit = TRUMP_VOICE[ev.trump];
+  if (opts.chao) return ['sj_chao', suit];
+  if (ev.reinforce) return ['sj_reinforce'];
+  if (opts.override) return ['sj_fanzhu', suit];
+  if (ev.trump === 'NT') return ['sj_nt'];
+  // 亮对子时先报「一对」，念出来是「一对，黑桃主」
+  return ev.strength >= 2 ? ['sj_trump_pair', suit] : [suit];
+}
+
+/**
+ * 一手牌念什么（DESIGN 3.6）。
+ *
+ * 一局 25 圈、100 手牌，每手都报牌型会吵到被关掉，所以只有**有信息量**的时刻
+ * 出声：首出报牌型与吊主，跟牌只在毙 / 盖毙 / 垫出分牌时出声，跟不上又没分的
+ * 垫牌一律安静。最后一圈开打前额外报一句。
+ */
+export function playVoice(
+  room: SjPublicRoom,
+  ev: { playerId: string; cardIds: string[]; unit: 'single' | 'pair' | 'tractor' | 'throw'; trumped: boolean },
+): SjVoiceKey[] {
+  const seat = room.players.find((p) => p.id === ev.playerId)?.seat;
+  if (seat == null) return [];
+  const ctx = ctxOf(room);
+  const cards = ev.cardIds.map(cardFromId);
+  if (!cards.length) return [];
+  // 收圈那一下 room.trick 已经清空了，第四手要回头看 lastTrick 才知道自己排第几
+  const trick = room.trick.length ? room.trick : (room.lastTrick?.plays ?? []);
+  const idx = trick.findIndex((t) => t.seat === seat);
+  if (idx < 0 || !trick.length) return [];
+  const leadGroup = groupOf(cardFromId(trick[0].cardIds[0]), ctx);
+
+  if (ev.trumped) {
+    // 盖毙：这一圈在我之前已经有人用主牌毙过了
+    const covered = trick.slice(1, idx).some((t) => groupOf(cardFromId(t.cardIds[0]), ctx) === 'T');
+    return [covered ? 'sj_gaibi' : 'sj_bi'];
+  }
+
+  if (idx === 0) {
+    // 首出者手里清空 = 这是最后一圈：牌局里只有最后一圈才会在首出后就没牌了
+    const last = room.players.find((p) => p.seat === seat)?.handCount === 0 ? ['sj_last' as const] : [];
+    if (groupOf(cards[0], ctx) === 'T') return [...last, 'sj_diao'];
+    if (ev.unit === 'throw') return [...last, 'sj_shuai'];
+    if (ev.unit === 'tractor') return [...last, 'sj_tractor'];
+    if (ev.unit === 'pair') return [...last, 'sj_pair'];
+    return last;
+  }
+
+  // 跟牌：垫出去的牌里带分才值得出声 —— 那是把分送给了赢这一圈的人
+  const discard = cards.every((c) => {
+    const g = groupOf(c, ctx);
+    return g !== leadGroup && g !== 'T';
+  });
+  return discard && sumPoints(cards) > 0 ? ['sj_dian'] : [];
+}
+
+/** 结算念什么 */
+export function handEndVoice(o: { defendersWin: boolean; up: number; label: string }): SjVoiceKey[] {
+  if (o.label === '大光') return ['sj_daguang'];
+  if (o.label === '小光') return ['sj_xiaoguang'];
+  if (o.defendersWin) return o.up > 0 ? ['sj_shangtai', 'sj_levelup'] : ['sj_shangtai'];
+  return ['sj_shouzhu', 'sj_levelup'];
+}
 
 export const ctxOf = (room: { trump: { suit: SjTrumpSuit | null; level: number } }): SjCtx => ({
   trump: room.trump.suit,

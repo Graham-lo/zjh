@@ -424,9 +424,31 @@ interface SjRoomState {
 
 ### 3.6 声音与语音
 
-- 音效复用 `client/sound.ts` 的合成器，新增 `slam`（亮主）、`sweep`（收圈）、`stamp`（倍数戳记）。
-- 语音新增台词（`VOICE_LINES`）：`trump_s/h/c/d`（黑桃主…）、`trump_pair`（一对）、`nt`（无主）、`kou`（扣底）、`bi`（毙）、`dig`（抠底）、`levelup`、`daguang`、`xiaoguang`、`shangtai`（上台）、`tongguan`。
-  用 `scripts/voice-pack.mjs` 重新生成语音包（macOS `say`），manifest 同步。
+**轮转只有提示音，没有语音。** 「轮到你了」这种每局要触发几十次的提醒，用人声念出来
+很快就烦，是最先被玩家关掉的一句 —— 两个游戏都只留 `turn` 那一颗上行小铃。自己回合
+只剩 5 秒时补一记 `hurry`（音量只有 `turn` 的三分之一）：倒计时环在头像上，低头在手牌
+里挑牌时看不见。判断标准是**高频的状态提醒走音效，低频而有戏的时刻才配语音**。
+
+**两个游戏的台词表是分开的，不许互相借用。** `client/voice-lines.ts` 里
+`ZJH_VOICE_LINES` / `SJ_VOICE_LINES` 各一张，key 类型也拆成 `ZjhVoiceKey` / `SjVoiceKey`
+两个联合，在升级的牌桌上播炸金花的台词是编译不过的（升级最早就是借了炸金花的「该你啦」
+才串味的）。语音包连**发音人**也分开：炸金花是婷婷（女声），升级是 Reed（男声）。
+台词表是纯数据、不碰 `window`，所以能被 node 测试直接钉住。
+
+- 音效复用 `client/sound.ts` 的合成器，新增 `slam`（亮主/抄底拍牌）、`sweep`（收圈）、
+  `stamp`（倍数戳记与抄底戳记）、`hurry`（快到点的轻滴答）。
+- 升级台词 29 句：叫牌 `sj_trump_s/h/c/d`、`sj_trump_pair`（一对）、`sj_reinforce`、
+  `sj_fanzhu`、`sj_nt`、`sj_flip`、`sj_chao`、`sj_kou`；出牌 `sj_pair`、`sj_tractor`、
+  `sj_shuai`、`sj_shuai_fail`、`sj_diao`（吊主）、`sj_bi`（毙了）、`sj_gaibi`、`sj_dian`；
+  收圈 `sj_fen`、`sj_last`；结算 `sj_dig`、`sj_dig2`（双抠）、`sj_levelup`、`sj_daguang`、
+  `sj_xiaoguang`、`sj_shangtai`、`sj_shouzhu`、`sj_tongguan`。
+- **连读而不是穷举组合**：`voice.play('sj_fanzhu', 'sj_trump_h')` 念成「反主！红桃主」，
+  花色和事件各是一句短台词 —— 否则 4 个花色 × 4 种叫牌事件要录 16 句。
+- **出牌只在有信息量的时刻出声**（`playVoice`）：一局 25 圈、100 手牌，每手都报牌型会吵到
+  被关掉。首出报牌型与吊主，最后一圈额外报一句；跟牌只报毙 / 盖毙 / 垫出分牌，跟不上又
+  没分的垫牌一律安静；收圈满 15 分才喊「有分！」。
+- 用 `scripts/voice-pack.mjs` 重新生成语音包（macOS `say`），manifest 同步；台词删掉时
+  对应的旧音频会被一并删除。
 
 ---
 

@@ -6,9 +6,12 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPlay, declareOptions, smartPickForCard, throwFailText } from '../client/sj/util.ts';
+import {
+  checkPlay, declareOptions, declareVoice, handEndVoice, playVoice, smartPickForCard, throwFailText,
+} from '../client/sj/util.ts';
+import { SJ_VOICE_LINES, ZJH_VOICE_LINES } from '../client/voice-lines.ts';
 import { suggest, type SjSuggestView } from '../shared/sj/bot.ts';
-import { applySjCommand, timeoutKou } from '../shared/sj/engine.ts';
+import { applySjCommand, timeoutKou, type SjPublicRoom } from '../shared/sj/engine.ts';
 import { parseShape } from '../shared/sj/units.ts';
 import { declarationOptions, validateFollow } from '../shared/sj/rules.ts';
 import { CTX_S5, h, makeSjRoom, mulberry32, runDeclaring } from './sj-helpers.ts';
@@ -146,4 +149,69 @@ test('跟拖拉机时单击其中一张，预选一手完整合法连对', () =>
   const picked = smartPickForCard(hand, hand.find((c) => c.id === 'H7a')!, lead, CTX_S5);
   assert.equal(picked.length, 4);
   assert.ok(validateFollow(hand, lead, h(picked.join(' ')), CTX_S5).ok);
+});
+
+/* --------------------------------------------------------- 语音（DESIGN 3.6） */
+
+/** playVoice 只读这几个字段，其余的牌桌状态与它无关 */
+function voiceRoom(
+  trick: { seat: number; cardIds: string[] }[],
+  handCounts: number[] = [10, 10, 10, 10],
+): SjPublicRoom {
+  return {
+    trump: { suit: 'S', level: 5 },
+    trick,
+    lastTrick: trick.length >= 4 ? { plays: trick } : null,
+    players: handCounts.map((handCount, seat) => ({ id: `p${seat}`, seat, handCount })),
+  } as unknown as SjPublicRoom;
+}
+
+test('两个游戏的台词表没有一个 key 重合，升级借不到炸金花的话', () => {
+  const shared = Object.keys(SJ_VOICE_LINES).filter((k) => k in ZJH_VOICE_LINES);
+  assert.deepEqual(shared, []);
+  // 「轮到你了」这句每局要念几十遍，两张表里都不该再有
+  assert.ok(!('turn' in ZJH_VOICE_LINES) && !('turn' in SJ_VOICE_LINES));
+  assert.ok(Object.keys(SJ_VOICE_LINES).every((k) => k.startsWith('sj_')));
+});
+
+test('亮主的连读：单张报花色，对子先报「一对」，反主和抄底各自带一句', () => {
+  assert.deepEqual(declareVoice({ trump: 'H', strength: 1 }), ['sj_trump_h']);
+  assert.deepEqual(declareVoice({ trump: 'S', strength: 5 }), ['sj_trump_pair', 'sj_trump_s']);
+  assert.deepEqual(declareVoice({ trump: 'NT', strength: 7 }), ['sj_nt']);
+  assert.deepEqual(declareVoice({ trump: 'D', strength: 2, reinforce: true }), ['sj_reinforce']);
+  assert.deepEqual(declareVoice({ trump: 'C', strength: 3 }, { override: true }), ['sj_fanzhu', 'sj_trump_c']);
+  assert.deepEqual(declareVoice({ trump: 'S', strength: 5 }, { chao: true }), ['sj_chao', 'sj_trump_s']);
+});
+
+test('出牌只在有信息量的时刻出声：首出报牌型与吊主，跟牌只报毙与垫分', () => {
+  const lead = (cardIds: string[], unit: 'single' | 'pair' | 'tractor' | 'throw', counts?: number[]) =>
+    playVoice(voiceRoom([{ seat: 0, cardIds }], counts), { playerId: 'p0', cardIds, unit, trumped: false });
+
+  assert.deepEqual(lead(['SAa'], 'single'), ['sj_diao']);          // 首出主牌 = 吊主
+  assert.deepEqual(lead(['HAa', 'HAb'], 'pair'), ['sj_pair']);
+  assert.deepEqual(lead(['HAa'], 'single'), []);                    // 副牌小单张不值得出声
+  // 首出之后手里就空了，只可能是最后一圈
+  assert.deepEqual(lead(['HAa', 'HAb'], 'pair', [0, 4, 4, 4]), ['sj_last', 'sj_pair']);
+
+  // 毙 / 盖毙：本圈之前有没有人先毙过
+  const bi = voiceRoom([{ seat: 0, cardIds: ['HAa'] }, { seat: 1, cardIds: ['S6a'] }]);
+  assert.deepEqual(playVoice(bi, { playerId: 'p1', cardIds: ['S6a'], unit: 'single', trumped: true }), ['sj_bi']);
+  const gai = voiceRoom([
+    { seat: 0, cardIds: ['HAa'] }, { seat: 1, cardIds: ['S6a'] }, { seat: 2, cardIds: ['S7a'] },
+  ]);
+  assert.deepEqual(playVoice(gai, { playerId: 'p2', cardIds: ['S7a'], unit: 'single', trumped: true }), ['sj_gaibi']);
+
+  // 跟不上：垫出去带分才出声，垫张废牌是安静的
+  const dian = voiceRoom([{ seat: 0, cardIds: ['HAa'] }, { seat: 1, cardIds: ['CKa'] }]);
+  assert.deepEqual(playVoice(dian, { playerId: 'p1', cardIds: ['CKa'], unit: 'single', trumped: false }), ['sj_dian']);
+  const quiet = voiceRoom([{ seat: 0, cardIds: ['HAa'] }, { seat: 1, cardIds: ['C9a'] }]);
+  assert.deepEqual(playVoice(quiet, { playerId: 'p1', cardIds: ['C9a'], unit: 'single', trumped: false }), []);
+});
+
+test('结算的连读分清大光小光、上台与守住', () => {
+  assert.deepEqual(handEndVoice({ defendersWin: false, up: 3, label: '大光' }), ['sj_daguang']);
+  assert.deepEqual(handEndVoice({ defendersWin: false, up: 2, label: '小光' }), ['sj_xiaoguang']);
+  assert.deepEqual(handEndVoice({ defendersWin: false, up: 1, label: '庄家升一级' }), ['sj_shouzhu', 'sj_levelup']);
+  assert.deepEqual(handEndVoice({ defendersWin: true, up: 0, label: '闲家上台' }), ['sj_shangtai']);
+  assert.deepEqual(handEndVoice({ defendersWin: true, up: 2, label: '上台 · 升两级' }), ['sj_shangtai', 'sj_levelup']);
 });
