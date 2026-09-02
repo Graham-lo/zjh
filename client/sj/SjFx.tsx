@@ -6,7 +6,7 @@
  * 同一时刻只播一个，排队由 SjTable 的单车道队列负责。
  */
 import { useEffect, useState } from 'react';
-import { SUIT_SYMBOL, cardLabel, type SjCard, type SjTrumpSuit } from '../../shared/sj/cards.ts';
+import { SUIT_SYMBOL, cardFromId, cardLabel, type SjCard, type SjTrumpSuit } from '../../shared/sj/cards.ts';
 import { Particles } from '../components/Fx.tsx';
 import { PlayingCard } from '../components/Card.tsx';
 import { TRUMP_TINT, suitName } from './util.ts';
@@ -14,7 +14,7 @@ import { TRUMP_TINT, suitName } from './util.ts';
 export type SjFxJob =
   | { kind: 'declare'; trump: SjTrumpSuit; who: string; strength: number; reinforce: boolean }
   | { kind: 'flip'; card: SjCard; trump: SjTrumpSuit }
-  | { kind: 'throwFail'; who: string; penalty: number }
+  | { kind: 'throwFail'; who: string; penalty: number; forcedIds: string[] }
   | { kind: 'dig'; who: string; base: number; multiplier: number; total: number; bottom: SjCard[] }
   | { kind: 'handEnd'; label: string; detail: string; big: boolean }
   | { kind: 'matchEnd'; mine: boolean };
@@ -96,13 +96,18 @@ function Flip({ job }: { job: Extract<SjFxJob, { kind: 'flip' }> }) {
 /* --------------------------------------------------------------- 甩牌失败 */
 
 function ThrowFail({ job }: { job: Extract<SjFxJob, { kind: 'throwFail' }> }) {
+  // 强制打出的那一手是**已经落到桌上的公开牌**，写出来所有人才知道这一圈在比什么；
+  // 只说"被打回来了"会让人以为这一手根本没出成（其实只是其余的牌退回了手里）。
+  const forced = job.forcedIds.map(cardFromId).map(cardLabel).join(' ');
   return (
     <div className="overlay sj-fx sj-fx-fail" aria-hidden="true">
       <div className="sj-stamp sj-stamp-red">
         <span>甩牌失败</span>
         <b>−10</b>
       </div>
-      <div className="sj-fx-who">{job.who} 甩出去的牌被打回来了，只算最小那一手</div>
+      <div className="sj-fx-who">
+        {job.who} 压不住，已强制打出 <b className="sj-fx-forced">{forced}</b>，其余退回手里
+      </div>
     </div>
   );
 }

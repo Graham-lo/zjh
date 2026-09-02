@@ -5,7 +5,7 @@
  * 跟牌合法性（甩牌除外，那要别人的手牌，由服务端裁决），所以这里不重写任何规则。
  */
 import {
-  SUIT_NAME, SUIT_SYMBOL, cardFromId, levelLabel,
+  SUIT_NAME, SUIT_SYMBOL, cardFromId, cardsLabel, levelLabel,
   type SjCard, type SjCtx, type SjPlainSuit, type SjTrumpSuit,
 } from '../../shared/sj/cards.ts';
 import type { SjPublicPlayer, SjPublicRoom, SjTrumpState } from '../../shared/sj/engine.ts';
@@ -154,6 +154,21 @@ export function checkPlay(hand: SjCard[], selected: SjCard[], lead: SjShape | nu
   const check = validateFollow(hand, lead, selected, ctx);
   if (!check.ok) return { ok: false, label: `出牌 · ${selected.length} 张`, reason: check.reason, shape };
   return { ok: true, label: shape ? labelOf(shape) : `跟牌 · ${selected.length} 张`, reason: '', shape };
+}
+
+/* ------------------------------------------------------------ 甩牌失败文案 */
+
+/**
+ * 甩牌被判失败时给玩家看的那句话。
+ *
+ * 服务端**已经替他打出了最小的那个单位**（`shared/sj/engine.ts` 的 `doPlay`），
+ * 只有其余的牌退回手里。但界面上看到的是一把牌抖着飞回手牌扇，很容易误以为
+ * 「什么都没出成」—— 所以这句话必须先说打出了什么，再说退回了几张。
+ */
+export function throwFailText(forcedIds: string[], backCount: number): string {
+  const forced = cardsLabel(forcedIds.map(cardFromId));
+  const back = backCount > 0 ? `，其余 ${backCount} 张退回手里` : '';
+  return `甩牌失败，已强制打出 ${forced}${back}，罚 10 分`;
 }
 
 /** 本圈的首出结构，客户端算一遍就够（服务端有自己的一份） */

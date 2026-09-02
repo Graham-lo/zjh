@@ -313,6 +313,69 @@ test('甩牌成功时整手都算数', () => {
   assert.equal(room.lastThrowFail, null);
 });
 
+/**
+ * 甩牌失败的核心承诺：**最小的那个单位一定被打出去了**，不是"整把退回、什么都没出"。
+ * 客户端只演了一段"退回手里"的动效，很容易让人以为这一手没出成 —— 用例把这条钉死。
+ */
+test('甩牌失败：混合牌型也只留最小的那个单位（对子 < 拖拉机）', () => {
+  const { room, o } = started(3);
+  runDeclaring(room, o);
+  timeoutKou(room, o);
+  room.dealerSeat = 0;
+  room.trump = { suit: 'S', level: 5, declarerId: null, strength: 0, cardIds: [] };
+  room.leaderSeat = 1;
+  room.turnSeat = 1;
+  room.trick = [];
+  room.trickNo = 1;
+  room.defenderPoints = 0;
+  // 1 座（闲家）甩「9-10 两连对 + KK」：连对没人压得住，但 KK 被 0 座的 AA 压住
+  room.players[0].hand = h('HAa HAb H3a H4a H6a H7a');
+  room.players[1].hand = h('H9a H9b HTa HTb HKa HKb');
+  room.players[2].hand = h('H2a H2b H8a HJa HQa D2a');
+  room.players[3].hand = h('C2a C3a C4a D3a D4a D6a');
+
+  applySjCommand(room, room.players[1].id, { type: 'play', cardIds: ['H9a', 'H9b', 'HTa', 'HTb', 'HKa', 'HKb'] }, o);
+
+  assert.deepEqual(room.trick[0].cardIds, ['HKa', 'HKb'], '拖拉机 > 对子，最小的单位是那一对 K');
+  assert.deepEqual(ids(room.players[1].hand).sort(), ['H9a', 'H9b', 'HTa', 'HTb'], '连对退回手里');
+  assert.equal(room.players[1].hand.length + room.trick[0].cardIds.length, 6, '牌不会凭空少');
+  assert.equal(room.defenderPoints, -10, '闲家甩砸，闲家 −10');
+  assert.deepEqual(room.lastThrowFail?.forcedIds, ['HKa', 'HKb'], '事件要带上被强制打出的那一手');
+});
+
+test('甩牌失败：单张的优先级最低，对子压不住时也先被留下的是单张', () => {
+  const { room, o } = started(3);
+  runDeclaring(room, o);
+  timeoutKou(room, o);
+  room.dealerSeat = 0;
+  room.trump = { suit: 'S', level: 5, declarerId: null, strength: 0, cardIds: [] };
+  room.leaderSeat = 1;
+  room.turnSeat = 1;
+  room.trick = [];
+  room.trickNo = 1;
+  room.defenderPoints = 0;
+  room.players[0].hand = h('HAa HAb H3a');
+  room.players[1].hand = h('HKa HKb H2a');
+  room.players[2].hand = h('H6a H7a H8a');
+  room.players[3].hand = h('H9a HTa HJa');
+
+  applySjCommand(room, room.players[1].id, { type: 'play', cardIds: ['HKa', 'HKb', 'H2a'] }, o);
+
+  assert.deepEqual(room.trick[0].cardIds, ['H2a'], '对子 > 单张，最小的单位是那张 2');
+  assert.deepEqual(ids(room.players[1].hand).sort(), ['HKa', 'HKb'], '对子退回手里');
+
+  // 事件层面也要说得清：客户端靠 forcedIds 算「哪几张飞回来了」并写进提示文案
+  const evs = deriveSjEvents(
+    { ...room, trick: [], lastThrowFail: null, players: room.players.map((p) => ({ ...p, hand: [...p.hand, ...(p.seat === 1 ? h('H2a') : [])] })) } as never,
+    room,
+    room.players[1].id,
+    { type: 'play', cardIds: ['HKa', 'HKb', 'H2a'] },
+  );
+  const fail = evs.find((e) => e.k === 'sj_throw_fail');
+  assert.ok(fail, '要发出 sj_throw_fail 事件');
+  assert.deepEqual(fail.forcedIds, ['H2a']);
+});
+
 test('抠底：闲家赢最后一圈，底牌分按 2^张数 翻倍', () => {
   const { room, o } = started(4);
   runDeclaring(room, o);

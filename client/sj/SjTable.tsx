@@ -21,7 +21,7 @@ import { DeclaredCards, LastTrick, PlayZone } from './Trick.tsx';
 import { useCountUp } from './useCountUp.ts';
 import {
   TRUMP_TINT, TRUMP_VOICE, checkPlay, ctxOf, leadShape, leadText, seatBySpot, spotOf,
-  teamOfSeat, trickPointsOf, trumpGlyph, trumpText, type SjSpot,
+  teamOfSeat, throwFailText, trickPointsOf, trumpGlyph, trumpText, type SjSpot,
 } from './util.ts';
 
 /** 发牌动画的总长，和服务端的 SJ_DEAL_MS 是同一个数（45ms/张 × 25 张 + 余量） */
@@ -229,9 +229,34 @@ export function SjTable({
     [hand, selectedCards, lead, ctx.trump, ctx.level],
   );
 
+  /**
+   * 建议出法（最多 5 个候选）。「提示」按钮循环它们，同时它的第一项就是**被动高亮**
+   * 的那一手 —— 不点提示也知道该往哪儿选。只用自己的手牌和公开信息算，和机器人同源。
+   */
+  const hints = useMemo(
+    () => (myTurn ? suggest({ trump: room.trump, trick: room.trick, playedIds: room.playedIds }, hand, 5) : []),
+    [myTurn, room.trick, room.playedIds, hand, room.trump],
+  );
+  /** 当前被建议的那一手，跟着「提示」的循环走 */
+  const hintPick = hints.length ? hints[hintIdx % hints.length] : null;
+
   /* 换圈、换阶段、手牌变了就把选牌清掉，免得留着上一手的残影 */
   useEffect(() => setSelected(new Set()), [room.trickNo, room.phase, room.handNo]);
   useEffect(() => setHintIdx(0), [room.trickNo, room.turnSeat]);
+  /**
+   * 唯一解自动预选：轮到我、而 `suggest` 去重之后只剩一种打法时（跟牌时很常见 ——
+   * 这门花色只剩一张、或者手里那一对必须整对跟出），直接把那一手选好。
+   *
+   * **只自动选，绝不自动出牌**：替人做决定和替人点确认是两回事，出牌永远等玩家按。
+   * 依赖只有「轮次」，所以玩家把它取消掉之后不会又被选回来，不会粘住。
+   */
+  const turnKey = `${room.handNo}:${room.trickNo}:${room.trick.length}`;
+  useEffect(() => {
+    if (!myTurn || hints.length !== 1) return;
+    const only = hints[0].map((c) => c.id);
+    // 函数式更新：清空选牌的那个 effect 排在前面，这里看到的一定是清空之后的状态
+    setSelected((s) => (s.size ? s : new Set(only)));
+  }, [turnKey, myTurn, hints.length]);
   useEffect(() => {
     if (dockOpen) setUnread(0);
   }, [dockOpen]);
@@ -326,6 +351,9 @@ export function SjTable({
           // 别人甩失败时客户端看不到他试图甩了什么（手牌是暗的），只演戳记。
           if (ev.playerId === room.viewerId) {
             const back = lastPlay.current.filter((id) => !ev.forcedIds.includes(id));
+            // 先把话说清楚：**最小的那一手已经打出去了**，飞回来的只是其余的牌。
+            // 光看动效很容易误以为整把都没出成，那正是"甩牌失败＝没出牌"这个误解的来源。
+            onToast(throwFailText(ev.forcedIds, back.length));
             if (back.length) {
               const id = ++uid.current;
               setThrowBack({ id, spot: spotOf(mySeat, mySeat), cards: back.map(cardFromId) });
@@ -333,7 +361,10 @@ export function SjTable({
               setTimeout(() => setThrowBack((t) => (t?.id === id ? null : t)), 820);
             }
           }
-          pushFx({ kind: 'throwFail', who: nameOf(ev.playerId), penalty: ev.penalty });
+          pushFx({
+            kind: 'throwFail', who: nameOf(ev.playerId),
+            penalty: ev.penalty, forcedIds: [...ev.forcedIds],
+          });
           break;
         }
         case 'sj_trick': {
@@ -441,10 +472,16 @@ export function SjTable({
 
   /* ---------------------------------------------------------- 交互 */
 
-  const toggle = (id: string) =>
+  /**
+   * 整组切换：组里只要还有没选中的就补齐，全都选中了才整组取消。
+   * 单击一张牌是「一张的组」；首出是对子时 Hand 会把它和它的对子作为一组传进来，
+   * 所以自动配上的对子也能一下取消掉，不会出现「选不掉」的粘滞。
+   */
+  const toggle = (ids: string[]) =>
     setSelected((s) => {
       const next = new Set(s);
-      next.has(id) ? next.delete(id) : next.add(id);
+      const allOn = ids.every((id) => next.has(id));
+      for (const id of ids) allOn ? next.delete(id) : next.add(id);
       return next;
     });
   const selectMany = (ids: string[]) =>
@@ -453,11 +490,6 @@ export function SjTable({
       for (const id of ids) next.add(id);
       return next;
     });
-
-  const hints = useMemo(
-    () => (myTurn ? suggest({ trump: room.trump, trick: room.trick, playedIds: room.playedIds }, hand, 5) : []),
-    [myTurn, room.trick, room.playedIds, hand, room.trump],
-  );
 
   const doHint = () => {
     if (!hints.length) return onToast('这一手没有别的打法了');
@@ -751,10 +783,13 @@ export function SjTable({
             <Hand
               cards={hand}
               selected={selected}
-              hinted={undefined}
+              // 还没动手时把建议的那一手标出来；一旦开始选牌就撤掉，
+              // 免得金色描边和选中的金边混在一起分不清哪个是自己选的
+              hinted={myTurn && !selected.size && hintPick ? new Set(hintPick.map((c) => c.id)) : undefined}
               hidden={kouFly?.to === 'me' ? new Set(kouFly.ids) : undefined}
               onToggle={toggle}
               onSelectMany={selectMany}
+              pairPick={!!lead && (lead.pairs > 0 || lead.tractors.length > 0)}
               rows={typeof window !== 'undefined' && window.innerWidth <= 780 ? 2 : 1}
               disabled={room.phase === 'playing' && !myTurn}
               lifted={myTurn || kouMine}

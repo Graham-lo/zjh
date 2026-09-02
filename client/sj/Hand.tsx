@@ -12,6 +12,20 @@ const reduced = () =>
  * 把 step 夹在「牌宽的 26%–62%」之间，宽屏摊开、窄屏收紧，永远不出容器。
  * 排序变化（发完牌、亮主定下主花色之后重排）走 FLIP：先记下每张牌的旧位置，
  * DOM 更新后用 Web Animations 从旧位置滑回来，带一点 spring 过冲。
+ *
+ * ## 为什么每张牌是三层 DOM
+ *
+ * 牌之间是**负边距大幅重叠**的，每张真正露在外面的只有左边一条窄边 ——
+ * 命中区一旦跟着动效上下跑，指针就会在「抬起→离开→落下→再进入」之间抖起来，
+ * 想点的那张牌从指针底下跑掉。所以这里立了一条硬规矩：
+ * **`<button>`（＝命中区）的几何永远不变，只有它里面的视觉层在动。**
+ *
+ *   button.sj-hand-card       扇形的静态位置 + 命中区（顶部留出抬起量的 padding）
+ *   span.sj-hand-card-flip    只给 FLIP 重排用（Web Animations 独占 transform）
+ *   span.sj-hand-card-lift    选中抬起 / 发牌落桌，只有它会因交互改变 transform
+ *
+ * 分三层还有一个原因：FLIP 用 Web Animations 写 transform 会**整条覆盖**元素的
+ * transform，和扇形/抬起写在同一层就会互相抢，重排那 600ms 里扇形会塌掉。
  */
 export function Hand({
   cards,
@@ -19,6 +33,7 @@ export function Hand({
   hinted,
   onToggle,
   onSelectMany,
+  pairPick,
   rows = 1,
   disabled,
   lifted,
@@ -26,10 +41,16 @@ export function Hand({
 }: {
   cards: SjCard[];
   selected: Set<string>;
-  /** 「提示」给出的候选，金色描边 */
+  /** 建议出的那一手，金色描边（不点「提示」也知道该往哪儿选） */
   hinted?: Set<string>;
-  onToggle(id: string): void;
+  /** 整组切换：组里还有没选中的就补齐，全选中了才整组取消 */
+  onToggle(ids: string[]): void;
   onSelectMany(ids: string[]): void;
+  /**
+   * 首出是对子/连对时置 true：单击一张牌自动带上它的对子。
+   * 首出单张时保持单击选单张，否则想垫两张单牌反而要先取消一张。
+   */
+  pairPick?: boolean;
   rows?: 1 | 2;
   disabled?: boolean;
   /** 轮到我时整手牌轻微上浮 6px */
@@ -63,7 +84,7 @@ export function Hand({
     return () => ro.disconnect();
   }, [cards.length, rows, hidden?.size]);
 
-  /* FLIP：排序变了就从旧位置滑回来 */
+  /* FLIP：排序变了就从旧位置滑回来。量的是按钮，动的是它里面的 flip 层 */
   useLayoutEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
@@ -76,7 +97,8 @@ export function Hand({
         const from = prev.current.get(id);
         const to = next.get(id)!;
         if (from == null || Math.abs(from - to) < 1.5) continue;
-        n.animate(
+        const layer = n.querySelector<HTMLElement>('.sj-hand-card-flip');
+        layer?.animate(
           [{ transform: `translateX(${from - to}px)` }, { transform: 'translateX(0)' }],
           { duration: 600, easing: 'cubic-bezier(0.34, 1.56, 0.64, 1)' },
         );
@@ -96,6 +118,9 @@ export function Hand({
       window.removeEventListener('pointercancel', stop);
     };
   }, []);
+
+  /** 两副牌，同一张牌最多两份，所以「对子」就是找那唯一的另一份 */
+  const twinOf = (c: SjCard) => cards.find((x) => x.id !== c.id && isSameCard(x, c));
 
   const shown = hidden?.size ? cards.filter((c) => !hidden.has(c.id)) : cards;
   const chunks: SjCard[][] = [];
@@ -130,14 +155,21 @@ export function Hand({
                   // 按住横扫多选（手机上一次点一张太慢了）
                   if (dragging.current && !selected.has(c.id)) onSelectMany([c.id]);
                 }}
-                onClick={() => onToggle(c.id)}
+                onClick={() => {
+                  const twin = pairPick ? twinOf(c) : undefined;
+                  onToggle(twin ? [c.id, twin.id] : [c.id]);
+                }}
                 onDoubleClick={() => {
-                  // 双击自动带上它的对子
-                  const twin = cards.find((x) => x.id !== c.id && isSameCard(x, c));
+                  // 双击自动带上它的对子（首出是单张时，这是唯一的成对选法）
+                  const twin = twinOf(c);
                   if (twin) onSelectMany([c.id, twin.id]);
                 }}
               >
-                <PlayingCard card={c} faceDown={false} size="hand" />
+                <span className="sj-hand-card-flip">
+                  <span className="sj-hand-card-lift">
+                    <PlayingCard card={c} faceDown={false} size="hand" />
+                  </span>
+                </span>
               </button>
             );
           })}

@@ -24,6 +24,8 @@
   --sj-card-play-h: 62px;
   --sj-card-tiny-w: 22px;
   --sj-card-tiny-h: 31px;
+  /* 选中时牌面抬起的高度。手牌按钮顶部要留出同样多的 padding 把它罩住 */
+  --sj-lift: 14px;
 
   background:
     radial-gradient(58% 40% at 50% -6%, rgba(150, 190, 255, 0.12), transparent 62%),
@@ -416,27 +418,49 @@
 
 /* --------------------------------------------------------------- 手牌扇 */
 
-.sj-hand-wrap { flex: none; width: 100%; padding: 4px 10px 12px; }
+.sj-hand-wrap { flex: none; width: 100%; padding: 0 10px 12px; }
 .sj-hand { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 100%; transition: transform 0.35s var(--ease); }
 /* 轮到我：整手牌轻轻上浮 6px */
 .sj-hand.is-turn { transform: translateY(-6px); }
 .sj-hand.is-off { opacity: 0.72; }
 .sj-hand-row { display: flex; align-items: flex-end; justify-content: center; }
+
+/*
+  牌之间是负边距重叠的，每张露在外面的只有左边一条窄边。所以命中区（button）
+  的几何**只由扇形决定，绝不因悬浮/选中而变** —— 命中区一动，指针就会在
+  「抬起→离开→落下→再进入」之间抖，想点的那张牌从指针底下跑掉。
+  会动的全在里面两层：.sj-hand-card-flip 归 FLIP 重排，.sj-hand-card-lift 归抬起。
+  顶部的 padding 要盖住最大抬起量，否则选中的牌抬上去之后顶部那块点不到、取消不了。
+*/
 .sj-hand-card {
-  flex: none; background: none; border: 0; padding: 0; cursor: pointer; border-radius: 8px;
+  flex: none; background: none; border: 0; cursor: pointer; border-radius: 8px;
+  padding: calc(var(--sj-lift, 14px) + 2px) 0 0;
   transform: translateY(var(--dy, 0px)) rotate(var(--rot, 0deg));
+  /* 只在扇形本身变了（张数变化导致重新分布）时过渡，交互不碰它 */
   transition: transform 0.24s var(--spring);
 }
+.sj-hand-card-flip, .sj-hand-card-lift { display: block; }
+.sj-hand-card-lift { transition: transform 0.24s var(--spring), filter 0.18s var(--ease); }
 .sj-hand-card + .sj-hand-card { margin-left: calc(var(--step, 32px) - var(--sj-card-hand-w)); }
-.sj-hand-card:hover:not(:disabled) { transform: translateY(calc(var(--dy, 0px) - 7px)) rotate(var(--rot, 0deg)); z-index: 2; }
+/* 悬浮：只把这张牌提到最上层 + 提亮描边，不改任何几何（z-index 不影响命中判定） */
+.sj-hand-card:hover:not(:disabled) { z-index: 2; }
+.sj-hand-card:hover:not(:disabled) .sj-hand-card-lift { filter: brightness(1.1); }
+.sj-hand-card:hover:not(:disabled) .pc-face {
+  box-shadow: 0 0 0 2px rgba(243, 224, 176, 0.7), 0 14px 26px rgba(0, 0, 0, 0.6);
+}
+.sj-hand-card:focus-visible { outline: none; z-index: 4; }
+.sj-hand-card:focus-visible .pc-face { box-shadow: 0 0 0 3px var(--sj-blue, #6ec1ff); }
 /* 选中抬起 14px + 金边 */
-.sj-hand-card.on { transform: translateY(calc(var(--dy, 0px) - 14px)) rotate(var(--rot, 0deg)); z-index: 3; }
+.sj-hand-card.on { z-index: 3; }
+.sj-hand-card.on .sj-hand-card-lift { transform: translateY(calc(-1 * var(--sj-lift, 14px))); }
 .sj-hand-card.on .pc-face { box-shadow: 0 0 0 2px var(--gold), 0 16px 28px rgba(0, 0, 0, 0.65); }
 .sj-hand-card.hint .pc-face { box-shadow: 0 0 0 2px rgba(243, 224, 176, 0.55); }
+.sj-hand-card.hint.on .pc-face { box-shadow: 0 0 0 2px var(--gold), 0 16px 28px rgba(0, 0, 0, 0.65); }
 .sj-hand-card:disabled { cursor: default; }
 
-/* 发牌：逐张从桌心飞出，45ms 一张，落地即翻面（DESIGN 3.5） */
-.sj-hand-wrap.dealing .sj-hand-card {
+/* 发牌：逐张从桌心飞出，45ms 一张，落地即翻面（DESIGN 3.5）。
+   扇形的 dy/rot 由按钮那一层给，所以这里的关键帧只写「相对落点」的偏移。 */
+.sj-hand-wrap.dealing .sj-hand-card-lift {
   animation: sjDealIn 0.52s var(--swing) backwards;
   animation-delay: calc(var(--i, 0) * 45ms);
 }
@@ -446,8 +470,8 @@
     transform: translate(calc((12 - var(--i, 0)) * 9px), -280px) rotate(calc(-26deg + var(--i, 0) * 2deg)) scale(0.6);
   }
   55% { opacity: 1; }
-  80% { transform: translateY(calc(var(--dy, 0px) - 8px)) rotate(calc(var(--rot, 0deg) + 3deg)) scale(1.04); }
-  100% { opacity: 1; transform: translateY(var(--dy, 0px)) rotate(var(--rot, 0deg)); }
+  80% { transform: translateY(-8px) rotate(3deg) scale(1.04); }
+  100% { opacity: 1; transform: none; }
 }
 
 /* --------------------------------------------------------------- 全屏特效 */
@@ -476,6 +500,8 @@
   backdrop-filter: blur(6px); font-size: 15px; font-weight: 700; color: #fff0d0;
   animation: riseIn 0.5s var(--ease) 0.3s both;
 }
+/* 甩牌失败时"被强制打出的那一手"要在这句话里最显眼 —— 它才是真正落到桌上的牌 */
+.sj-fx-forced { color: var(--gold-2); font-family: var(--font-num); letter-spacing: 0.02em; }
 .sj-fx-cap { font-family: var(--font-serif); font-size: 20px; letter-spacing: 0.5em; color: var(--gold-2); text-shadow: 0 0 30px rgba(227, 200, 143, 0.5); }
 .sj-fx-pip {
   position: absolute; left: 50%; top: 46%;
@@ -636,7 +662,7 @@
 /* --------------------------------------------------------------- 手机 */
 
 @media (max-width: 780px) {
-  .sj { --sj-card-hand-w: 46px; --sj-card-hand-h: 64px; --sj-card-play-w: 36px; --sj-card-play-h: 50px; --sj-card-tiny-w: 18px; --sj-card-tiny-h: 25px; }
+  .sj { --sj-card-hand-w: 46px; --sj-card-hand-h: 64px; --sj-card-play-w: 36px; --sj-card-play-h: 50px; --sj-card-tiny-w: 18px; --sj-card-tiny-h: 25px; --sj-lift: 10px; }
   .sj-felt-wrap { flex: none; padding: 6px 0 30px; }
   .sj-felt {
     width: 100%; aspect-ratio: auto; height: 300px;
@@ -669,6 +695,7 @@
   .sj-play-actions { width: 100%; gap: 8px; }
   .sj-play-actions .btn { flex: 1; min-height: 46px; padding: 12px 8px; }
   .sj-go { flex: 2 !important; min-width: 0; font-size: 15px; padding: 12px; }
+  /* 两行手牌，每行的按钮都要顶部留白盖住抬起量，所以抬起量在手机上收到 10px */
   .sj-hand-wrap { padding: 0 4px 10px; }
   .sj-hand { gap: 2px; }
   .sj-slots { gap: 4px; padding: 5px; }
