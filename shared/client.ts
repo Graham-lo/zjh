@@ -149,7 +149,8 @@ export class RoomClient {
       case 'welcome':
         this.auth = { code: msg.code, playerId: msg.playerId, token: msg.token };
         if (msg.account) this.account = msg.account;
-        // 命令行 / MCP 这一版只认炸金花，升级房间留到 P3（DESIGN 0 分期表）
+        // 命令行 / MCP 只做炸金花：升级是四人两队 + 25 张手牌的图形化玩法，
+        // 终端里排不下也点不动。碰到升级房间明确退出，而不是拿炸金花的字段去读它。
         if (msg.room.kind !== 'zjh') return this.rejectKind();
         this.apply(msg.room, []);
         return;
@@ -172,7 +173,7 @@ export class RoomClient {
   }
 
   private rejectKind() {
-    const msg = '这是一桌升级，命令行版还在开发中，请用网页版加入';
+    const msg = '升级房间暂只支持网页版，请用浏览器打开这个房号';
     this.events.error?.(msg, true);
     const reject = this.pendingError;
     this.pendingError = null;

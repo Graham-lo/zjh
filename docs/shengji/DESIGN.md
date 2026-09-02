@@ -20,7 +20,7 @@
 | P0 | 把仓库里未提交的「梭哈闷牌半价」改动修到测试全绿并单独提交 | 1 个 commit |
 | P1 | `shared/sj/*` 游戏内核 + 机器人 + 单元/模糊测试（与 UI 无关，可独立验证） | 内核 + tests |
 | P2 | 多游戏房间框架（协议、Hub、快照）、首页重设计、升级牌桌 Web UI、动效、声音 | 可玩的网页版 |
-| P3 | 命令行版与 MCP 对升级的支持 | CLI/MCP |
+| ~~P3~~ | ~~命令行版与 MCP 对升级的支持~~ —— **用户已取消**：升级只做网页版 | — |
 | P4 | 构建、部署到 96、线上验收 | 线上可玩 |
 
 每一阶段结束都要：`npm test`、`npm run typecheck`、`npm run build` 全绿；主线程亲自审查再进入下一阶段。
@@ -184,7 +184,6 @@ shared/
   sj/rules.ts       首出合法性、跟牌合法性、甩牌校验、定圈、抠底倍数、升级表、庄家轮转
   sj/engine.ts      SjRoomState、阶段机、applyCommand、timeout、sanitize、migrate、events 派生
   sj/bot.ts         机器人与提示
-  sj/client.ts      legalActions / tableView 的升级版（给 CLI 与 MCP）
 server/
   rooms.ts          Hub：按 kind 调用 engine；定时器（发牌、亮主窗口、扣底、出牌、结算）；账户同步
   store.ts          accounts 表加 sj_hands / sj_wins 列（ALTER TABLE ... 幂等）
@@ -343,13 +342,16 @@ interface SjRoomState {
 
 ---
 
-## 4. 命令行与 MCP（P3）
+## 4. 命令行与 MCP —— 升级不做（用户已取消）
 
-- `shared/sj/client.ts`：`legalActions(room)` 给出 亮主/不亮/扣底/出牌 的候选（出牌候选来自 bot.suggest 的前 5 个 + 自定义），`tableView` 给出精简视图（级别、主、闲家分、当前圈、手牌带编号）。
-- CLI：升级房间渲染手牌为带编号的行（主牌一行、每花色一行），`1 3 5` 选牌 + 回车出牌，`h` 提示，`p` 不亮/亮主菜单，`k` 扣底模式；发牌、定圈、抠底做终端动效（沿用 render.ts 的帧机制）。
-- MCP：`zjh_act` 接受 `{ action: 'sj_declare'|'sj_pass'|'sj_kou'|'sj_play', cardIds }`；`zjh_table` 返回升级视图；`zjh_wait` 阻塞到轮到自己（含亮主窗口与扣底）。
+升级**只做网页版**。四人两队、25 张手牌的扇形选牌、亮主/扣底/甩牌这些交互在终端里
+既排不下也点不动，硬做出来的是一个没人会用的东西。原计划的 `shared/sj/client.ts`、
+CLI 的升级渲染、MCP 的 `sj_*` 动作**全部取消**。
 
----
+仍然要保证的是**不崩**：`shared/client.ts` 收到 `kind !== 'zjh'` 的房间时，
+一律报 `升级房间暂只支持网页版，请用浏览器打开这个房号` 并按 fatal 处理 ——
+CLI 打印后退出（exit 1），MCP 把它作为工具错误返回。CLI/MCP 只会用不带 `kind`
+的 `create` 建房，所以它们永远开不出一桌升级。炸金花的 CLI/MCP 行为完全不变。
 
 ## 5. 验收方案
 
