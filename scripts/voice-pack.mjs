@@ -30,6 +30,10 @@ const RATE = { fast: 230, normal: 180, slow: 170 };
 const TEMPO = {
   allin: RATE.fast, accept: RATE.fast, baozi: RATE.fast, shunjin: RATE.fast,
   fold: RATE.slow, sanpai: RATE.slow,
+  // 升级：主花色报得稳，毙 / 抠底 / 通关是全场最上头的几下，念快一点
+  trump_pair: RATE.fast, nt: RATE.fast, bi: RATE.fast, dig: RATE.fast,
+  daguang: RATE.fast, xiaoguang: RATE.fast, shangtai: RATE.fast, tongguan: RATE.fast,
+  kou: RATE.slow,
 };
 
 /** 从 sound.ts 里抠出 VOICE_LINES 的 key 和台词 */

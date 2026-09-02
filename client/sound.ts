@@ -5,7 +5,9 @@
 type Name =
   | 'deal' | 'flip' | 'chip' | 'turn' | 'win' | 'lose' | 'msg' | 'tap'
   // 重构后新增的几下：比牌对撞、梭哈闷响、金币流、好牌提示、末段心跳
-  | 'clash' | 'shove' | 'coin' | 'ding' | 'heart';
+  | 'clash' | 'shove' | 'coin' | 'ding' | 'heart'
+  // 升级：亮主拍牌、收圈横扫、倍数戳记（DESIGN 3.6）
+  | 'slam' | 'sweep' | 'stamp';
 
 class Sound {
   ctx: AudioContext | null = null;
@@ -149,6 +151,20 @@ class Sound {
         return this.tone(247, 0.13, 0.28, 0.09, 'sine');
       case 'msg':
         return this.tone(1400, 0, 0.09, 0.07, 'sine');
+      case 'slam':
+        // 亮主：一张牌被拍到桌面上。木头的闷响 + 一点纸面擦过的高频
+        this.tone(140, 0, 0.18, 0.26, 'sine');
+        this.tone(72, 0.01, 0.3, 0.2, 'sine');
+        return this.swish(0, 0.1, 0.12, 5200, 1200);
+      case 'sweep':
+        // 收圈：四手牌被一把扫向赢家，噪声从高滑到低，尾巴上挑一颗铃
+        this.swish(0, 0.26, 0.15, 3800, 520);
+        return this.bell(1320, 0.2, 0.34, 0.06);
+      case 'stamp':
+        // 倍数戳记砸下：先一记闷雷，再一层金属亮边
+        this.tone(58, 0, 0.42, 0.34, 'sine');
+        this.tone(180, 0.02, 0.22, 0.16, 'sawtooth');
+        return this.swish(0.02, 0.24, 0.14, 2600, 260);
       case 'tap':
         return this.tone(1100, 0, 0.04, 0.05, 'sine');
     }
@@ -191,11 +207,29 @@ export const VOICE_LINES: Record<string, { text: string; rate?: number; pitch?: 
   shunzi: { text: '顺子', rate: 1.15, pitch: 1.05 },
   duizi: { text: '对子' },
   sanpai: { text: '散牌', rate: 1.0, pitch: 0.95 },
+
+  /* ---- 升级（DESIGN 3.6） ---- */
+  trump_s: { text: '黑桃主', rate: 1.25, pitch: 1.1 },
+  trump_h: { text: '红桃主', rate: 1.25, pitch: 1.1 },
+  trump_c: { text: '梅花主', rate: 1.25, pitch: 1.1 },
+  trump_d: { text: '方块主', rate: 1.25, pitch: 1.1 },
+  trump_pair: { text: '一对，主！', rate: 1.35, pitch: 1.25, volume: 1 },
+  nt: { text: '无主！', rate: 1.4, pitch: 1.35, volume: 1 },
+  kou: { text: '扣底', rate: 1.05 },
+  bi: { text: '毙！', rate: 1.45, pitch: 1.35, volume: 1 },
+  dig: { text: '抠底！', rate: 1.45, pitch: 1.4, volume: 1 },
+  levelup: { text: '升级！', rate: 1.3, pitch: 1.2 },
+  daguang: { text: '大光！', rate: 1.4, pitch: 1.4, volume: 1 },
+  xiaoguang: { text: '小光！', rate: 1.35, pitch: 1.3, volume: 1 },
+  shangtai: { text: '上台！', rate: 1.35, pitch: 1.3, volume: 1 },
+  tongguan: { text: '通关！', rate: 1.45, pitch: 1.45, volume: 1 },
 };
 
 export type VoiceKey =
   | 'call' | 'raise' | 'allin' | 'accept' | 'compare' | 'fold' | 'turn'
-  | 'baozi' | 'shunjin' | 'jinhua' | 'shunzi' | 'duizi' | 'sanpai';
+  | 'baozi' | 'shunjin' | 'jinhua' | 'shunzi' | 'duizi' | 'sanpai'
+  | 'trump_s' | 'trump_h' | 'trump_c' | 'trump_d' | 'trump_pair' | 'nt'
+  | 'kou' | 'bi' | 'dig' | 'levelup' | 'daguang' | 'xiaoguang' | 'shangtai' | 'tongguan';
 
 /** 牌型名 → 语音 key */
 export const HAND_VOICE: Record<string, VoiceKey> = {
