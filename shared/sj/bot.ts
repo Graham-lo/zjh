@@ -17,7 +17,9 @@ import {
   allPairs, allSingles, allTractors, cardsInGroup, maxOrder, parseShape, runsOf, unitPriority,
   type SjShape, type SjUnit,
 } from './units.ts';
-import { followRequirement, trickWinner, validateFollow } from './rules.ts';
+import {
+  followRequirement, legalDeclarations, trickWinner, validateFollow, type SjDeclOption,
+} from './rules.ts';
 import type { SjPlayer, SjRoomState } from './engine.ts';
 
 /** 提示按钮和 CLI 只需要这些公开字段，`SjPublicRoom` 天然满足 */
@@ -67,53 +69,69 @@ function partnerIsVoid(awareness: SjAwareness | undefined, group: SjGroup): bool
   return !!awareness && knownVoid(awareness, (awareness.mySeat + 2) % 4, group);
 }
 
-/* --------------------------------------------------------------- 亮主 */
+/* ---------------------------------------------------------- 亮主与抄底 */
 
 /**
- * 亮主（DESIGN 1.10）：有级牌且该花色（含级牌与王）≥ 7 张就亮单张；
- * 有对级牌且该色 ≥ 8 张亮对；对王且主牌总数 ≥ 9 时反无主。
+ * 亮主与抄底共用的取舍（DESIGN 1.10 / 1.4b）。
  *
- * **绝不为反而反**：别人已经亮了，只有换成我的花色后我的主更多时才反 ——
+ * 候选枚举与「能不能盖过当前的主」全部交给 `rules.ts` —— 机器人和客户端按钮
+ * 读的是同一份判据，不会出现「机器人亮得成、人点了报错」这种分叉。
+ *
+ * `slack` 是长度门槛的放宽张数：抄底除了换主还能换走 8 张底牌，收益更高，所以放宽 1 张。
+ *
+ * **绝不为反而反**：别人已经亮了，只有换成我的花色后我的主更多时才动手 ——
  * 这一条只用自己的手牌就能判，不需要偷看别人。
- *
- * 返回要亮的牌 id；不亮返回 null。
  */
-export function botDeclare(state: SjRoomState, me: SjPlayer): string[] | null {
-  if (state.phase !== 'dealing' && state.phase !== 'declaring') return null;
+function pickDeclaration(
+  state: SjRoomState, me: SjPlayer, mode: 'declare' | 'chao', slack: number,
+): string[] | null {
   const level = state.trump.level;
   const cur = state.trump;
   const hand = me.hand;
-  const trumpCountFor = (t: SjTrumpSuit) => hand.filter((c) => groupOf(c, { trump: t, level })=== 'T').length;
+  const trumpCountFor = (t: SjTrumpSuit) => hand.filter((c) => groupOf(c, { trump: t, level }) === 'T').length;
 
-  const options: { cards: SjCard[]; strength: number; trump: SjTrumpSuit }[] = [];
-  for (const suit of SJ_SUITS) {
-    const levels = hand.filter((c) => c.suit === suit && c.rank === level);
-    if (levels.length >= 2) options.push({ cards: levels.slice(0, 2), strength: 2, trump: suit });
-    if (levels.length >= 1) options.push({ cards: [levels[0]], strength: 1, trump: suit });
-  }
-  for (const [rank, strength] of [[15, 3], [16, 4]] as const) {
-    const jokers = hand.filter((c) => c.suit === 'J' && c.rank === rank);
-    if (jokers.length >= 2) options.push({ cards: jokers.slice(0, 2), strength, trump: 'NT' });
-  }
-
-  const strongEnough = (o: { trump: SjTrumpSuit; strength: number }) => {
+  const strongEnough = (o: SjDeclOption) => {
     const n = trumpCountFor(o.trump);
-    if (o.trump === 'NT') return n >= 9;
-    return o.strength >= 2 ? n >= 8 : n >= 7;
+    if (o.trump === 'NT') return n >= 9 - slack;
+    return o.kind === 'pair' ? n >= 8 - slack : n >= 7 - slack;
   };
 
-  let usable = options.filter((o) => o.strength > cur.strength && strongEnough(o));
-  if (cur.declarerId === me.id) {
-    // 不能用别的花色反自己；同花色的第二张级牌是「加固」，对王可以把自己反成无主
-    usable = usable.filter((o) => o.trump === cur.suit || o.trump === 'NT');
-  } else if (cur.suit) {
+  let usable = legalDeclarations(hand, level, cur, me.id, mode).filter(strongEnough);
+  if (cur.declarerId !== me.id && cur.suit) {
     const curCount = trumpCountFor(cur.suit);
     usable = usable.filter((o) => trumpCountFor(o.trump) > curCount);
   }
   if (!usable.length) return null;
 
-  usable.sort((a, b) => b.strength - a.strength || trumpCountFor(b.trump) - trumpCountFor(a.trump));
+  // 先比亮法的**形式**（对王 > 一对 > 单张），再比换过去之后我有多少张主。
+  // 不能直接拿 strength 排序：7 档表把花色也编进了 strength，
+  // 那会让「♠ 的一对」压过「♥ 的一对」，可决定好不好的是主牌张数，不是花色。
+  const form = (o: SjDeclOption) => (o.trump === 'NT' ? 2 : o.kind === 'pair' ? 1 : 0);
+  usable.sort((a, b) =>
+    form(b) - form(a) || trumpCountFor(b.trump) - trumpCountFor(a.trump) || b.strength - a.strength);
   return usable[0].cards.map((c) => c.id);
+}
+
+/**
+ * 亮主（DESIGN 1.10）：有级牌且该花色（含级牌与王）≥ 7 张就亮单张；
+ * 有对级牌且该色 ≥ 8 张亮对；对王且主牌总数 ≥ 9 时反无主。
+ *
+ * 返回要亮的牌 id；不亮返回 null。
+ */
+export function botDeclare(state: SjRoomState, me: SjPlayer): string[] | null {
+  if (state.phase !== 'dealing' && state.phase !== 'declaring') return null;
+  return pickDeclaration(state, me, 'declare', 0);
+}
+
+/**
+ * 抄底（DESIGN 1.4b）：判据和亮主同源，但门槛放宽一张 ——
+ * 抄成了不只是把主换成自己的花色，还能把 8 张底牌拿回来重扣，值得更积极一点。
+ *
+ * 返回要亮的牌 id；不抄返回 null。
+ */
+export function botChao(state: SjRoomState, me: SjPlayer): string[] | null {
+  if (state.phase !== 'chao') return null;
+  return pickDeclaration(state, me, 'chao', 1);
 }
 
 /* --------------------------------------------------------------- 扣底 */

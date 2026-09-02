@@ -1,6 +1,7 @@
 import type { SjCard } from '../../shared/sj/cards.ts';
 import type { SjPublicRoom } from '../../shared/sj/engine.ts';
 import { useCountdown } from '../components/TurnRing.tsx';
+import { strengthNote } from './SjFx.tsx';
 import { declareOptions, suitName, trumpGlyph } from './util.ts';
 
 /**
@@ -62,8 +63,9 @@ export function DeclareBar({
         {declarer
           ? iAmDeclarer
             ? `你亮了 ${trumpGlyph(room.trump.suit)}，别人要反必须更强`
-            : `${declarer.name} 亮了 ${trumpGlyph(room.trump.suit)}${room.trump.strength >= 2 ? '（一对）' : '（单张）'}，反主必须严格更强`
+            : `${declarer.name} 亮了 ${trumpGlyph(room.trump.suit)}（${strengthNote(room.trump.strength)}），反主必须严格更强`
           : '无人亮主则翻底牌定主'}
+        {' · 扣完底还要挨个问一轮抄底'}
       </span>
     </div>
   );

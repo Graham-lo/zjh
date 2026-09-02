@@ -14,21 +14,23 @@ import {
 } from '../game.ts';
 import { SJ_VARIANTS, type SjKind, ladderOf } from '../games.ts';
 import {
-  cardFromId, cardsLabel, createSjDeck, groupOf, levelLabel, pointCards, shuffleSj, sortSjHand,
-  sumPoints, trumpLabel,
+  RANK_BIG_JOKER, cardFromId, cardsLabel, createSjDeck, groupOf, levelLabel, pointCards, shuffleSj,
+  sortSjHand, sumPoints, trumpLabel,
   type SjCard, type SjCtx, type SjGroup, type SjRng, type SjTrumpSuit,
 } from './cards.ts';
 import { cardsInGroup, parseShape, type SjShape } from './units.ts';
 import {
-  digMultiplierForLead, isMatchWon, isTrumping, levelUp, nextDealerSeat, outcomeFor, shapeLabel,
-  trickPoints, trickWinner, validateFollow, validateLead, validateThrow,
+  SJ_DECL_TIER, checkOverride, declStrength, digMultiplierForLead, isMatchWon, isTrumping, levelUp,
+  nextDealerSeat, outcomeFor, shapeLabel, trickPoints, trickWinner, validateFollow, validateLead,
+  validateThrow,
   type SjOutcome,
 } from './rules.ts';
 import { botKou, botPlay } from './bot.ts';
 
 /* ------------------------------------------------------------------ 类型 */
 
-export type SjPhase = 'lobby' | 'dealing' | 'declaring' | 'kou' | 'playing' | 'hand_end' | 'match_end';
+export type SjPhase =
+  | 'lobby' | 'dealing' | 'declaring' | 'kou' | 'chao' | 'playing' | 'hand_end' | 'match_end';
 
 /** 从炸金花的 PlayerState 里挑出与玩法无关的通用字段，两个游戏共用同一套语义 */
 type SjPlayerBase = Pick<
@@ -48,6 +50,8 @@ export interface SjSettings {
   turnSeconds: number;
   /** 扣底时限（秒） */
   kouSeconds: number;
+  /** 每个人回答「抄不抄底」的时限（秒）。问三家一轮，所以给得比扣底短得多 */
+  chaoSeconds: number;
   autoContinue: boolean;
 }
 
@@ -56,7 +60,11 @@ export interface SjTrumpState {
   /** 本局级牌点数 = 庄家所在队的级别（DESIGN 1.2） */
   level: number;
   declarerId: string | null;
-  /** 1 单张级牌 / 2 一对级牌 / 3 一对小王 / 4 一对大王；翻底定主为 0 */
+  /**
+   * 反主级别，七档（DESIGN 1.4）：0 翻底定主 / 1 单张级牌（任意花色，彼此相等）/
+   * 2–5 一对级牌（♦♣♥♠ 依次变强）/ 6 一对小王 / 7 一对大王。
+   * 档位表在 `rules.ts` 的 `SJ_DECL_TIER`，这里不重复魔法数字。
+   */
   strength: number;
   /** 亮出的牌 id，只在扣底结束前有值 */
   cardIds: string[];
@@ -120,7 +128,16 @@ export interface SjRoomState {
   dealStartedAt: number | null;
   declareEndsAt: number | null;
   turnDeadline: number | null;
-  /** 底牌。扣底期间在庄家手里（这里为空），扣完是庄家扣下的 8 张 */
+  /**
+   * 当前该扣底的人（DESIGN 1.4b）。进 `kou` 时设置：庄家，或者刚抄成底的那个人。
+   * 抄底之后扣底的**不一定是庄家**，所以扣底的一切判断都看它，不看 `dealerSeat`。
+   */
+  kouSeat: number;
+  /** 抄底询问里当前被问到的座位；不在 `chao` 阶段就是 null */
+  chaoSeat: number | null;
+  /** 这一轮询问里有人抄成过。决定问完一圈之后是再开一轮还是开打（DESIGN 1.4b） */
+  chaoDirty: boolean;
+  /** 底牌。扣底期间在扣底者手里（这里为空），扣完是他扣下的 8 张 */
   bottom: SjCard[];
   bottomRevealed: boolean;
   /**
@@ -167,6 +184,7 @@ export type SjEvent =
   | { k: 'sj_deal'; handNo: number; dealerSeat: number }
   | { k: 'sj_declare'; playerId: string; trump: SjTrumpSuit; strength: number; cardIds: string[]; reinforce: boolean }
   | { k: 'sj_flip'; card: SjCard; trump: SjTrumpSuit }
+  | { k: 'sj_chao'; playerId: string; trump: SjTrumpSuit; strength: number; cardIds: string[] }
   | { k: 'sj_kou_done'; playerId: string }
   | { k: 'sj_play'; playerId: string; cardIds: string[]; unit: 'single' | 'pair' | 'tractor' | 'throw'; trumped: boolean }
   | { k: 'sj_throw_fail'; playerId: string; forcedIds: string[]; penalty: number }
@@ -180,7 +198,9 @@ export type SjEvent =
 
 /* --------------------------------------------------------------- 常量 */
 
-export const SJ_DEFAULT_SETTINGS: SjSettings = { turnSeconds: 30, kouSeconds: 45, autoContinue: true };
+export const SJ_DEFAULT_SETTINGS: SjSettings = {
+  turnSeconds: 30, kouSeconds: 45, chaoSeconds: 12, autoContinue: true,
+};
 
 /** 发牌动画 25 张 × 45ms + 余量（DESIGN 2.5） */
 export const SJ_DEAL_MS = 4600;
@@ -314,6 +334,9 @@ export function createSjRoom(kind: SjKind, code: string, host: SjPlayer): SjRoom
     dealStartedAt: null,
     declareEndsAt: null,
     turnDeadline: null,
+    kouSeat: host.seat,
+    chaoSeat: null,
+    chaoDirty: false,
     bottom: [],
     bottomRevealed: false,
     flipped: null,
@@ -352,6 +375,9 @@ export function dealSjHand(state: SjRoomState, opts?: SjEngineOpts) {
   state.dealStartedAt = now_(opts);
   state.declareEndsAt = null;
   state.turnDeadline = null;
+  state.kouSeat = state.dealerSeat;
+  state.chaoSeat = null;
+  state.chaoDirty = false;
   state.bottom = deck.slice(100);
   state.bottomRevealed = false;
   state.flipped = null;
@@ -396,23 +422,44 @@ interface Declaration {
   cards: SjCard[];
 }
 
-/** 把一组牌读成一次亮主。读不出来就是不合法的亮主形式（DESIGN 1.4 declaring） */
+const DECL_FORM_ERROR = '亮主只能是：单张级牌、一对同花色级牌、一对小王、一对大王';
+
+/**
+ * 把一组牌读成一次亮主。读不出来就是不合法的亮主形式（DESIGN 1.4 declaring）。
+ * 强度一律走 `rules.ts` 的 `declStrength`，这里不写档位数字。
+ */
 export function readDeclaration(cards: SjCard[], level: number): Declaration | null {
   if (cards.length === 1) {
     const c = cards[0];
-    if (c.suit !== 'J' && c.rank === level) return { trump: c.suit, strength: 1, cards };
+    if (c.suit !== 'J' && c.rank === level) return { trump: c.suit, strength: declStrength('single'), cards };
     return null;
   }
   if (cards.length !== 2) return null;
   const [a, b] = cards;
   if (a.suit === 'J' && b.suit === 'J' && a.rank === b.rank) {
-    // 一对小王 → 无主（3）；一对大王 → 无主（4）
-    return { trump: 'NT', strength: a.rank === 16 ? 4 : 3, cards };
+    // 一对小王 / 一对大王都定无主，只是档位不同
+    const kind = a.rank === RANK_BIG_JOKER ? 'joker_b' : 'joker_s';
+    return { trump: 'NT', strength: declStrength(kind), cards };
   }
   if (a.suit !== 'J' && a.suit === b.suit && a.rank === level && b.rank === level) {
-    return { trump: a.suit, strength: 2, cards };
+    return { trump: a.suit, strength: declStrength('pair', a.suit), cards };
   }
   return null;
+}
+
+/**
+ * 把「亮成了」这件事落到状态上：旧亮主者的明牌收回，新的明牌摆到座位前。
+ * 亮主、反主、抄底三条路径共用，免得三处各写一遍还各漏一点。
+ */
+function applyDeclaration(state: SjRoomState, actor: SjPlayer, decl: Declaration) {
+  const t = state.trump;
+  const previous = t.declarerId && t.declarerId !== actor.id ? state.players.find((p) => p.id === t.declarerId) : null;
+  if (previous) previous.declaredIds = [];
+  state.trump = {
+    suit: decl.trump, level: t.level, declarerId: actor.id, strength: decl.strength,
+    cardIds: decl.cards.map((c) => c.id),
+  };
+  actor.declaredIds = state.trump.cardIds;
 }
 
 function doDeclare(state: SjRoomState, actor: SjPlayer, cardIds: string[], opts?: SjEngineOpts) {
@@ -422,34 +469,23 @@ function doDeclare(state: SjRoomState, actor: SjPlayer, cardIds: string[], opts?
   const t = state.trump;
   const isCurrentDeclarer = t.declarerId === actor.id;
 
-  // 加固：当前亮主者补出**同花色**的第二张级牌，把强度 1 抬到 2（DESIGN 1.4）。
+  // 加固：当前亮主者补出**同花色**的第二张级牌，把单张（1）抬到该花色的对子档（DESIGN 1.4）。
   // 只报新的那一张也算，前端少一次拼装。
-  let reinforce = false;
   if (isCurrentDeclarer && t.strength === 1 && cards.length === 1) {
     const c = cards[0];
     if (c.suit !== 'J' && c.rank === level && c.suit === t.suit) {
       cards = [...t.cardIds.map((id) => actor.hand.find((h) => h.id === id)).filter((x): x is SjCard => !!x), c];
-      reinforce = true;
     }
   }
 
   const decl = readDeclaration(cards, level);
-  if (!decl) throw new GameError('亮主只能是：单张级牌、一对同花色级牌、一对小王、一对大王');
-  if (decl.strength <= t.strength) throw new GameError('反主必须比当前的亮主更强');
-  if (isCurrentDeclarer && !reinforce && decl.trump !== t.suit && decl.trump !== 'NT') {
-    // 可以用对王把自己的亮主反成无主，但不能用别的花色反自己（DESIGN 1.4）
-    throw new GameError('不能用别的花色反自己的主');
-  }
-  if (decl.strength === 2 && t.strength === 1 && isCurrentDeclarer) reinforce = true;
+  if (!decl) throw new GameError(DECL_FORM_ERROR);
+  const check = checkOverride(decl, t, actor.id, 'declare');
+  if (!check.ok) throw new GameError(check.reason);
+  // 加固就是「自己把自己的单张抬成同花色的一对」，判完才好认
+  const reinforce = isCurrentDeclarer && t.strength === 1 && decl.trump === t.suit && decl.cards.length === 2;
 
-  const previous = t.declarerId && t.declarerId !== actor.id ? state.players.find((p) => p.id === t.declarerId) : null;
-  if (previous) previous.declaredIds = [];
-
-  state.trump = {
-    suit: decl.trump, level, declarerId: actor.id, strength: decl.strength,
-    cardIds: decl.cards.map((c) => c.id),
-  };
-  actor.declaredIds = state.trump.cardIds;
+  applyDeclaration(state, actor, decl);
   actor.lastAction = reinforce ? '加固' : '亮主';
   state.passed = state.passed.filter((id) => id !== actor.id);
   // 每出现一次新的有效亮主/反主，窗口延长 2s（DESIGN 1.4）
@@ -492,37 +528,151 @@ export function closeDeclaring(state: SjRoomState, opts?: SjEngineOpts) {
     sjLog(state, `${declarer.name} 亮主，本局坐庄`, now_(opts));
   }
 
-  // 底牌交给庄家：扣底期间它就在庄家的 33 张里，state.bottom 先清空避免同一张牌存两份
-  const dealer = sjPlayerAtSeat(state, state.dealerSeat);
-  dealer.hand = dealer.hand.concat(state.bottom);
-  state.bottom = [];
-  state.phase = 'kou';
+  enterKou(state, state.dealerSeat, opts);
   state.declareEndsAt = null;
-  state.turnSeat = state.dealerSeat;
-  state.turnDeadline = now_(opts) + state.settings.kouSeconds * 1000;
-  sortAllHands(state);
-  sjLog(state, `${dealer.name} 拿到底牌，开始扣底`, now_(opts));
 }
 
 /* --------------------------------------------------------------- 扣底 */
 
+/**
+ * 把 8 张底牌交给 `seat` 并开始扣底（DESIGN 1.4 / 1.4b）。
+ *
+ * 底牌进他的 33 张手牌里，`state.bottom` 先清空 —— 同一张牌绝不同时存两份，
+ * 否则 sanitize 那边一不小心就会把它顺出去。庄家开局扣底和抄底者重新扣底走的是同一条路。
+ */
+function enterKou(state: SjRoomState, seat: number, opts?: SjEngineOpts) {
+  const player = sjPlayerAtSeat(state, seat);
+  player.hand = player.hand.concat(state.bottom);
+  state.bottom = [];
+  state.phase = 'kou';
+  state.kouSeat = seat;
+  state.chaoSeat = null;
+  state.turnSeat = seat;
+  state.turnDeadline = now_(opts) + state.settings.kouSeconds * 1000;
+  sortAllHands(state);
+  sjLog(state, `${player.name} 拿到底牌，开始扣底`, now_(opts));
+}
+
 function doKou(state: SjRoomState, actor: SjPlayer, cardIds: string[], opts?: SjEngineOpts) {
   if (state.phase !== 'kou') throw new GameError('现在不是扣底阶段');
-  if (actor.seat !== state.dealerSeat) throw new GameError('只有庄家能扣底');
+  if (actor.seat !== state.kouSeat) {
+    // 抄底之后扣底的不是庄家，报错话术得跟着当前局面走，别让人对着「只有庄家」发懵
+    throw new GameError(state.kouSeat === state.dealerSeat ? '只有庄家能扣底' : '只有抄底的人能扣底');
+  }
   if (cardIds.length !== 8) throw new GameError('必须扣 8 张牌');
   const cards = takeFromHand(actor, cardIds);
   removeFromHand(actor, cards);
   state.bottom = cards;
-  enterPlaying(state, opts);
+
+  /*
+   * 扣下去的牌里如果有自己亮出来的那张明牌，就得把它从桌面上摘掉。
+   * `trump.cardIds` / `declaredIds` 是**公开**的，而底牌是扣着的 ——
+   * 留着那个 id 等于把底牌里的一张告诉全场（DESIGN 2.4 的泄密边界）。
+   * 抄底之后这条路会天天走到：抄底者永远既是亮主的人、又是扣底的人。
+   */
+  const buried = new Set(cards.map((c) => c.id));
+  if (actor.declaredIds.some((id) => buried.has(id))) {
+    actor.declaredIds = actor.declaredIds.filter((id) => !buried.has(id));
+    state.trump = { ...state.trump, cardIds: state.trump.cardIds.filter((id) => !buried.has(id)) };
+  }
+
+  // 庄家第一次扣完 → 开第一轮询问；抄底者扣完 → 接着问本轮剩下的人（DESIGN 1.4b）
+  if (state.chaoDirty) advanceChao(state, actor.seat, opts);
+  else startChaoRound(state, opts);
 }
 
-/** 扣底超时 → 机器人策略代扣（DESIGN 1.4 / 2.5） */
+/** 扣底超时 → 机器人策略代扣（DESIGN 1.4 / 2.5）。代扣的是 `kouSeat`，不一定是庄家 */
 export function timeoutKou(state: SjRoomState, opts?: SjEngineOpts) {
   if (state.phase !== 'kou') return;
-  const dealer = sjPlayerAtSeat(state, state.dealerSeat);
-  const cardIds = botKou(state, dealer, opts?.rng);
-  sjLog(state, `${dealer.name} 由电脑代扣底牌`, now_(opts));
-  doKou(state, dealer, cardIds, opts);
+  const player = sjPlayerAtSeat(state, state.kouSeat);
+  const cardIds = botKou(state, player, opts?.rng);
+  sjLog(state, `${player.name} 由电脑代扣底牌`, now_(opts));
+  doKou(state, player, cardIds, opts);
+}
+
+/* --------------------------------------------------------------- 抄底 */
+
+/**
+ * 顺时针的下一个**不是庄家**的座位。
+ *
+ * 庄家刚扣完底，本轮不再问他 —— 他已经拿过一次底牌了（DESIGN 1.4b）。
+ * 首局里抄底者会变成庄家，于是「跳过庄家」自动等价于「跳过刚扣完底的人」。
+ */
+function nextChaoSeat(state: SjRoomState, from: number): number {
+  for (let i = 1; i <= SJ_SEATS; i++) {
+    const seat = (from + i) % SJ_SEATS;
+    if (seat !== state.dealerSeat) return seat;
+  }
+  return (from + 1) % SJ_SEATS; // 到不了：四个座位里只有一个庄家
+}
+
+/** 开一轮抄底询问：固定从庄家下家问起（DESIGN 1.4b） */
+function startChaoRound(state: SjRoomState, opts?: SjEngineOpts) {
+  const seat = (state.dealerSeat + 1) % SJ_SEATS;
+  state.phase = 'chao';
+  state.chaoDirty = false;
+  state.chaoSeat = seat;
+  state.turnSeat = seat;
+  state.turnDeadline = now_(opts) + state.settings.chaoSeconds * 1000;
+}
+
+/**
+ * 问完一个人之后往下走（DESIGN 1.4b）。
+ *
+ * 一轮就是「庄家下家 → 顺时针三家」，问回起点就算一轮问完：
+ * 这一轮有人抄成过就再开一轮，一个人都没抄才开打。
+ * 每抄成一次强度都严格变大、上限是 7，所以一定收敛，不会一直问下去。
+ */
+function advanceChao(state: SjRoomState, from: number, opts?: SjEngineOpts) {
+  const next = nextChaoSeat(state, from);
+  if (next === (state.dealerSeat + 1) % SJ_SEATS) {
+    if (state.chaoDirty) return startChaoRound(state, opts);
+    return enterPlaying(state, opts);
+  }
+  state.phase = 'chao';
+  state.chaoSeat = next;
+  state.turnSeat = next;
+  state.turnDeadline = now_(opts) + state.settings.chaoSeconds * 1000;
+}
+
+/**
+ * 抄底（DESIGN 1.4b）：亮出比当前主更强的一手，**视同反主**，
+ * 然后把 8 张底牌拿回来重新扣。抄底不限次数。
+ */
+function doChao(state: SjRoomState, actor: SjPlayer, cardIds: string[], opts?: SjEngineOpts) {
+  if (state.phase !== 'chao') throw new GameError('现在不是抄底阶段');
+  if (actor.seat !== state.chaoSeat) throw new GameError('还没轮到你抄底');
+  const cards = takeFromHand(actor, cardIds);
+  const decl = readDeclaration(cards, state.trump.level);
+  if (!decl) throw new GameError(DECL_FORM_ERROR);
+  const check = checkOverride(decl, state.trump, actor.id, 'chao');
+  if (!check.ok) throw new GameError(check.reason);
+
+  applyDeclaration(state, actor, decl);
+  actor.lastAction = '抄底';
+  // 首局的庄家就是「亮主有效的那个人」（DESIGN 1.4），抄底视同反主，所以首局抄底者坐庄。
+  // 这时两队级别还相同，换庄不会改变本局级牌。第二局起庄家按 1.8 轮转，抄底不换庄。
+  if (state.handNo === 1) state.dealerSeat = actor.seat;
+  state.chaoDirty = true;
+  sjLog(
+    state,
+    `${actor.name} 抄底，亮 ${cardsLabel(decl.cards)}，主变${trumpLabel(decl.trump)}`,
+    now_(opts),
+  );
+  enterKou(state, actor.seat, opts);
+}
+
+function doPassChao(state: SjRoomState, actor: SjPlayer, opts?: SjEngineOpts) {
+  if (state.phase !== 'chao') throw new GameError('现在不是抄底阶段');
+  if (actor.seat !== state.chaoSeat) throw new GameError('还没轮到你');
+  actor.lastAction = '不抄';
+  advanceChao(state, actor.seat, opts);
+}
+
+/** 抄底询问超时 / 掉线 → 自动「不抄」（DESIGN 1.4b） */
+export function timeoutChao(state: SjRoomState, opts?: SjEngineOpts) {
+  if (state.phase !== 'chao' || state.chaoSeat == null) return;
+  doPassChao(state, sjPlayerAtSeat(state, state.chaoSeat), opts);
 }
 
 function enterPlaying(state: SjRoomState, opts?: SjEngineOpts) {
@@ -530,10 +680,12 @@ function enterPlaying(state: SjRoomState, opts?: SjEngineOpts) {
   state.trickNo = 1;
   state.leaderSeat = state.dealerSeat;
   state.turnSeat = state.dealerSeat;
+  state.chaoSeat = null;
+  state.chaoDirty = false;
   state.trick = [];
   state.turnDeadline = now_(opts) + state.settings.turnSeconds * 1000;
-  // 亮主的明牌到扣底结束为止（DESIGN 1.4）。这也是安全边界：
-  // 再往后 trump.cardIds 就会指向庄家/亮主者手里的暗牌，留着等于持续泄密。
+  // 亮主/抄底的明牌摆到抄底问完为止（DESIGN 1.4 / 1.4b）。这也是安全边界：
+  // 再往后 trump.cardIds 就会指向某个人手里的暗牌，留着等于持续泄密。
   for (const p of state.players) p.declaredIds = [];
   state.trump = { ...state.trump, cardIds: [] };
   state.flipped = null;
@@ -717,17 +869,22 @@ export type SjCommand =
   | { type: 'declare'; cardIds: string[] }
   | { type: 'pass' }
   | { type: 'kou'; cardIds: string[] }
+  | { type: 'chao'; cardIds: string[] }
+  | { type: 'pass_chao' }
   | { type: 'play'; cardIds: string[] }
   | { type: 'new_hand' }
   | { type: 'new_match' }
-  | { type: 'settings'; turnSeconds?: number; kouSeconds?: number; autoContinue?: boolean }
+  | {
+    type: 'settings';
+    turnSeconds?: number; kouSeconds?: number; chaoSeconds?: number; autoContinue?: boolean;
+  }
   | { type: 'chat'; text: string }
   | { type: 'emote'; id: string }
   | { type: 'leave' };
 
 export const SJ_COMMAND_TYPES = new Set<SjCommand['type']>([
   'ready', 'rename', 'seat', 'start', 'add_bot', 'remove_player', 'declare', 'pass',
-  'kou', 'play', 'new_hand', 'new_match', 'settings', 'chat', 'emote', 'leave',
+  'kou', 'chao', 'pass_chao', 'play', 'new_hand', 'new_match', 'settings', 'chat', 'emote', 'leave',
 ]);
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(v)));
@@ -804,6 +961,8 @@ export function applySjCommand(
     case 'declare': return doDeclare(state, actor, command.cardIds, opts);
     case 'pass': return doPass(state, actor, opts);
     case 'kou': return doKou(state, actor, command.cardIds, opts);
+    case 'chao': return doChao(state, actor, command.cardIds, opts);
+    case 'pass_chao': return doPassChao(state, actor, opts);
     case 'play': return doPlay(state, actor, command.cardIds, opts);
     case 'new_hand': {
       requireHost(state, actorId);
@@ -821,6 +980,9 @@ export function applySjCommand(
       state.phase = 'lobby';
       state.turnSeat = null;
       state.turnDeadline = null;
+      state.kouSeat = state.dealerSeat;
+      state.chaoSeat = null;
+      state.chaoDirty = false;
       state.trump = { suit: null, level: ladder[0], declarerId: null, strength: 0, cardIds: [] };
       for (const p of state.players) {
         p.hand = [];
@@ -841,6 +1003,11 @@ export function applySjCommand(
       if (typeof command.kouSeconds === 'number') {
         state.settings.kouSeconds = clamp(command.kouSeconds, 15, 180);
         changed.push(`扣底时限 ${state.settings.kouSeconds} 秒`);
+      }
+      if (typeof command.chaoSeconds === 'number') {
+        // 一轮要问三家，所以上限压得比扣底低得多 —— 抄底是个「要不要」的快问快答
+        state.settings.chaoSeconds = clamp(command.chaoSeconds, 5, 60);
+        changed.push(`抄底时限 ${state.settings.chaoSeconds} 秒`);
       }
       if (typeof command.autoContinue === 'boolean') {
         state.settings.autoContinue = command.autoContinue;
@@ -916,13 +1083,14 @@ export type SjPublicRoom = Omit<SjRoomState, 'players' | 'bottom'> & {
 /**
  * 给某个玩家看的房间视图（DESIGN 2.4）。
  *
- * 别人的手牌只给张数；底牌只在扣底阶段给庄家、`bottomRevealed` 之后给所有人。
- * 已经打出的牌、亮主的明牌、翻底那张、分牌堆是公开信息 —— 前三者本来就摆在桌面上，
+ * 别人的手牌只给张数；底牌只在扣底阶段给**正在扣底的那个人**、`bottomRevealed` 之后给所有人。
+ * 抄底询问阶段谁都看不到底牌 —— 那时候它是扣着的，看得到就等于让人照着底牌决定抄不抄。
+ * 已经打出的牌、亮主/抄底的明牌、翻底那张、分牌堆是公开信息 —— 前三者本来就摆在桌面上，
  * 而且 id 自带牌面，客户端不需要额外的下发通道。
  */
 export function sanitizeSjRoom(state: SjRoomState, viewerId: string): SjPublicRoom {
-  const isDealer = state.players.find((p) => p.id === viewerId)?.seat === state.dealerSeat;
-  const showBottom = state.bottomRevealed || (state.phase === 'kou' && isDealer);
+  const isKouSeat = state.players.find((p) => p.id === viewerId)?.seat === state.kouSeat;
+  const showBottom = state.bottomRevealed || (state.phase === 'kou' && isKouSeat);
   return {
     ...state,
     viewerId,
@@ -944,6 +1112,16 @@ export function sanitizeSjRoom(state: SjRoomState, viewerId: string): SjPublicRo
  */
 export function migrateSjRoom(state: SjRoomState): SjRoomState {
   const ladder = ladderOf(state.kind ?? 'sj_510k');
+  /*
+   * 反主级别从 4 档换成 7 档之后，`trump.strength` 的语义变了（DESIGN 1.4）：
+   * 旧表 1 单张 / 2 一对级牌（不分花色）/ 3 一对小王 / 4 一对大王；
+   * 新表 1 单张 / 2–5 一对级牌（♦♣♥♠）/ 6 一对小王 / 7 一对大王。
+   *
+   * 判据用 `kouSeat` —— 它和这张新表是同一批加进来的，老快照里一定没有，
+   * 所以「没有 kouSeat」就等价于「strength 还是旧语义」。换算只在这里做一次，
+   * 运行时不留任何兼容分支。
+   */
+  const legacyStrength = typeof state.kouSeat !== 'number';
   state.kind ??= 'sj_510k';
   state.settings = { ...SJ_DEFAULT_SETTINGS, ...(state.settings ?? {}) };
   state.log ??= [];
@@ -955,10 +1133,24 @@ export function migrateSjRoom(state: SjRoomState): SjRoomState {
   state.dealerSeat ??= 0;
   state.trump ??= { suit: null, level: ladder[0], declarerId: null, strength: 0, cardIds: [] };
   state.trump.cardIds ??= [];
+  state.trump.strength ??= 0;
+  if (legacyStrength) {
+    const old = state.trump.strength;
+    const suit = state.trump.suit;
+    state.trump.strength =
+      old === 4 ? SJ_DECL_TIER.joker_b
+        : old === 3 ? SJ_DECL_TIER.joker_s
+          : old === 2 && suit && suit !== 'NT' ? SJ_DECL_TIER[suit]
+            : old; // 0（翻底定主）和 1（单张）两档在新表里没变
+  }
   state.passed ??= [];
   state.dealStartedAt ??= null;
   state.declareEndsAt ??= null;
   state.turnDeadline ??= null;
+  // 老快照没有抄底这回事：正在扣底的一定是庄家，也不可能停在询问里
+  state.kouSeat ??= state.dealerSeat;
+  state.chaoSeat ??= null;
+  state.chaoDirty ??= false;
   state.bottom ??= [];
   state.bottomRevealed ??= false;
   state.flipped ??= null;
@@ -1019,8 +1211,15 @@ export function deriveSjEvents(
   if (!before.flipped && after.flipped && after.trump.suit) {
     events.push({ k: 'sj_flip', card: after.flipped, trump: after.trump.suit });
   }
+  if (cmd?.type === 'chao' && after.trump.suit && before.trump.declarerId !== after.trump.declarerId) {
+    events.push({
+      k: 'sj_chao', playerId: actorId, trump: after.trump.suit,
+      strength: after.trump.strength, cardIds: [...after.trump.cardIds],
+    });
+  }
   if (before.phase === 'kou' && after.phase !== 'kou') {
-    events.push({ k: 'sj_kou_done', playerId: nameOf(after.dealerSeat) });
+    // 扣完底的是 kouSeat 那个人 —— 抄底之后他不一定是庄家
+    events.push({ k: 'sj_kou_done', playerId: nameOf(before.kouSeat) });
   }
   if (cmd?.type === 'play') {
     const beforeHand = new Set(before.players.find((p) => p.id === actorId)?.hand.map((c) => c.id) ?? []);

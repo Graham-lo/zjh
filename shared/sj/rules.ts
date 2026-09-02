@@ -1,17 +1,17 @@
 /**
- * 升级的规则判定：首出、跟牌、甩牌、定圈、抠底、升级表、庄家轮转。
+ * 升级的规则判定：亮主/反主/抄底的级别、首出、跟牌、甩牌、定圈、抠底、升级表、庄家轮转。
  *
  * 除了甩牌校验（要看别人的手牌，只能在服务端跑），其余全部只用**自己的手牌和公开信息**，
  * 客户端拿同一份代码就能把「出牌」按钮点亮或者灰掉并说明原因（DESIGN 1.6 末段）。
  * 客户端和服务端各写一份判定，迟早会出现「显示能出、点了报错」，所以这里一份到底。
  *
- * 规范出处：docs/shengji/DESIGN.md 第 1.5–1.8 节。
+ * 规范出处：docs/shengji/DESIGN.md 第 1.4 / 1.4b / 1.5–1.8 节。
  */
 
 import { SJ_VARIANTS, type SjKind } from '../games.ts';
 import {
-  SUIT_NAME, cardOrder, groupOf, sumPoints,
-  type SjCard, type SjCtx, type SjGroup,
+  SJ_SUITS, SUIT_NAME, cardOrder, groupOf, sumPoints,
+  type SjCard, type SjCtx, type SjGroup, type SjPlainSuit, type SjTrumpSuit,
 } from './cards.ts';
 import {
   cardsInGroup, parseShape, primaryUnit, runsOf, unitPriority,
@@ -25,6 +25,117 @@ const fail = (reason: string): SjCheck => ({ ok: false, reason });
 
 export function groupLabel(group: SjGroup): string {
   return group === 'T' ? '主牌' : SUIT_NAME[group];
+}
+
+/* --------------------------------------------------- 反主级别（DESIGN 1.4） */
+
+/** 一次亮法的形式。单张与一对级牌都要带花色，对王不带 */
+export type SjDeclKind = 'single' | 'pair' | 'joker_s' | 'joker_b';
+
+/**
+ * 反主级别表（DESIGN 1.4）：**对级牌的花色大小 方块 < 梅花 < 红桃 < 黑桃 < 对小王 < 对大王**。
+ *
+ * 之所以是一张表而不是散在各处的魔法数字：这七档同时被服务端的
+ * `readDeclaration`、机器人的候选枚举、客户端的亮主/抄底按钮读，
+ * 三处只要有一处对不上，就会出现「按钮点得亮、服务端不收」。
+ *
+ * `NT` 这一格永远查不到 —— 无主只能由对王亮出来，走的是 `joker_s`/`joker_b` 两格；
+ * 给它一个 0 只是为了让这张表在类型上是全的。
+ */
+export const SJ_DECL_TIER: Record<SjTrumpSuit | 'joker_s' | 'joker_b', number> = {
+  NT: 0,
+  D: 2,
+  C: 3,
+  H: 4,
+  S: 5,
+  joker_s: 6,
+  joker_b: 7,
+};
+
+/**
+ * 一次亮法的强度档位。
+ *
+ * **单张之间不分花色**，一律是 1：QQ 的「抢亮」是先亮者得，官方只对「对子」列了花色序，
+ * 所以 ♠5 单张反不掉 ♦5 单张。将来若要让单张也分花色，只需要改这一处。
+ */
+export function declStrength(kind: SjDeclKind, suit: SjPlainSuit | null = null): number {
+  if (kind === 'joker_s' || kind === 'joker_b') return SJ_DECL_TIER[kind];
+  if (kind === 'single') return 1;
+  return suit ? SJ_DECL_TIER[suit] : 0;
+}
+
+/** 当前主的公开状态。亮主窗口与抄底询问共用同一套判据，所以只取这三个字段 */
+export interface SjDeclState {
+  suit: SjTrumpSuit | null;
+  strength: number;
+  declarerId: string | null;
+}
+
+export interface SjDeclOption {
+  kind: SjDeclKind;
+  /** 亮成之后的主 */
+  trump: SjTrumpSuit;
+  strength: number;
+  cards: SjCard[];
+}
+
+/**
+ * 手里**做得到**的全部亮法，按档位升序（DESIGN 1.4）。
+ *
+ * 只看手牌，不看当前的主 —— 「够不够强」由 `checkOverride` 单独判。
+ * 客户端的亮主条/抄底条和机器人共用这一份枚举，不各写各的。
+ */
+export function declarationOptions(hand: SjCard[], level: number): SjDeclOption[] {
+  const out: SjDeclOption[] = [];
+  for (const suit of SJ_SUITS) {
+    const levels = hand.filter((c) => c.suit === suit && c.rank === level);
+    if (levels.length >= 1) {
+      out.push({ kind: 'single', trump: suit, strength: declStrength('single'), cards: [levels[0]] });
+    }
+    if (levels.length >= 2) {
+      out.push({ kind: 'pair', trump: suit, strength: declStrength('pair', suit), cards: levels.slice(0, 2) });
+    }
+  }
+  for (const [rank, kind] of [[15, 'joker_s'], [16, 'joker_b']] as const) {
+    const jokers = hand.filter((c) => c.suit === 'J' && c.rank === rank);
+    if (jokers.length >= 2) {
+      out.push({ kind, trump: 'NT', strength: declStrength(kind), cards: jokers.slice(0, 2) });
+    }
+  }
+  return out.sort((a, b) => a.strength - b.strength);
+}
+
+/**
+ * 这一手亮法能不能盖过当前的主（DESIGN 1.4 / 1.4b）。
+ *
+ * 两个场合共用：
+ * - `declare`（亮主窗口）：当前亮主者可以用**同花色**的第二张级牌加固；
+ * - `chao`（抄底询问）：加固没有意义 —— 那等于自己把刚扣下去的底牌再拿一次，
+ *   也就是俗话说的「不能自反」。两个场合都允许用对王把自己的主反成无主。
+ *
+ * 服务端的 `doDeclare` / `doChao` 与客户端的按钮列表都走这一条，
+ * 所以「按钮点得亮」和「服务端收得下」永远是同一件事。
+ */
+export function checkOverride(
+  decl: { trump: SjTrumpSuit; strength: number },
+  trump: SjDeclState,
+  actorId: string,
+  mode: 'declare' | 'chao',
+): SjCheck {
+  if (decl.strength <= trump.strength) {
+    return fail(mode === 'chao' ? '抄底必须比当前的亮主更强' : '反主必须比当前的亮主更强');
+  }
+  if (trump.declarerId !== actorId) return OK;
+  if (decl.trump === 'NT') return OK;
+  if (mode === 'declare' && decl.trump === trump.suit) return OK;
+  return fail(mode === 'chao' ? '不能自己抄自己的主，只能用对王反成无主' : '不能用别的花色反自己的主');
+}
+
+/** 我现在**真的可以亮**的那些亮法。亮主条、抄底条、机器人都取这一份 */
+export function legalDeclarations(
+  hand: SjCard[], level: number, trump: SjDeclState, actorId: string, mode: 'declare' | 'chao',
+): SjDeclOption[] {
+  return declarationOptions(hand, level).filter((o) => checkOverride(o, trump, actorId, mode).ok);
 }
 
 /* --------------------------------------------------------------- 首出 */

@@ -8,12 +8,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applySjCommand, sanitizeSjRoom, startNextHand, timeoutKou, timeoutTurn,
+  applySjCommand, sanitizeSjRoom, startNextHand, timeoutTurn,
   type SjEngineOpts, type SjRoomState,
 } from '../shared/sj/engine.ts';
 import { sumPoints } from '../shared/sj/cards.ts';
 import type { SjKind } from '../shared/games.ts';
-import { makeSjRoom, mulberry32, runDeclaring } from './sj-helpers.ts';
+import { makeSjRoom, mulberry32, runChao, runDeclaring, runToPlaying } from './sj-helpers.ts';
 
 /** 打完一局并核对所有不变量。`where` 用来在失败信息里定位是哪个种子的第几局 */
 function playHandChecked(room: SjRoomState, opts: SjEngineOpts, where: string) {
@@ -23,8 +23,13 @@ function playHandChecked(room: SjRoomState, opts: SjEngineOpts, where: string) {
   const afterDeclare: string = room.phase;
   assert.equal(afterDeclare, 'kou', `${where}：亮主窗口结束后应该进扣底`);
   assert.ok(room.trump.suit, `${where}：这时候主一定定下来了`);
-  timeoutKou(room, opts);
-  assert.equal(room.bottom.length, 8, `${where}：底牌恒为 8 张`);
+  // 扣底 → 抄底询问 →（有人抄就再扣再问）→ 开打。抄底之后主花色还会变，
+  // 所以任何缓存了 ctx 的地方都得在这之后才取（DESIGN 1.4b）
+  runChao(room, opts);
+  assert.equal(room.bottom.length, 8, `${where}：抄了几次底，底牌都恒为 8 张`);
+  for (const p of room.players) {
+    assert.equal(p.hand.length, 25, `${where}：${p.name} 抄底之后手牌还是 25 张`);
+  }
 
   let checkedTricks = 0;
   let guard = 0;
@@ -124,8 +129,7 @@ test('模糊对局里 sanitize 一次都没泄露过别人的手牌', () => {
   const room = makeSjRoom('sj_2a');
   const opts: SjEngineOpts = { rng: mulberry32(4242), now: 1_700_000_000_000 };
   applySjCommand(room, room.hostId, { type: 'start' }, opts);
-  runDeclaring(room, opts);
-  timeoutKou(room, opts);
+  runToPlaying(room, opts);
   let checks = 0;
   while (room.phase === 'playing') {
     timeoutTurn(room, opts);
@@ -150,8 +154,7 @@ test('同一个种子重放出完全一样的一局', () => {
     const room = makeSjRoom('sj_510k');
     const opts: SjEngineOpts = { rng: mulberry32(999), now: 1_700_000_000_000 };
     applySjCommand(room, room.hostId, { type: 'start' }, opts);
-    runDeclaring(room, opts);
-    timeoutKou(room, opts);
+    runToPlaying(room, opts);
     while (room.phase === 'playing') timeoutTurn(room, opts);
     return { played: room.playedIds, result: room.result };
   };
@@ -178,6 +181,9 @@ test('新一局会把上一局的状态清干净', () => {
   assert.equal(room.bottomRevealed, false);
   assert.equal(room.flipped, null);
   assert.deepEqual(room.passed, []);
+  assert.equal(room.kouSeat, room.dealerSeat, '新一局先由庄家扣底');
+  assert.equal(room.chaoSeat, null);
+  assert.equal(room.chaoDirty, false);
   for (const p of room.players) {
     assert.equal(p.hand.length, 25);
     assert.deepEqual(p.declaredIds, []);

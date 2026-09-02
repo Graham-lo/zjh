@@ -7,8 +7,8 @@ import {
 import { applySjCommand, sjCtx, timeoutKou, type SjRoomState } from '../shared/sj/engine.ts';
 import { groupOf, sumPoints } from '../shared/sj/cards.ts';
 import { allSingles, parseShape } from '../shared/sj/units.ts';
-import { validateFollow } from '../shared/sj/rules.ts';
-import { CTX_S5, h, ids, makeSjRoom, mulberry32, runDeclaring } from './sj-helpers.ts';
+import { SJ_DECL_TIER, validateFollow } from '../shared/sj/rules.ts';
+import { CTX_S5, h, ids, makeSjRoom, mulberry32, runDeclaring, runToPlaying } from './sj-helpers.ts';
 
 function dealt(seed = 1) {
   const room = makeSjRoom('sj_510k');
@@ -75,9 +75,9 @@ test('亮主：自己已经亮了单张，补第二张就是加固', () => {
   const { room, o } = dealt();
   const p = withHand(room, 0, 'H5a H5b H6a H7a H8a H9a HTa HJa');
   applySjCommand(room, p.id, { type: 'declare', cardIds: ['H5a'] }, o);
-  assert.deepEqual(botDeclare(room, p), ['H5a', 'H5b'], '同花色第二张级牌，强度 1 → 2');
+  assert.deepEqual(botDeclare(room, p), ['H5a', 'H5b'], '同花色第二张级牌，把单张抬成红桃的对子档');
   applySjCommand(room, p.id, { type: 'declare', cardIds: ['H5a', 'H5b'] }, o);
-  assert.equal(room.trump.strength, 2);
+  assert.equal(room.trump.strength, SJ_DECL_TIER.H);
   assert.equal(botDeclare(room, p), null, '已经是自己的主了，没得再亮');
 });
 
@@ -315,8 +315,7 @@ test('机器人和提示是同一个脑子：botFollow 就是提示的第一条'
 
 test('不注入随机源时策略完全确定：同样的局面给同样的答案', () => {
   const { room, o } = dealt(21);
-  runDeclaring(room, o);
-  timeoutKou(room, o);
+  runToPlaying(room, o);
   const me = room.players[room.turnSeat!];
   const hand = me.hand;
   assert.deepEqual(ids(botLead(hand, sjCtx(room), room.playedIds)), ids(botLead(hand, sjCtx(room), room.playedIds)));

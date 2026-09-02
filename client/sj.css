@@ -546,6 +546,29 @@
 /* 倍数戳记砸下的同时整张桌子抖一下 */
 .sj-shake .sj-felt-wrap { animation: tableShake 0.5s ease-in-out 1.2s; }
 
+/* 抄底：桌面压暗 → 亮出的牌拍上台面 → 戳记砸下 → 8 张底牌翻着背飞走（DESIGN 3.5） */
+.sj-fx-chao { background: rgba(2, 5, 8, 0.68); --card-big-w: 74px; --card-big-h: 103px; }
+.sj-chao-cards { display: flex; gap: 12px; opacity: 0; transform: translateY(26px) scale(0.86); }
+.sj-chao-cards.in {
+  opacity: 1; transform: none;
+  transition: opacity 0.32s var(--ease), transform 0.5s var(--spring);
+}
+.sj-chao-card { transform: rotate(calc(-7deg + var(--i) * 14deg)); }
+.sj-chao-stamp { opacity: 0; }
+.sj-chao-stamp.in { opacity: 1; }
+.sj-chao-bottom { position: absolute; left: 50%; top: 50%; height: 0; pointer-events: none; }
+.sj-chao-bottom-card { position: absolute; left: 0; top: 0; opacity: 0; }
+/* 底牌换人了 —— 抄底最直观的一下。8 张牌背排开再整叠甩出画面 */
+.sj-chao-bottom.fly .sj-chao-bottom-card {
+  animation: sjChaoBottom 0.9s cubic-bezier(0.36, 0, 0.66, -0.4) forwards;
+  animation-delay: calc(var(--i) * 55ms);
+}
+@keyframes sjChaoBottom {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.8); }
+  25% { opacity: 1; transform: translate(calc(-50% + var(--i) * 22px - 80px), -50%) scale(1); }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--i) * 22px - 80px), 240px) scale(0.7) rotate(18deg); }
+}
+
 .sj-fx-fail { background: rgba(2, 5, 8, 0.35); }
 .sj-fx-match { background: rgba(2, 5, 8, 0.6); }
 .sj-fx-spark {
@@ -697,6 +720,7 @@
   .sj-hand { gap: 2px; }
   .sj-slots { gap: 4px; padding: 5px; }
   .sj-fx-dig { --card-big-w: 38px; --card-big-h: 53px; padding: 12px; }
+  .sj-fx-chao { --card-big-w: 46px; --card-big-h: 64px; padding: 12px; }
   .sj-dig-cards { gap: 4px; }
   .sj-dig-math { flex-direction: column; gap: 10px; }
   .sj-dig-base, .sj-dig-total { font-size: 30px; }
@@ -814,5 +838,7 @@
 
 /* 关掉动效的人只看到结果，不看过程 */
 @media (prefers-reduced-motion: reduce) {
-  .sj-kou-fly, .sj-throw-back { display: none; }
+  .sj-kou-fly, .sj-throw-back, .sj-chao-bottom { display: none; }
+  .sj-chao-cards { opacity: 1; transform: none; transition: none; }
+  .sj-chao-stamp { opacity: 1; }
 }

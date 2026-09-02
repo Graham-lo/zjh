@@ -20,10 +20,11 @@ import {
 import type { AnyGameCommand, AnyPublicRoom, GameEvent } from './protocol.ts';
 import {
   applySjCommand, createSjPlayer, createSjRoom, deriveSjEvents, migrateSjRoom, sanitizeSjRoom,
-  SJ_COMMAND_TYPES, SJ_SEATS, sjCurrentPlayer, sjLog, timeoutKou, timeoutTurn, transferSjHost,
+  SJ_COMMAND_TYPES, SJ_SEATS, sjCurrentPlayer, sjLog, timeoutChao, timeoutKou, timeoutTurn,
+  transferSjHost,
   type SjCommand, type SjEngineOpts, type SjRoomState,
 } from './sj/engine.ts';
-import { botDeclare, botKou, botPlay } from './sj/bot.ts';
+import { botChao, botDeclare, botKou, botPlay } from './sj/bot.ts';
 
 export type SjKind = 'sj_510k' | 'sj_2a';
 export type GameKind = 'zjh' | SjKind;
@@ -316,9 +317,21 @@ function sjEngine(kind: SjKind): GameEngine {
         return null;
       }
       if (s.phase === 'kou') {
-        const dealer = s.players.find((p) => p.seat === s.dealerSeat);
-        if (!dealer || !sjNeedsBot(dealer)) return null;
-        return { actorId: dealer.id, cmd: { type: 'kou', cardIds: botKou(s, dealer, opts?.rng) }, delay: sjBotDelay() };
+        // 抄底之后扣底的不一定是庄家（DESIGN 1.4b），一律看 kouSeat
+        const burier = s.players.find((p) => p.seat === s.kouSeat);
+        if (!burier || !sjNeedsBot(burier)) return null;
+        return { actorId: burier.id, cmd: { type: 'kou', cardIds: botKou(s, burier, opts?.rng) }, delay: sjBotDelay() };
+      }
+      if (s.phase === 'chao') {
+        // 被问到的人是电脑或掉线的真人就替他答；抄不起就「不抄」，别让一轮询问卡住
+        const asked = s.players.find((p) => p.seat === s.chaoSeat);
+        if (!asked || !sjNeedsBot(asked)) return null;
+        const cardIds = botChao(s, asked);
+        return {
+          actorId: asked.id,
+          cmd: cardIds ? { type: 'chao', cardIds } : { type: 'pass_chao' },
+          delay: sjBotDelay(),
+        };
       }
       if (s.phase === 'playing') {
         const cur = sjCurrentPlayer(s);
@@ -331,6 +344,10 @@ function sjEngine(kind: SjKind): GameEngine {
       const s = asS(state);
       if (s.phase === 'kou') {
         timeoutKou(s, opts);
+        return true;
+      }
+      if (s.phase === 'chao') {
+        timeoutChao(s, opts);
         return true;
       }
       if (s.phase === 'playing') {

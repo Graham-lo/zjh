@@ -12,6 +12,7 @@ import { IconCopy, IconExit, IconSoundOff, IconSoundOn, IconVoice, Laurel } from
 import { TurnRing, useCountdown } from '../components/TurnRing.tsx';
 import type { NetStatus } from '../net.ts';
 import { sound, voice } from '../sound.ts';
+import { ChaoBar } from './ChaoBar.tsx';
 import { DeclareBar } from './DeclareBar.tsx';
 import { Hand } from './Hand.tsx';
 import { KouDi, KouWaiting } from './KouDi.tsx';
@@ -62,7 +63,15 @@ function SeatCard({
   return (
     <div className={cls} onClick={onSwap} title={onSwap ? '点一下和他换座（0/2 一队、1/3 一队）' : undefined}>
       <div className="sj-seat-av">
-        {isTurn && <TurnRing deadline={room.turnDeadline} total={room.settings.turnSeconds} />}
+        {/* 呼吸环的一整圈得对上这一步真正的时限，扣底和抄底跟出牌不是一个数 */}
+        {isTurn && (
+          <TurnRing
+            deadline={room.turnDeadline}
+            total={room.phase === 'kou' ? room.settings.kouSeconds
+              : room.phase === 'chao' ? room.settings.chaoSeconds
+                : room.settings.turnSeconds}
+          />
+        )}
         <span className="avatar-glyph">{player.avatar}</span>
         {isDealer && <span className="sj-dealer" title="庄家">庄</span>}
         {player.emote && (
@@ -152,6 +161,12 @@ function RuleBar({ room, cmd }: { room: SjPublicRoom; cmd(c: SjCommand): void })
           {n}s
         </button>
       ))}
+      <span>抄底</span>
+      {[8, 12, 20].map((n) => (
+        <button key={n} className={`btn tiny${s.chaoSeconds === n ? ' tier' : ''}`} onClick={() => cmd({ type: 'settings', chaoSeconds: n })}>
+          {n}s
+        </button>
+      ))}
       <button
         className={`btn tiny${s.autoContinue ? ' tier' : ''}`}
         onClick={() => cmd({ type: 'settings', autoContinue: !s.autoContinue })}
@@ -226,8 +241,8 @@ export function SjTable({
   const seats = useMemo(() => seatBySpot(room, mySeat), [room.players, mySeat]);
 
   const myTurn = room.phase === 'playing' && room.turnSeat === mySeat;
-  const isDealer = mySeat === room.dealerSeat;
-  const kouMine = room.phase === 'kou' && isDealer;
+  // 扣底的不一定是庄家：抄底成功的人也要重新扣一次（DESIGN 1.4b）
+  const kouMine = room.phase === 'kou' && mySeat === room.kouSeat;
   const check = useMemo(
     () => checkPlay(hand, selectedCards, lead, ctx),
     [hand, selectedCards, lead, ctx.trump, ctx.level],
@@ -342,6 +357,21 @@ export function SjTable({
           pushFx({ kind: 'flip', card: ev.card, trump: ev.trump });
           break;
         }
+        case 'sj_chao': {
+          // 抄底视同反主：上一个亮主者的明牌先被撞飞，再让抄底的牌拍下来
+          const prev = prevDecl.current;
+          if (prev && prev.id !== ev.playerId && prev.cards.length) {
+            const id = ++uid.current;
+            setKnocked({ id, spot: spotOf(seatOf(prev.id), mySeat), cards: prev.cards });
+            setTimeout(() => setKnocked((k) => (k?.id === id ? null : k)), 900);
+          }
+          navigator.vibrate?.([30, 50, 40]);
+          pushFx({
+            kind: 'chao', trump: ev.trump, who: nameOf(ev.playerId),
+            strength: ev.strength, cards: ev.cardIds.map(cardFromId),
+          });
+          break;
+        }
         case 'sj_kou_done':
           sound.play('sweep');
           if (ev.playerId === room.viewerId) voice.play('kou');
@@ -438,15 +468,16 @@ export function SjTable({
   }, [batch.seq]);
 
   /**
-   * 扣底：底牌是在服务端直接并进庄家手牌的，客户端只会看到手牌一下从 25 变 33。
-   * 所以用 phase 进入 kou 这一下自己补一段飞牌 —— 非庄家看到 8 张牌背沿弧线
-   * 飞向庄家座位，庄家看到它们飞到手牌区、逐张翻面，飞完才放进扇子里（随后 FLIP 重排）。
+   * 扣底：底牌是在服务端直接并进扣底者手牌的，客户端只会看到手牌一下从 25 变 33。
+   * 所以用 phase 进入 kou 这一下自己补一段飞牌 —— 别人看到 8 张牌背沿弧线
+   * 飞向他的座位，他自己看到它们飞到手牌区、逐张翻面，飞完才放进扇子里（随后 FLIP 重排）。
+   * 抄底会再进一次 kou（这次是抄底者拿底牌），所以这段动效一局里可能播好几次。
    */
   useEffect(() => {
     const was = prevPhase.current;
     prevPhase.current = room.phase;
     if (room.phase !== 'kou' || was === 'kou') return;
-    const to = spotOf(room.dealerSeat, mySeat);
+    const to = spotOf(room.kouSeat, mySeat);
     const ids = to === 'me' ? hand.filter((c) => !prevHandIds.current.includes(c.id)).map((c) => c.id) : [];
     const id = ++uid.current;
     setKouFly({ id, to, ids });
@@ -639,7 +670,8 @@ export function SjTable({
                   spot={spot}
                   room={room}
                   isMe={p.id === me.id}
-                  isTurn={room.turnSeat === p.seat && (room.phase === 'playing' || room.phase === 'kou')}
+                  isTurn={room.turnSeat === p.seat
+                    && (room.phase === 'playing' || room.phase === 'kou' || room.phase === 'chao')}
                   onSwap={room.phase === 'lobby' && p.id !== me.id ? () => send({ type: 'seat', seat: p.seat }) : undefined}
                 />
               );
@@ -718,6 +750,12 @@ export function SjTable({
             )}
             {room.phase === 'dealing' && <div className="sj-status">发牌中 · 亮主已经开放</div>}
             {room.phase === 'declaring' && <div className="sj-status">亮主窗口 · 无人亮主就翻底定主</div>}
+            {room.phase === 'chao' && (
+              <div className="sj-status">
+                抄底询问 · {trumpText(room.trump.suit, room.trump.level)}
+                {room.chaoDirty ? ' · 这一轮已经有人抄过，问完还要再问一轮' : ''}
+              </div>
+            )}
             {room.phase === 'lobby' && (
               <div className="sj-status">
                 {trumpText(null, room.trump.level)} · 坐满四人开局
@@ -761,6 +799,15 @@ export function SjTable({
             ) : (
               <KouWaiting room={room} />
             ))}
+
+          {room.phase === 'chao' && (
+            <ChaoBar
+              room={room}
+              hand={hand}
+              onChao={(ids) => send({ type: 'chao', cardIds: ids })}
+              onPass={() => send({ type: 'pass_chao' })}
+            />
+          )}
 
           {room.phase === 'playing' && (
             <div className={`sj-bar sj-play-bar${myTurn ? ' is-turn' : ''}`}>

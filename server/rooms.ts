@@ -337,8 +337,9 @@ export class Hub {
 
   /**
    * 升级的定时表（DESIGN 2.5）：
-   * dealing 4.6s → declaring 3s（每次有效亮主 +2s）→ kou 45s → 出牌 turnSeconds
-   * → hand_end 9s；机器人（含掉线代打）思考 500–1100ms。
+   * dealing 4.6s → declaring 3s（每次有效亮主 +2s）→ kou 45s → chao 每人 12s
+   * （有人抄成就回 kou 重扣，扣完接着问）→ 出牌 turnSeconds → hand_end 9s；
+   * 机器人（含掉线代打）思考 500–1100ms。
    */
   private armSj(room: Room) {
     const s = room.state as SjRoomState;
@@ -356,7 +357,7 @@ export class Hub {
       const at = s.declareEndsAt ?? now;
       return this.later(room, Math.max(120, at - now), () => this.sjStep(room, closeDeclaring));
     }
-    if (s.phase === 'kou' || s.phase === 'playing') {
+    if (s.phase === 'kou' || s.phase === 'chao' || s.phase === 'playing') {
       // 掉线的人也走这条路：轮到他直接由机器人代打，不等倒计时（DESIGN 1.9）
       const move = eng.bot(s);
       if (move) return this.later(room, move.delay, () => this.runSjBot(room, move));
@@ -393,6 +394,7 @@ export class Hub {
       // 决策和状态对不上时退回一个一定合法的动作，绝不让牌桌卡死
       try {
         if (s.phase === 'declaring') eng.apply(s, move.actorId, { type: 'pass' } satisfies SjCommand);
+        else if (s.phase === 'chao') eng.apply(s, move.actorId, { type: 'pass_chao' } satisfies SjCommand);
         else if (eng.timeout(s)) {
           /* 由超时逻辑接管这一步 */
         } else return this.arm(room);
@@ -409,10 +411,14 @@ export class Hub {
     const s = room.state as SjRoomState;
     if (s.turnDeadline && Date.now() < s.turnDeadline - 100) return this.arm(room);
     const eng = engineFor(s);
-    const actor = s.players.find((p) => p.seat === (s.phase === 'kou' ? s.dealerSeat : s.turnSeat));
+    // 扣底看 kouSeat（抄底之后不一定是庄家）、抄底询问看 chaoSeat，其余看 turnSeat
+    const seat = s.phase === 'kou' ? s.kouSeat : s.phase === 'chao' ? s.chaoSeat : s.turnSeat;
+    const actor = s.players.find((p) => p.seat === seat);
     const before = snapshot(s);
     // 事件派生只看 cmd 的 type（出的是哪几张牌从手牌差里算），所以这里给个空壳就够
-    const cmd: SjCommand = s.phase === 'kou' ? { type: 'kou', cardIds: [] } : { type: 'play', cardIds: [] };
+    const cmd: SjCommand = s.phase === 'kou'
+      ? { type: 'kou', cardIds: [] }
+      : s.phase === 'chao' ? { type: 'pass_chao' } : { type: 'play', cardIds: [] };
     try {
       if (!eng.timeout(s)) return this.arm(room);
     } catch (e) {

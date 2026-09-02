@@ -14,6 +14,7 @@ import { TRUMP_TINT, suitName } from './util.ts';
 export type SjFxJob =
   | { kind: 'declare'; trump: SjTrumpSuit; who: string; strength: number; reinforce: boolean }
   | { kind: 'flip'; card: SjCard; trump: SjTrumpSuit }
+  | { kind: 'chao'; trump: SjTrumpSuit; who: string; strength: number; cards: SjCard[] }
   | { kind: 'throwFail'; who: string; penalty: number; forcedIds: string[] }
   | { kind: 'dig'; who: string; base: number; multiplier: number; total: number; bottom: SjCard[] }
   | { kind: 'handEnd'; label: string; detail: string; big: boolean }
@@ -23,11 +24,20 @@ export type SjFxJob =
 export const SJ_FX_MS: Record<SjFxJob['kind'], number> = {
   declare: 1700,
   flip: 2100,
+  chao: 2400,
   throwFail: 1600,
   dig: 4400,
   handEnd: 2800,
   matchEnd: 4200,
 };
+
+/** 亮法的档位 → 一句话（DESIGN 1.4 的 7 档表）。亮主特效和抄底特效共用 */
+export function strengthNote(strength: number): string {
+  if (strength >= 7) return '一对大王';
+  if (strength >= 6) return '一对小王';
+  if (strength >= 2) return '一对级牌';
+  return '单张级牌';
+}
 
 function useBeats(steps: number[]) {
   const [beat, setBeat] = useState(0);
@@ -64,8 +74,50 @@ function Declare({ job }: { job: Extract<SjFxJob, { kind: 'declare' }> }) {
       <div className="sj-fx-core">
         <div className="sj-fx-word">{word}</div>
         <div className="sj-fx-who">
-          {job.who} {job.reinforce ? '加固' : job.strength >= 3 ? '反主' : '亮主'}
-          {job.strength === 2 ? ' · 一对' : job.strength >= 3 ? ' · 一对王' : ''}
+          {/* 7 档表里 6/7 才是对王 —— 能把别人已经亮的一对级牌压下去的只有它 */}
+          {job.who} {job.reinforce ? '加固' : job.strength >= 6 ? '反主' : '亮主'}
+          {job.strength >= 2 ? ` · ${strengthNote(job.strength)}` : ''}
+        </div>
+      </div>
+      <div className="overlay-vignette" />
+    </div>
+  );
+}
+
+/* --------------------------------------------------------------- 抄底 */
+
+/**
+ * 抄底（DESIGN 3.5 / 1.4b）：桌面压暗 → 亮出的牌拍到台面 → 「抄底！」戳记砸下
+ * → 8 张底牌翻着背飞向抄底者。光池换成新主花色由 SjTable 的 `--sj-tint` 接手。
+ */
+function Chao({ job }: { job: Extract<SjFxJob, { kind: 'chao' }> }) {
+  const beat = useBeats([160, 620, 1060]);
+  const word = job.trump === 'NT' ? '无 主' : `${suitName(job.trump)} 主`;
+  return (
+    <div className="overlay sj-fx sj-fx-chao" style={{ ['--tint' as string]: TRUMP_TINT[job.trump] }} aria-hidden="true">
+      <div className="sj-fx-pool" />
+      <div className="sj-fx-core">
+        <div className={`sj-chao-cards${beat >= 1 ? ' in' : ''}`}>
+          {job.cards.map((c, i) => (
+            <span key={c.id} className="sj-chao-card" style={{ ['--i' as string]: i }}>
+              <PlayingCard card={c} faceDown={false} size="big" />
+            </span>
+          ))}
+        </div>
+        <div className={`sj-stamp sj-stamp-red sj-chao-stamp${beat >= 2 ? ' in' : ''}`}>
+          <b>抄底</b>
+          <span>底牌归我</span>
+        </div>
+        {/* 8 张底牌翻着背飞过去：抄底最直观的一下就是"底牌换人了" */}
+        <div className={`sj-chao-bottom${beat >= 3 ? ' fly' : ''}`}>
+          {Array.from({ length: 8 }, (_, i) => (
+            <span key={i} className="sj-chao-bottom-card" style={{ ['--i' as string]: i }}>
+              <PlayingCard faceDown size="play" />
+            </span>
+          ))}
+        </div>
+        <div className="sj-fx-who">
+          {job.who} 抄底 · {strengthNote(job.strength)} → {word}
         </div>
       </div>
       <div className="overlay-vignette" />
@@ -180,6 +232,8 @@ export function SjFx({ job, onDone }: { job: SjFxJob; onDone(): void }) {
       return <Declare job={job} />;
     case 'flip':
       return <Flip job={job} />;
+    case 'chao':
+      return <Chao job={job} />;
     case 'throwFail':
       return <ThrowFail job={job} />;
     case 'dig':

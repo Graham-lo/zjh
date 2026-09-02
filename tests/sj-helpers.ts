@@ -1,11 +1,11 @@
 /** 升级测试的公共夹具。文件名不带 .test.ts，不会被 node --test 当成用例文件 */
 
 import { cardFromId, type SjCard, type SjCtx } from '../shared/sj/cards.ts';
-import { botDeclare } from '../shared/sj/bot.ts';
+import { botChao, botDeclare } from '../shared/sj/bot.ts';
 import type { SjKind } from '../shared/games.ts';
 import {
   applySjCommand, closeDeclaring, createSjPlayer, createSjRoom, finishDealing,
-  timeoutKou, timeoutTurn, type SjEngineOpts, type SjRoomState,
+  sjPlayerAtSeat, timeoutKou, timeoutTurn, type SjEngineOpts, type SjRoomState,
 } from '../shared/sj/engine.ts';
 
 /** `h('S5a S5b')` → 两张黑桃 5。id 自带牌面，写用例时一眼能读出是哪张牌 */
@@ -55,6 +55,26 @@ export function runDeclaring(room: SjRoomState, opts: SjEngineOpts) {
   closeDeclaring(room, opts);
 }
 
+/**
+ * 走完「扣底 → 抄底询问」这一段，直到开打（DESIGN 1.4b）。
+ *
+ * 扣底一律由机器人代扣；被问到抄底的人按 `botChao` 决定 —— 用机器人的真实判断
+ * 而不是一律 pass，模糊测试才会真的走到「有人抄底」那些分支。
+ */
+export function runChao(room: SjRoomState, opts: SjEngineOpts) {
+  let guard = 0;
+  while (room.phase === 'kou' || room.phase === 'chao') {
+    if (guard++ > 80) throw new Error('扣底/抄底没有收敛');
+    if (room.phase === 'kou') {
+      timeoutKou(room, opts);
+      continue;
+    }
+    const asked = sjPlayerAtSeat(room, room.chaoSeat!);
+    const cardIds = botChao(room, asked);
+    applySjCommand(room, asked.id, cardIds ? { type: 'chao', cardIds } : { type: 'pass_chao' }, opts);
+  }
+}
+
 /** 从 playing 一路打到 hand_end，全部由机器人策略代打 */
 export function playOutTricks(room: SjRoomState, opts: SjEngineOpts) {
   let guard = 0;
@@ -64,9 +84,14 @@ export function playOutTricks(room: SjRoomState, opts: SjEngineOpts) {
   }
 }
 
-/** 发牌 → 亮主 → 扣底 → 打完一局 */
-export function playHand(room: SjRoomState, opts: SjEngineOpts) {
+/** 发牌 → 亮主 → 扣底 → 抄底问完 → 开打 */
+export function runToPlaying(room: SjRoomState, opts: SjEngineOpts) {
   runDeclaring(room, opts);
-  timeoutKou(room, opts);
+  runChao(room, opts);
+}
+
+/** 发牌 → 亮主 → 扣底 → 抄底 → 打完一局 */
+export function playHand(room: SjRoomState, opts: SjEngineOpts) {
+  runToPlaying(room, opts);
   playOutTricks(room, opts);
 }

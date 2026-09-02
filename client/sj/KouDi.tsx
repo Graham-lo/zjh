@@ -9,7 +9,8 @@ const NEED = 8;
 /**
  * 扣底（DESIGN 3.4）。
  *
- * 庄家这时候手里是 33 张（8 张底牌已经并进来了），要从中挑 8 张扣回去。
+ * 扣底的人这时候手里是 33 张（8 张底牌已经并进来了），要从中挑 8 张扣回去。
+ * **不一定是庄家** —— 抄底成功的人也要重新扣一次（DESIGN 1.4b），文案跟着换。
  * 选牌本身走底部那把手牌扇，这里只负责 8 个槽位、`帮我扣` 和 `确认扣底`。
  * `帮我扣` 直接调机器人那套策略 —— 它只读自己的手牌和主花色，客户端算得出来。
  */
@@ -28,11 +29,13 @@ export function KouDi({
 }) {
   const left = useCountdown(room.turnDeadline);
   const ok = selected.length === NEED;
+  const afterChao = room.kouSeat !== room.dealerSeat || room.chaoDirty;
 
   return (
     <div className="sj-bar sj-kou">
       <span className="sj-bar-cap">
-        扣下 <b>{selected.length}</b> / {NEED}
+        {afterChao ? '你抄了底，重新扣 ' : '扣下 '}
+        <b>{selected.length}</b> / {NEED}
       </span>
       <div className="sj-slots">
         {Array.from({ length: NEED }, (_, i) => (
@@ -61,15 +64,18 @@ export function KouDi({
   );
 }
 
-/** 别人视角的扣底：只看到 8 张牌背飞向庄家和一个倒计时 */
+/** 别人视角的扣底：只看到 8 张牌背飞向扣底的人和一个倒计时 */
 export function KouWaiting({ room }: { room: SjPublicRoom }) {
   const left = useCountdown(room.turnDeadline);
-  const dealer = room.players.find((p) => p.seat === room.dealerSeat);
+  // 抄底之后拿底牌的不是庄家（DESIGN 1.4b），所以这里认 kouSeat
+  const burier = room.players.find((p) => p.seat === room.kouSeat);
+  const afterChao = room.kouSeat !== room.dealerSeat || room.chaoDirty;
   return (
     <div className="sj-bar sj-kou-wait">
       <span className="sj-bar-cap">扣底中</span>
       <span className="sj-bar-note">
-        {dealer?.name ?? '庄家'} 拿到 8 张底牌，正在扣回 8 张 · 还剩 <b>{left}s</b>
+        {burier?.name ?? '庄家'} {afterChao ? '抄走了底牌' : '拿到 8 张底牌'}，正在扣回 8 张 ·
+        还剩 <b>{left}s</b>
       </span>
     </div>
   );

@@ -2,14 +2,113 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseShape } from '../shared/sj/units.ts';
 import {
-  digMultiplier, digMultiplierForLead, followRequirement, isMatchWon, isTopLevel, levelUp,
-  nextDealerSeat, outcomeFor, trickPoints, trickWinner, validateFollow, validateLead, validateThrow,
+  SJ_DECL_TIER, checkOverride, declStrength, declarationOptions, digMultiplier, digMultiplierForLead,
+  followRequirement, isMatchWon, isTopLevel, legalDeclarations, levelUp, nextDealerSeat, outcomeFor,
+  trickPoints, trickWinner, validateFollow, validateLead, validateThrow,
+  type SjDeclState,
 } from '../shared/sj/rules.ts';
 import { ladderOf } from '../shared/games.ts';
 import type { SjCtx } from '../shared/sj/cards.ts';
 import { CTX_NT5, CTX_S5, h } from './sj-helpers.ts';
 
 const shape = (spec: string, ctx: SjCtx = CTX_S5) => parseShape(h(spec), ctx)!;
+
+/* --------------------------------------------------------------- 反主级别 */
+
+/** 当前的主。`checkOverride` 只读这三个字段 */
+const trumpAt = (
+  suit: SjDeclState['suit'], strength: number, declarerId: string | null = null,
+): SjDeclState => ({ suit, strength, declarerId });
+
+test('反主级别是 7 档全序：单张 < ♦对 < ♣对 < ♥对 < ♠对 < 对小王 < 对大王（DESIGN 1.4）', () => {
+  const ladder = [
+    declStrength('single'),
+    declStrength('pair', 'D'),
+    declStrength('pair', 'C'),
+    declStrength('pair', 'H'),
+    declStrength('pair', 'S'),
+    declStrength('joker_s'),
+    declStrength('joker_b'),
+  ];
+  assert.deepEqual(ladder, [1, 2, 3, 4, 5, 6, 7], '七档依次递增，中间不留空');
+  for (let i = 1; i < ladder.length; i++) {
+    assert.ok(ladder[i] > ladder[i - 1], `第 ${i} 档必须严格大于上一档`);
+  }
+  assert.equal(SJ_DECL_TIER.D, 2, '方块最小');
+  assert.equal(SJ_DECL_TIER.S, 5, '黑桃是花色里最大的一门');
+  assert.equal(SJ_DECL_TIER.joker_b, 7, '对大王封顶');
+  // 翻底定主是 0，比任何一种亮法都弱 —— 所以单张级牌也能反掉它
+  assert.ok(checkOverride({ trump: 'H', strength: 1 }, trumpAt('H', 0), 'me', 'chao').ok);
+});
+
+test('单张之间不分花色：♠5 单张反不掉 ♦5 单张', () => {
+  const spade = { trump: 'S' as const, strength: declStrength('single') };
+  assert.ok(!checkOverride(spade, trumpAt('D', declStrength('single')), 'me', 'declare').ok);
+  assert.ok(!checkOverride(spade, trumpAt('D', declStrength('single')), 'me', 'chao').ok);
+  // 反过来同理：先亮者得，官方只对「对子」列了花色序
+  const diamond = { trump: 'D' as const, strength: declStrength('single') };
+  assert.ok(!checkOverride(diamond, trumpAt('S', declStrength('single')), 'me', 'declare').ok);
+});
+
+test('加固只抬到本花色的档位：加固方块只挡得住单张，别的花色的对子照样反得掉', () => {
+  const afterReinforce = trumpAt('D', declStrength('pair', 'D'), 'me');
+  // 这是规则本身，不是 bug：方块是花色序里最小的一门
+  for (const suit of ['C', 'H', 'S'] as const) {
+    assert.ok(
+      checkOverride({ trump: suit, strength: declStrength('pair', suit) }, afterReinforce, 'other', 'declare').ok,
+      `${suit} 的一对比方块的一对大，反得掉`,
+    );
+  }
+  assert.ok(
+    !checkOverride({ trump: 'H', strength: declStrength('single') }, afterReinforce, 'other', 'declare').ok,
+    '单张连方块的一对都反不掉',
+  );
+  // 加固到黑桃就没人用级牌反得动了，只剩对王
+  const afterSpade = trumpAt('S', declStrength('pair', 'S'), 'me');
+  assert.ok(!checkOverride({ trump: 'H', strength: declStrength('pair', 'H') }, afterSpade, 'other', 'declare').ok);
+  assert.ok(checkOverride({ trump: 'NT', strength: declStrength('joker_s') }, afterSpade, 'other', 'declare').ok);
+});
+
+test('不能自反：亮主时只能同花色加固或对王反成无主，抄底时连加固都不行', () => {
+  const mine = trumpAt('D', declStrength('single'), 'me');
+  const sameSuitPair = { trump: 'D' as const, strength: declStrength('pair', 'D') };
+  const otherSuitPair = { trump: 'S' as const, strength: declStrength('pair', 'S') };
+  const jokers = { trump: 'NT' as const, strength: declStrength('joker_b') };
+
+  assert.ok(checkOverride(sameSuitPair, mine, 'me', 'declare').ok, '亮主窗口里这是加固');
+  assert.ok(!checkOverride(otherSuitPair, mine, 'me', 'declare').ok, '不能用别的花色反自己');
+  assert.ok(checkOverride(jokers, mine, 'me', 'declare').ok, '对王可以把自己反成无主');
+
+  // 抄底时「加固」等于把刚扣下去的底牌再拿一次，所以只剩对王这一条路
+  assert.ok(!checkOverride(sameSuitPair, mine, 'me', 'chao').ok, '不能自己抄自己');
+  assert.ok(!checkOverride(otherSuitPair, mine, 'me', 'chao').ok);
+  assert.ok(checkOverride(jokers, mine, 'me', 'chao').ok, '对王反成无主两边都允许');
+  // 换个人来抄就都放行
+  assert.ok(checkOverride(sameSuitPair, mine, 'other', 'chao').ok);
+});
+
+test('亮法枚举：手里做得到的全部亮法，按档位升序（客户端按钮与机器人共用这一份）', () => {
+  const hand = h('D5a D5b H5a JSa JSb JBa');
+  const opts = declarationOptions(hand, 5);
+  assert.deepEqual(
+    opts.map((o) => [o.kind, o.trump, o.strength]),
+    [
+      ['single', 'H', 1], ['single', 'D', 1],
+      ['pair', 'D', SJ_DECL_TIER.D],
+      ['joker_s', 'NT', SJ_DECL_TIER.joker_s],
+    ],
+    '只有一张大王，凑不成对，不该出现在候选里',
+  );
+  assert.deepEqual(declarationOptions(h('H6a H7a JBa'), 5), [], '没有级牌也没有对王就一种都没有');
+
+  // 当前是 ♣ 的一对时，只有 ♥/♠ 的一对和对王过得去
+  const legal = legalDeclarations(h('S5a S5b H5a H5b D5a D5b JSa JSb'), 5, trumpAt('C', SJ_DECL_TIER.C), 'me', 'declare');
+  assert.deepEqual(
+    legal.map((o) => o.trump),
+    ['H', 'S', 'NT'],
+    '方块的一对比梅花小，反不掉',
+  );
+});
 
 /* ------------------------------------------------------------------- 首出 */
 

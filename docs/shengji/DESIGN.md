@@ -51,7 +51,9 @@
 
 ### 1.4 一局的阶段
 
-`lobby → dealing → declaring → kou → playing → hand_end → (下一局 dealing | match_end)`
+`lobby → dealing → declaring → kou → chao → playing → hand_end → (下一局 dealing | match_end)`
+
+其中 `chao`（抄底）与 `kou` 之间会来回：有人抄成底就回到 `kou` 由**抄底者**重新扣，扣完再回 `chao` 接着问。
 
 **dealing（发牌）**
 - 服务端一次性发好：从庄家（首局从房主）开始顺时针，每人 25 张，剩 8 张为底牌。
@@ -61,21 +63,75 @@
 
 **declaring（亮主窗口）**
 - 时长：发牌结束后 3s；每出现一次新的有效亮主/反主再延长 2s；四人都点了「不亮」立即结束。
-- 亮主形式与强度（必须**严格更强**才能反主）：
-  1. 单张级牌 → 定该花色为主（强度 1）
-  2. 一对级牌（同花色两张）→ 定该花色为主（强度 2）
-  3. 一对小王 → 无主（强度 3）
-  4. 一对大王 → 无主（强度 4）
-- **加固**：当前亮主者可用**同花色**的第二张级牌把强度 1 升到 2，别人再想反必须出王。
+- **反主级别是 7 档**（`trump.strength`），必须**严格更强**才能反主。对级牌的花色大小
+  从小到大是 **方块 < 梅花 < 红桃 < 黑桃 < 对小王 < 对大王**：
+
+  | strength | 亮法 | 定下来的主 |
+  | --- | --- | --- |
+  | 0 | 翻底定主（无人亮主） | 底牌第一张的花色 |
+  | 1 | 单张级牌（**任意花色，彼此相等**） | 该花色 |
+  | 2 | 一对方块级牌 | ♦ |
+  | 3 | 一对梅花级牌 | ♣ |
+  | 4 | 一对红桃级牌 | ♥ |
+  | 5 | 一对黑桃级牌 | ♠ |
+  | 6 | 一对小王 | 无主 |
+  | 7 | 一对大王 | 无主 |
+
+- **单张之间不分花色**：QQ 的「抢亮」是先亮者得，官方只对「对子」列了花色序，
+  所以 ♠5 单张**反不掉** ♦5 单张。要改成单张也分花色，只需改 `declStrength` 一处。
+- **加固**：当前亮主者可用**同花色**的第二张级牌，把单张（1）抬到**该花色的对子档**（♦→2 … ♠→5）。
+  所以加固方块只挡得住单张，梅花/红桃/黑桃的对子照样反得掉 —— **这是规则本身，不是 bug**。
 - 同一个人不能用**别的花色**反自己；可以用对王把自己的亮主反成无主。
-- 亮出的牌**明牌放在该玩家座位前**直到扣底结束（仍在其手中，可正常打出）。
+- 亮出的牌**明牌放在该玩家座位前**直到抄底问完（仍在其手中，可正常打出）。
+  扣底时如果把自己亮出来的那张一起扣了下去，它就从明牌里摘掉 —— 那几个 id 是公开的，
+  留着等于把底牌里的一张告诉全场。
 - 窗口结束时无人亮主：**翻底牌** —— 底牌第一张的花色为主，是王则无主；这张牌全场可见 1.2s 后归入底牌。
 - **首局庄家 = 窗口结束时亮主有效的那个人**；无人亮主则房主坐庄。后续局庄家按 1.8 轮转，亮主只决定主花色。
+- 级别表与判定集中在 `shared/sj/rules.ts`：`SJ_DECL_TIER` / `declStrength` / `checkOverride` /
+  `declarationOptions` / `legalDeclarations`。服务端的 `doDeclare`、`doChao`，机器人，
+  客户端的亮主条/抄底条**读的都是这一份**，绝不各写各的。
 
 **kou（扣底）**
-- 庄家拿到 8 张底牌（只有庄家能看到），从 33 张里扣回 8 张（任意牌，含分牌和主牌都行）。
+- 拿到 8 张底牌的人（`kouSeat`：庄家，或者刚抄成底的人；只有他能看到）从 33 张里扣回 8 张
+  （任意牌，含分牌和主牌都行）。
 - 时限 45s；超时由机器人策略代扣。
-- 扣完立即进入 playing，庄家首出。
+- 扣完进入 **chao**，不是直接开打。
+
+**chao（抄底）**
+
+见 1.4b。
+
+### 1.4b 抄底
+
+> 出处：QQ《升级》/《欢乐升级》与炒地皮系规则 ——「待庄家扣底牌之后，要按出牌顺序依次
+> 询问其他玩家是否抄底牌。抄底牌的玩家需按照『反主级别』的大小顺序亮出比当前级别高的牌，
+> 可以拿起底牌进行重新扣底，并且视同『反主』。抄底牌不限次数。」
+
+- **抄底常开**，没有开关，也没有兼容旧规则的退路。
+- **询问顺序**：庄家扣完底 → 从**庄家下家**起顺时针依次问，**跳过庄家**（他刚拿过一次底牌），
+  一轮固定是 3 个人。每人 `chaoSeconds`（默认 12s）；超时 / 掉线 / 机器人不想抄一律算「不抄」。
+- 被问到的人两个选择：
+  - **抄底**：亮出一手比当前 `trump.strength` **严格更高**的牌（形式与 1.4 的亮主完全相同）；
+  - **不抄**。
+- **不能自反**：轮到当前 `trump.declarerId` 本人时，只有「用对王反成无主」这一种合法。
+  加固在这里没有意义 —— 那等于把自己刚扣下去的底牌再拿一次。
+  别人反主/抄底之后他就不再是亮主者，下一轮又可以抄了。
+- **抄成之后**：
+  1. 亮出的牌**明牌**摆到他座位前，旧亮主者的明牌收回；
+  2. `trump` 更新为 `{ suit, strength, declarerId: 抄底者 }`，**视同反主**；
+  3. 他把 8 张底牌收进手里（33 张），`phase = 'kou'`、`kouSeat = 他`，重新扣 8 张；
+  4. 扣完**回到 chao**，从他的下家继续**本轮**，`chaoDirty = true`。
+- **一轮问完**（问回起点 = 庄家下家）：`chaoDirty` 为真就清掉它再开一轮，为假则进 playing。
+  每抄成一次 `strength` 都严格变大且上限是 7，所以一定收敛，不会一直问下去。
+- **庄家归属**：
+  - 第 1 局：庄家 = 亮主有效的那个人（1.4），抄底视同反主，所以**首局抄底者坐庄**
+    （此刻两队级别相同，换庄不改变本局级牌）；
+  - 第 2 局起：庄家按 1.8 轮转，**抄底只改主花色与底牌归属，不换庄**。
+  - `enterPlaying` 的首出始终是 `dealerSeat`。
+- `flipped`（翻底定主那张）在 chao 阶段仍然展示，进 playing 时清空。翻底定主是 0 档，
+  所以那种局面下单张级牌（1 档）也能抄底 —— 这是对的。
+- **底牌可见性**：只在 `phase === 'kou'` 且 `viewer.seat === kouSeat` 时给他一个人；
+  **`chao` 阶段谁都看不到**（它是扣着的，看得到就等于照着底牌决定抄不抄）。
 
 **playing（出牌）**
 - 每人每步时限 `turnSeconds`（默认 30s，房主可调 10–180）；超时由机器人策略代出一手**合法**牌。**没有弃牌概念。**
@@ -152,6 +208,8 @@
 `shared/sj/bot.ts` 纯函数、确定性（可注入随机源）。要求"像个会打的朋友"，不要求强：
 
 - **亮主**：有级牌且该花色（含级牌与王）≥ 7 张就亮单张；有对级牌且该色 ≥ 8 张亮对；对王且主牌总数 ≥ 9 时反无主。绝不为反而反：只在自己主更多时反。
+- **抄底**：判据与亮主同源（`botChao` 和 `botDeclare` 共用一套枚举与取舍），但长度门槛**放宽 1 张** ——
+  抄成了不只换主花色，还能把 8 张底牌拿回来重扣，收益更高，值得更积极一点。抄不起就「不抄」。
 - **扣底**：优先扣副牌里张数最少的花色的非分牌单张（造缺门），其次扣其他副牌小单张；不扣主牌、对子、分牌，除非没得扣。
 - **首出**：会把公开信息已经证明成立的多个最大单位合并成甩牌候选；对手已缺门的副牌容易被毙，要降权；对家缺门且对手未缺门则适合配合。
   没有安全大牌时出有利花色的小单张；主牌够多时（≥ 9 张）先用主牌小对子/单张"抽主"。
@@ -167,6 +225,13 @@ export const SJ_VARIANTS = {
   sj_2a:   { label: '打通关', ladder: [2,3,4,5,6,7,8,9,10,11,12,13,14], tagline: '从 2 一路打到 A' },
 } as const;
 ```
+
+| 变体 | 级牌阶梯 | 反主级别 7 档 | 抄底 |
+| --- | --- | --- | --- |
+| 五十K | 5 → 10 → K | 是 | **常开** |
+| 打通关 | 2 → 3 → … → K → A | 是 | **常开** |
+
+两个变体的区别**只有级牌阶梯一个数组**。反主级别表和抄底是规则本身，不做成房规开关。
 
 ---
 
@@ -187,7 +252,7 @@ shared/
   protocol.ts       create 消息加 kind；ServerMsg.room 变成 AnyPublicRoom；GameEvent 并入 SjEvent
   sj/cards.ts       牌、id、花色组、大小顺序、相邻关系、分值
   sj/units.ts       把一组牌解析成 单张/对子/拖拉机/甩牌 结构；结构匹配
-  sj/rules.ts       首出合法性、跟牌合法性、甩牌校验、定圈、抠底倍数、升级表、庄家轮转
+  sj/rules.ts       反主级别 7 档表与亮法判定、首出合法性、跟牌合法性、甩牌校验、定圈、抠底倍数、升级表、庄家轮转
   sj/engine.ts      SjRoomState、阶段机、applyCommand、timeout、sanitize、migrate、events 派生
   sj/bot.ts         机器人与提示
 server/
@@ -201,6 +266,7 @@ client/
   sj/Trick.tsx      中央出牌区、定圈飞牌
   sj/Scoreboard.tsx 级别、主花色、闲家得分环、底牌
   sj/DeclareBar.tsx 亮主/反主/加固/不亮
+  sj/ChaoBar.tsx    抄底/不抄（1.4b）
   sj/KouDi.tsx      扣底交互
   sj/SjFx.tsx       全屏特效：亮主、毙、抠底、升级、通关
   sj.css            升级专属样式（复用 styles.css 的 token 与 .btn/.pc）
@@ -217,9 +283,10 @@ tests/
 // GameEvent |= SjEvent
 type SjEvent =
   | { k: 'sj_deal'; handNo: number; dealerSeat: number }
-  | { k: 'sj_declare'; playerId: string; trump: Suit | 'NT'; strength: 1|2|3|4; cardIds: string[]; reinforce: boolean }
+  | { k: 'sj_declare'; playerId: string; trump: Suit | 'NT'; strength: 0..7; cardIds: string[]; reinforce: boolean }
   | { k: 'sj_flip'; card: SjCard; trump: Suit | 'NT' }        // 翻底牌定主
-  | { k: 'sj_kou_done'; playerId: string }
+  | { k: 'sj_chao'; playerId: string; trump: Suit | 'NT'; strength: 0..7; cardIds: string[] }  // 抄底（1.4b）
+  | { k: 'sj_kou_done'; playerId: string }                    // playerId 是 kouSeat 那个人，不一定是庄家
   | { k: 'sj_play'; playerId: string; cardIds: string[]; unit: 'single'|'pair'|'tractor'|'throw'; trumped: boolean }
   | { k: 'sj_throw_fail'; playerId: string; forcedIds: string[]; penalty: number }
   | { k: 'sj_trick'; winnerId: string; points: number; toDefenders: boolean; trickNo: number }
@@ -236,15 +303,19 @@ type SjEvent =
 ```ts
 interface SjRoomState {
   kind: 'sj_510k' | 'sj_2a'; id; code; hostId; createdAt; log; chat; actionSeq;
-  settings: { turnSeconds: number; kouSeconds: number; autoContinue: boolean };
+  settings: { turnSeconds: number; kouSeconds: number; chaoSeconds: number; autoContinue: boolean };
   players: SjPlayer[];           // seat 0-3；team = seat % 2；hand: SjCard[]（服务端）
-  phase: 'lobby'|'dealing'|'declaring'|'kou'|'playing'|'hand_end'|'match_end';
+  phase: 'lobby'|'dealing'|'declaring'|'kou'|'chao'|'playing'|'hand_end'|'match_end';
   levels: [number, number];      // 两队级别（阶梯里的点数）
   handNo; dealerSeat;            // 庄家座位
   trump: { suit: Suit|'NT'|null; level: number; declarerId: string|null; strength: number; cardIds: string[] };
+                                 // strength 是 1.4 的 7 档表；老快照在 migrate() 里换算一次
   passed: string[];              // 本局点过「不亮」的人
   dealStartedAt; declareEndsAt; turnDeadline;
-  bottom: SjCard[];              // 底牌（服务端；扣底后是庄家扣下的 8 张）
+  kouSeat: number;               // 当前该扣底的人：庄家，或刚抄成底的人（1.4b）
+  chaoSeat: number | null;       // 抄底询问里当前被问到的座位
+  chaoDirty: boolean;            // 这一轮询问里有人抄成过 → 问完还要再开一轮
+  bottom: SjCard[];              // 底牌（服务端；扣底后是 kouSeat 那个人扣下的 8 张）
   bottomRevealed: boolean;       // 抠底/局末公开
   trickNo; leaderSeat; turnSeat;
   trick: { seat: number; cardIds: string[] }[];   // 当前圈已出
@@ -257,7 +328,9 @@ interface SjRoomState {
 }
 ```
 
-`sanitize(state, viewerId)`：只给自己的 `hand`；别人只给 `handCount`；底牌只在 `kou` 阶段给庄家、`bottomRevealed` 后给所有人；亮主牌、当前圈、上一圈、分牌堆公开。**任何测试都要断言别人的手牌不会出现在响应里。**
+`sanitize(state, viewerId)`：只给自己的 `hand`；别人只给 `handCount`；底牌只在 `kou` 阶段给
+`kouSeat` 那一个人、`bottomRevealed` 后给所有人（**`chao` 阶段谁都看不到**）；
+亮主/抄底的明牌、当前圈、上一圈、分牌堆公开。**任何测试都要断言别人的手牌不会出现在响应里。**
 
 ### 2.5 Hub 定时器
 
@@ -265,7 +338,8 @@ interface SjRoomState {
 | --- | --- | --- |
 | dealing | dealStartedAt + 4.6s | → declaring，declareEndsAt = now + 3s |
 | declaring | declareEndsAt（每次有效亮主 +2s） | 无人亮 → 翻底牌；→ kou |
-| kou | kouSeconds | 机器人代扣 |
+| kou | kouSeconds | 机器人代扣（代的是 `kouSeat`，不一定是庄家）|
+| chao | chaoSeconds（默认 12s，每人一次） | 自动「不抄」；有人抄成 → 回 kou 重扣，扣完接着问 |
 | playing | turnSeconds；机器人 500–1100ms 思考 | 机器人策略代出 |
 | hand_end | 9s | 下一局（autoContinue）或等房主 |
 
@@ -317,8 +391,13 @@ interface SjRoomState {
   只预选、不自动提交；仍可继续点牌组成甩牌，双击对子和长按/拖动横扫多选作为补充操作。
 - `提示`：循环给出合法出法（复用 bot.suggest），每按一次换下一个候选，选中态用金色抬起。
 - 出牌按钮文案随选牌变化：`出牌 · 对子` / `出牌 · 拖拉机 ×2` / `甩牌 5 张`；不合法时按钮灰且下方一行说明原因（"首出是对子，你还有黑桃对子必须出"）。
-- 亮主条只在窗口内出现：按钮按强度排 `♠5 亮主` `♠5 一对` `小王一对 无主` … 只显示手里做得到的；`不亮` 灰按钮。
+- 亮主条只在窗口内出现：按钮按档位排 `♠5 亮主` `♠5 一对` `小王一对 无主` … 只显示手里做得到的；`不亮` 灰按钮。
+- **抄底条**（`client/sj/ChaoBar.tsx`）：轮到我时列出所有**严格更强**的亮法按钮（文案 `♠5 一对 · 抄底`）
+  加一颗 `不抄` 灰按钮、倒计时，和一行「抄底会拿走 8 张底牌重扣，并把主变成你亮的花色」；
+  不轮到我时显示「正在问 X 是否抄底 · 还剩 Ns」和当前主花色/级别。
+  按钮列表来自 `declareOptions(..., 'chao')`，与服务端的 `doChao` 同源 —— **点得亮的服务端一定收**。
 - 扣底：33 张全部展开，点选 8 张，下方 8 个空槽逐个填入；`确认扣底` 只有恰好 8 张时可点；给一个 `帮我扣`（机器人策略）按钮。
+  抄底者重新扣底时文案换成「你抄了底，重新扣 8 张」；别人视角显示的是 `kouSeat` 那个人，不是庄家。
 - 看上一轮：按住显示上一圈四手牌与赢家。
 - 轮到你：座位呼吸环（复用 TurnRing）+ 手牌整体轻微上浮 + 语音「该你啦」。
 - 分牌：闲家赢到的分牌堆在记分板里可展开看具体牌。
@@ -331,7 +410,8 @@ interface SjRoomState {
 | 发牌 `sj_deal` | 桌心牌堆逐张飞向四座，45ms 一张、轻微弧线与随机旋转（±6°），自己的牌落地即翻面；发完后手牌一次 FLIP 排序（600ms，spring）。音：每张一声极轻的 `deal`，音高逐张微升。 |
 | 亮主 `sj_declare` | 亮的牌从手里**拍**到座位前（缩放 1.15→1，带阴影落地），花色符号从桌心炸开一圈粒子，桌面光池在 700ms 内变成该花色的颜色；反主时旧牌被"撞"飞（旋转滑出）。语音：「红桃主」「一对黑桃主」「无主！」。 |
 | 翻底定主 `sj_flip` | 底牌第一张翻起悬停 1.2s，同样触发光池变色。 |
-| 扣底 | 8 张底牌从桌心飞到庄家手里（别人看到的是 8 张牌背飞过去）；扣下的牌逐张翻到背面落进桌心"底"堆。 |
+| 抄底 `sj_chao` | 桌面压暗 → 亮出的牌从手里拍到台面（旧亮主者的明牌复用反主那一下的"撞飞"）→ 「抄底」戳记砸下 → 8 张底牌翻着背飞向抄底者 → 光池换成新主花色。 |
+| 扣底 | 8 张底牌从桌心飞到 `kouSeat` 手里（别人看到的是 8 张牌背飞过去）；扣下的牌逐张翻到背面落进桌心"底"堆。抄底会再走一次这一拍。 |
 | 出牌 `sj_play` | 牌从手牌滑到出牌区，多张之间 40ms 错开；**毙**（trumped）时冷钢蓝闪一下（复用比牌那个蓝）。 |
 | 定圈 `sj_trick` | 赢家那手牌金边亮 300ms → 四手牌叠起飞向赢家座位；有分时**分牌先分离出来**，沿弧线飞到记分板分牌堆，得分环增长 + 数字滚动 + 叮（每张一声，音高上行）。 |
 | 甩牌失败 `sj_throw_fail` | 甩出的牌抖一下弹回手中，只留最小单位；红色戳记「甩牌失败 −10」。 |
@@ -367,9 +447,16 @@ CLI 打印后退出（exit 1），MCP 把它作为工具错误返回。CLI/MCP �
 
 - `sj-cards`：顺序表（有主/无主、级牌各种位置）、相邻关系（跳级牌、A→副级→主级→小王→大王）、分值。
 - `sj-units`：对子/拖拉机识别（含跨级牌相邻、副级牌不相邻）、甩牌拆分。
-- `sj-rules`：跟牌合法性 ≥ 30 个用例（有对必出对、拖拉机优先、不足张数、缺门垫/毙）；定圈 ≥ 20 个（毙、结构不匹配不算、相等先出赢、甩牌比法）；甩牌校验成功/失败与罚分；抠底倍数；升级表全部区间；庄家轮转；夹到顶级；通关条件。
-- `sj-engine`：完整一局流程（发牌→亮主→反主→加固→扣底→打完 25 张→抠底→结算）；翻底定主；超时代打；断线代打；sanitize 不泄露（对每个视角断言别人的 hand 为空、底牌只在该看的时候可见）；快照 migrate。
+- `sj-rules`：反主级别 7 档全序、单张之间不能互反、加固只抬到本花色档位、对王 6/7、不能自反（亮主可加固 / 抄底只剩对王）、亮法枚举；跟牌合法性 ≥ 30 个用例（有对必出对、拖拉机优先、不足张数、缺门垫/毙）；定圈 ≥ 20 个（毙、结构不匹配不算、相等先出赢、甩牌比法）；甩牌校验成功/失败与罚分；抠底倍数；升级表全部区间；庄家轮转；夹到顶级；通关条件。
+- `sj-engine`：完整一局流程（发牌→亮主→反主→加固→扣底→**抄底**→打完 25 张→抠底→结算）；翻底定主；
+  抄底的完整状态机（依次询问 → 有人抄 → 重新扣底 → 接着问 → 再有人抄 → 一轮无人抄才开打）；
+  庄家不参与询问；不能自反、对王可以把自己反成无主；首局抄底换庄、第二局起不换庄；
+  抄底之后仍是 4×25 + 底 8；扣底把自己的明牌扣下去时明牌 id 要摘掉；超时代打；断线代打；
+  sanitize 不泄露（每个视角别人的 hand 为空；底牌在 `chao` 阶段谁都看不到、在 `kou` 阶段只给 `kouSeat`）；
+  快照 migrate（含 strength 从 4 档换算成 7 档，且只换算一次）。
+- `sj-client`：抄底条列出来的每一手服务端都收得下，没画出来的一手都收不下（客户端与服务端判定同源）。
 - `sj-fuzz`：4 个机器人随机对局 **300 局** 不抛错、每局四家各出满 25 张且**圈数 ≤ 25**（见 1.4 的修正）、每一圈四家出牌张数相同、分数守恒（闲家分 + 庄家分 + 底牌分 = 200，罚分与抠底单独核）、每场比赛在 200 局内必然结束。随机种子可复现，失败时打印种子。
+  抄底会让主花色在 `kou` 之后**还会变**，所以任何缓存了 `ctx` 的地方都必须在进 playing 之后才取。
 - 炸金花原有 `tests/*.test.ts` 原样通过（不允许改断言）。
 - `npm run typecheck`、`npm run build` 通过；`dist/server.mjs` 启动无警告。
 

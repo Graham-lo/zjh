@@ -6,11 +6,12 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPlay, smartPickForCard, throwFailText } from '../client/sj/util.ts';
+import { checkPlay, declareOptions, smartPickForCard, throwFailText } from '../client/sj/util.ts';
 import { suggest, type SjSuggestView } from '../shared/sj/bot.ts';
+import { applySjCommand, timeoutKou } from '../shared/sj/engine.ts';
 import { parseShape } from '../shared/sj/units.ts';
-import { validateFollow } from '../shared/sj/rules.ts';
-import { CTX_S5, h } from './sj-helpers.ts';
+import { declarationOptions, validateFollow } from '../shared/sj/rules.ts';
+import { CTX_S5, h, makeSjRoom, mulberry32, runDeclaring } from './sj-helpers.ts';
 
 /* --------------------------------------------------------- 出牌按钮 */
 
@@ -69,6 +70,59 @@ test('跟牌只剩一种打法时，建议列表只有一项 —— 这一手可
 test('还有得选的时候建议不止一项 —— 不会替玩家做决定', () => {
   const many = suggest(view(['H3a']), h('HAa H2a SKa'));
   assert.ok(many.length > 1, '出大出小是两种打法，得让玩家自己挑');
+});
+
+/* ------------------------------------------- 抄底按钮与服务端同源（1.4b） */
+
+/**
+ * 这条是「抄底按钮能点的，服务端一定接受」那句承诺的看门人。
+ *
+ * 对真实牌局里每一个被问到抄底的人，把抄底条会画出来的按钮逐个拿去给服务端跑一遍：
+ * 列出来的必须全收，没列出来的（但形式合法的亮法）必须全拒。
+ * 两边只要有一处各写各的，这里立刻就红。
+ */
+test('抄底条上点得亮的每一手服务端都收得下，没画出来的一手都收不下', () => {
+  let accepted = 0;
+  let rejected = 0;
+  for (let seed = 1; seed <= 12; seed++) {
+    const room = makeSjRoom('sj_510k');
+    const o = { rng: mulberry32(seed), now: 1_700_000_000_000 };
+    applySjCommand(room, room.hostId, { type: 'start' }, o);
+    runDeclaring(room, o);
+    timeoutKou(room, o); // 庄家扣完底 → 抄底询问
+
+    let guard = 0;
+    while (room.phase === 'chao') {
+      assert.ok(guard++ < 10, `seed=${seed}：询问没有收敛`);
+      const asked = room.players[room.chaoSeat!];
+      const shown = declareOptions(asked.hand, room.trump, asked.id, 'chao');
+      const shownKeys = new Set(shown.map((x) => x.cardIds.slice().sort().join(',')));
+
+      for (const opt of shown) {
+        // 在副本上试，免得把主线程的这一局改掉
+        const clone = structuredClone(room);
+        applySjCommand(clone, asked.id, { type: 'chao', cardIds: opt.cardIds }, o);
+        assert.equal(clone.phase, 'kou', `seed=${seed}：抄成了就该轮到他重新扣底`);
+        assert.equal(clone.kouSeat, asked.seat);
+        accepted += 1;
+      }
+      // 手里做得到、但按钮没画出来的那些，服务端必须拒绝
+      for (const opt of declarationOptions(asked.hand, room.trump.level)) {
+        const key = opt.cards.map((c) => c.id).sort().join(',');
+        if (shownKeys.has(key)) continue;
+        const clone = structuredClone(room);
+        assert.throws(
+          () => applySjCommand(clone, asked.id, { type: 'chao', cardIds: opt.cards.map((c) => c.id) }, o),
+          `seed=${seed}：${key} 没画在抄底条上，服务端却收了`,
+        );
+        rejected += 1;
+      }
+      applySjCommand(room, asked.id, { type: 'pass_chao' }, o);
+    }
+    assert.equal(room.phase, 'playing', `seed=${seed}：全员不抄就该开打`);
+  }
+  assert.ok(accepted > 0, '一次都没抄成过，这条用例什么都没验到');
+  assert.ok(rejected > 0, '一次都没拒过，反向那一半没验到');
 });
 
 /* --------------------------------------------------------- 单击智能联选 */

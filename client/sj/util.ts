@@ -10,7 +10,10 @@ import {
 } from '../../shared/sj/cards.ts';
 import type { SjPublicPlayer, SjPublicRoom, SjTrumpState } from '../../shared/sj/engine.ts';
 import { allPairs, allTractors, cardsInGroup, parseShape, type SjShape } from '../../shared/sj/units.ts';
-import { followRequirement, shapeLabel, unitLabel, validateFollow, validateLead } from '../../shared/sj/rules.ts';
+import {
+  followRequirement, legalDeclarations, shapeLabel, unitLabel, validateFollow, validateLead,
+  type SjDeclKind,
+} from '../../shared/sj/rules.ts';
 import type { VoiceKey } from '../sound.ts';
 
 /** 桌面顶灯的光池色随主花色变 —— 整桌最强的记忆点（DESIGN 3.2） */
@@ -75,53 +78,42 @@ export interface DeclareOption {
   reinforce: boolean;
 }
 
+const DECL_GLYPH: Record<SjDeclKind, (level: number, suit: SjTrumpSuit) => string> = {
+  single: (level, suit) => `${SUIT_SYMBOL[suit as SjPlainSuit]}${levelLabel(level)}`,
+  pair: (level, suit) => `${SUIT_SYMBOL[suit as SjPlainSuit]}${levelLabel(level)}`,
+  joker_s: () => '小王',
+  joker_b: () => '大王',
+};
+
 /**
- * 我手里**做得到**的亮法，按强度排序（DESIGN 3.4）。
+ * 我手里**现在真的亮得成**的亮法，按档位从弱到强排（DESIGN 3.4 / 1.4b）。
  *
- * 规则和 `readDeclaration` / `doDeclare` 逐条对齐：必须严格更强才能反主；
- * 当前亮主者只能用同花色第二张级牌加固，或者用对王把自己反成无主。
+ * 枚举与合法性全部来自 `shared/sj/rules.ts` 的 `legalDeclarations` ——
+ * 服务端的 `doDeclare` / `doChao` 走的是同一条判据，所以**按钮点得亮的，服务端一定收**。
+ * `mode` 区分亮主窗口（允许同花色加固）和抄底询问（不能自反，只有对王能反自己）。
  */
-export function declareOptions(hand: SjCard[], trump: SjTrumpState, myId: string): DeclareOption[] {
+export function declareOptions(
+  hand: SjCard[], trump: SjTrumpState, myId: string, mode: 'declare' | 'chao' = 'declare',
+): DeclareOption[] {
   const level = trump.level;
   const isDeclarer = trump.declarerId === myId;
-  const out: DeclareOption[] = [];
-
-  for (const suit of ['S', 'H', 'C', 'D'] as SjPlainSuit[]) {
-    const levels = hand.filter((c) => c.suit === suit && c.rank === level);
-    if (!levels.length) continue;
-    const face = `${SUIT_SYMBOL[suit]}${levelLabel(level)}`;
-    // 加固：我已经用这门花色亮了单张，再补一张同花色级牌把强度抬到 2
-    const reinforce = isDeclarer && trump.strength === 1 && trump.suit === suit;
-    if (!isDeclarer && levels.length >= 1) {
-      out.push({
-        key: `${suit}1`, cardIds: [levels[0].id], strength: 1, glyph: face,
-        note: '单张', trump: suit, reinforce: false,
-      });
-    }
-    if (levels.length >= 2 && (!isDeclarer || reinforce)) {
-      out.push({
-        key: `${suit}2`, cardIds: [levels[0].id, levels[1].id], strength: 2, glyph: face,
-        note: reinforce ? '一对 · 加固' : '一对', trump: suit, reinforce,
-      });
-    }
-  }
-
-  const small = hand.filter((c) => c.suit === 'J' && c.rank === 15);
-  const big = hand.filter((c) => c.suit === 'J' && c.rank === 16);
-  if (small.length >= 2) {
-    out.push({
-      key: 'nt3', cardIds: [small[0].id, small[1].id], strength: 3, glyph: '小王',
-      note: '一对 · 无主', trump: 'NT', reinforce: false,
-    });
-  }
-  if (big.length >= 2) {
-    out.push({
-      key: 'nt4', cardIds: [big[0].id, big[1].id], strength: 4, glyph: '大王',
-      note: '一对 · 无主', trump: 'NT', reinforce: false,
-    });
-  }
-
-  return out.filter((o) => o.strength > trump.strength).sort((a, b) => a.strength - b.strength);
+  return legalDeclarations(hand, level, trump, myId, mode).map((o) => {
+    // 加固：我已经用这门花色亮了单张，再补一张同花色级牌把它抬成这门花色的一对
+    const reinforce = mode === 'declare' && isDeclarer && trump.strength === 1
+      && o.kind === 'pair' && trump.suit === o.trump;
+    const note = o.kind === 'single' ? '单张'
+      : o.trump === 'NT' ? '一对 · 无主'
+        : reinforce ? '一对 · 加固' : '一对';
+    return {
+      key: `${o.kind}-${o.trump}`,
+      cardIds: o.cards.map((c) => c.id),
+      strength: o.strength,
+      glyph: DECL_GLYPH[o.kind](level, o.trump),
+      note: mode === 'chao' ? `${note} · 抄底` : note,
+      trump: o.trump,
+      reinforce,
+    };
+  });
 }
 
 /* ------------------------------------------------------------ 出牌按钮文案 */
