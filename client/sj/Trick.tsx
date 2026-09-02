@@ -36,10 +36,10 @@ export function PlayZone({
 }
 
 /** 亮在座位前的明牌（DESIGN 1.4：亮主的牌明着放到扣底结束） */
-export function DeclaredCards({ spot, cards }: { spot: SjSpot; cards: SjCard[] }) {
+export function DeclaredCards({ spot, cards, knocked }: { spot: SjSpot; cards: SjCard[]; knocked?: boolean }) {
   if (!cards.length) return null;
   return (
-    <div className={`sj-declared sj-declared-${spot}`}>
+    <div className={`sj-declared sj-declared-${spot}${knocked ? ' is-knocked' : ''}`}>
       {cards.map((c, i) => (
         <span key={c.id} className="sj-declared-card" style={{ ['--i' as string]: i }}>
           <PlayingCard card={c} faceDown={false} size="play" />

@@ -685,3 +685,26 @@
   .sj-last { inset: 4% 4%; }
   .sj-last-who { width: 62px; }
 }
+
+/* 反主：上一个人亮的牌被"撞"飞 —— 旋转着滑出桌面（DESIGN 3.5） */
+.sj-declared.is-knocked { z-index: 6; pointer-events: none; }
+.sj-declared.is-knocked .sj-declared-card {
+  animation: sjKnockOut 0.9s cubic-bezier(0.36, 0, 0.66, -0.56) forwards;
+  animation-delay: calc(var(--i) * 60ms);
+}
+@keyframes sjKnockOut {
+  0% { transform: rotate(calc(-6deg + var(--i) * 12deg)) scale(1); opacity: 1; }
+  18% { transform: translate(-14px, -10px) rotate(calc(-16deg + var(--i) * 12deg)) scale(1.08); }
+  100% { transform: translate(calc(180px + var(--i) * 40px), -170px) rotate(calc(140deg + var(--i) * 40deg)) scale(0.7); opacity: 0; }
+}
+
+/* 大厅里点别人的座位换过去 */
+.sj-seat.can-swap { cursor: pointer; }
+.sj-seat.can-swap:hover { border-color: rgba(227, 200, 143, 0.5); transform: translateY(-2px); }
+.sj-seat-top.can-swap:hover { transform: translateX(-50%) translateY(-2px); }
+.sj-seat-me.can-swap:hover { transform: translateX(-50%) translateY(-2px); }
+
+/* 结算面板：旧级别划掉，新级别翻面进来 */
+.sj-res-lv { display: inline-flex; align-items: baseline; gap: 8px; }
+.sj-res-lv s { font-family: var(--font-num); font-size: 26px; color: var(--muted); }
+.sj-res-lv em { font-style: normal; color: var(--gold-3); font-size: 15px; }

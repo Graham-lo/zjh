@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { EMOTES } from '../../shared/game.ts';
-import { SJ_VARIANTS } from '../../shared/games.ts';
+import { GAME_META, ladderOf } from '../../shared/games.ts';
 import { cardFromId, levelLabel, sortSjHand } from '../../shared/sj/cards.ts';
 import type { SjCommand, SjPublicPlayer, SjPublicRoom, SjTrickRecord } from '../../shared/sj/engine.ts';
 import { suggest } from '../../shared/sj/bot.ts';
@@ -36,12 +36,15 @@ function SeatCard({
   room,
   isMe,
   isTurn,
+  onSwap,
 }: {
   player: SjPublicPlayer;
   spot: SjSpot;
   room: SjPublicRoom;
   isMe: boolean;
   isTurn: boolean;
+  /** 大厅里点别人的座位就换过去，方便组队（DESIGN 1.3） */
+  onSwap?: () => void;
 }) {
   const myTeam = teamOfSeat(room.players.find((p) => p.id === room.viewerId)?.seat ?? 0);
   const sameTeam = teamOfSeat(player.seat) === myTeam;
@@ -50,11 +53,12 @@ function SeatCard({
     'sj-seat', `sj-seat-${spot}`,
     isTurn && 'is-turn',
     isMe && 'is-me',
+    onSwap && 'can-swap',
     !player.online && !player.isBot && 'is-offline',
   ].filter(Boolean).join(' ');
 
   return (
-    <div className={cls}>
+    <div className={cls} onClick={onSwap} title={onSwap ? '点一下和他换座（0/2 一队、1/3 一队）' : undefined}>
       <div className="sj-seat-av">
         {isTurn && <TurnRing deadline={room.turnDeadline} total={room.settings.turnSeconds} />}
         <span className="avatar-glyph">{player.avatar}</span>
@@ -185,6 +189,9 @@ export function SjTable({
   const [mutedVoice, setMutedVoice] = useState(!voice.enabled);
   const [dealAt, setDealAt] = useState(0);
   const [collect, setCollect] = useState<{ id: number; rec: SjTrickRecord } | null>(null);
+  /** 被反主撞飞的旧亮主牌：旋转滑出 900ms（DESIGN 3.5） */
+  const [knocked, setKnocked] = useState<{ id: number; spot: SjSpot; cards: ReturnType<typeof cardFromId>[] } | null>(null);
+  const prevDecl = useRef<{ id: string; cards: ReturnType<typeof cardFromId>[] } | null>(null);
   const [rain, setRain] = useState(0);
   const [shake, setShake] = useState(0);
   /** 结算面板要等牌桌把结算那一拍演完再升起来（沿用炸金花的两拍节奏） */
@@ -194,6 +201,8 @@ export function SjTable({
 
   /* 全屏特效的单车道队列：两个大字叠在一起谁也看不清（沿用炸金花的做法） */
   const [fx, setFx] = useState<{ id: number; job: SjFxJob } | null>(null);
+  /** 队里还有没有没演完的特效。结算面板要等它清空（抠底那一段有 4.4s） */
+  const [fxBusy, setFxBusy] = useState(false);
   const fxLive = useRef(false);
   const fxWait = useRef<SjFxJob[]>([]);
 
@@ -217,17 +226,22 @@ export function SjTable({
   useEffect(() => {
     if (dockOpen) setUnread(0);
   }, [dockOpen]);
-  /* 结算：先让全屏戳记演完（结算 2.8s / 通关 4.2s），面板再升起来 */
+  /**
+   * 结算面板等牌桌把这一拍演完再升起来（沿用炸金花开牌亮相的两拍节奏）。
+   * 抠底那一段自己就要 4.4s，所以不是定长等待，而是等特效队列清空。
+   */
   useEffect(() => {
     if (room.phase !== 'hand_end' && room.phase !== 'match_end') return setPanelUp(false);
-    const t = setTimeout(() => setPanelUp(true), room.phase === 'match_end' ? 4400 : 2900);
+    if (fxBusy) return;
+    const t = setTimeout(() => setPanelUp(true), 450);
     return () => clearTimeout(t);
-  }, [room.phase, room.handNo]);
+  }, [room.phase, room.handNo, fxBusy]);
 
   const nameOf = (id: string) => room.players.find((p) => p.id === id)?.name ?? '玩家';
   const seatOf = (id: string) => room.players.find((p) => p.id === id)?.seat ?? 0;
 
   function pushFx(job: SjFxJob) {
+    setFxBusy(true);
     if (fxLive.current) {
       fxWait.current.push(job);
       return;
@@ -236,6 +250,7 @@ export function SjTable({
   }
   function startFx(job: SjFxJob) {
     fxLive.current = true;
+    setFxBusy(true);
     uid.current += 1;
     setFx({ id: uid.current, job });
     if (job.kind === 'dig') setShake((n) => n + 1);
@@ -245,6 +260,7 @@ export function SjTable({
     setFx(null);
     const next = fxWait.current.shift();
     if (next) setTimeout(() => !fxLive.current && startFx(next), 260);
+    else setFxBusy(false);
   }
 
   /* 事件 → 音效与动画。状态永远以 room 为准，事件只负责表演（DESIGN 2.3 / 3.5） */
@@ -260,6 +276,13 @@ export function SjTable({
           break;
         }
         case 'sj_declare': {
+          // 反主：把上一个人亮的牌留在原地撞飞一下，再让新的拍下来
+          const prev = prevDecl.current;
+          if (prev && prev.id !== ev.playerId && prev.cards.length) {
+            const id = ++uid.current;
+            setKnocked({ id, spot: spotOf(seatOf(prev.id), mySeat), cards: prev.cards });
+            setTimeout(() => setKnocked((k) => (k?.id === id ? null : k)), 900);
+          }
           sound.play('slam');
           voice.play(ev.strength >= 2 && ev.trump !== 'NT' ? 'trump_pair' : TRUMP_VOICE[ev.trump]);
           navigator.vibrate?.([20, 40, 30]);
@@ -352,6 +375,14 @@ export function SjTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [batch.seq]);
 
+  /* 记下「现在谁亮着什么牌」，下一次有人反主时拿它演撞飞。
+     这个 effect 声明在事件 effect 之后，所以同一次提交里事件读到的仍是上一轮的值 */
+  useEffect(() => {
+    const d = room.trump.declarerId;
+    const p = d ? room.players.find((x) => x.id === d) : null;
+    prevDecl.current = p && p.declaredIds.length ? { id: p.id, cards: p.declaredIds.map(cardFromId) } : null;
+  }, [room.trump.declarerId, room.trump.cardIds.join(',')]);
+
   /* 发牌动画只在开头那 4.6 秒里播 */
   const dealing = dealAt > 0 && Date.now() - dealAt < DEAL_MS;
   useEffect(() => {
@@ -405,7 +436,7 @@ export function SjTable({
 
   const tint = room.trump.suit ? TRUMP_TINT[room.trump.suit] : '#7f93b8';
   const trickPts = trickPointsOf(room);
-  const label = SJ_VARIANTS[room.kind].label;
+  const label = GAME_META[room.kind].label;
   const result = room.result;
   const showResult = (room.phase === 'hand_end' || room.phase === 'match_end') && !!result && panelUp;
   // 一圈四家出牌张数相同，所以「已出 m/25」看自己手里还剩多少就够（DESIGN 1.4 修订）
@@ -519,6 +550,7 @@ export function SjTable({
                   room={room}
                   isMe={p.id === me.id}
                   isTurn={room.turnSeat === p.seat && (room.phase === 'playing' || room.phase === 'kou')}
+                  onSwap={room.phase === 'lobby' && p.id !== me.id ? () => send({ type: 'seat', seat: p.seat }) : undefined}
                 />
               );
             })}
@@ -527,6 +559,7 @@ export function SjTable({
             {(['top', 'left', 'right', 'me'] as SjSpot[]).map((spot) => (
               <DeclaredCards key={`d-${spot}`} spot={spot} cards={declaredOf(seats[spot])} />
             ))}
+            {knocked && <DeclaredCards key={knocked.id} spot={knocked.spot} cards={knocked.cards} knocked />}
 
             {/* 当前圈：每手牌落在各自座位前 */}
             {!collect &&
@@ -710,7 +743,14 @@ function SjResult({ room, mySeat, cmd }: { room: SjPublicRoom; mySeat: number; c
   const points = useCountUp(r.defenderPoints);
   const left = useCountdown(room.phase === 'hand_end' ? room.turnDeadline : null);
   const nextDealer = room.players.find((p) => p.seat === r.nextDealerSeat);
-  const levelBefore = room.levels; // 已经是升级后的值
+  // room.levels 已经是升级后的值；把升的那几级倒推回去就得到本局开打时的级别
+  const ladder = ladderOf(room.kind);
+  const upTeam = r.outcome.defendersWin ? defenders : dealerTeam;
+  const before: [number, number] = [r.levelsAfter[0], r.levelsAfter[1]];
+  if (r.outcome.up > 0) {
+    const idx = Math.max(0, ladder.indexOf(r.levelsAfter[upTeam]) - r.outcome.up);
+    before[upTeam] = ladder[Math.max(0, idx)];
+  }
   const bar = Math.min(100, (r.defenderPoints / 200) * 100);
 
   return (
@@ -725,15 +765,23 @@ function SjResult({ room, mySeat, cmd }: { room: SjPublicRoom; mySeat: number; c
         <h2 className={won ? 'win' : 'lose'}>{room.phase === 'match_end' ? '通 关' : r.outcome.label}</h2>
 
         <div className="sj-res-levels">
-          {[myTeam, 1 - myTeam].map((team) => (
-            <div key={team} className={`sj-res-team${team === myTeam ? ' mine' : ''}`}>
-              <span>{team === myTeam ? '我方' : '对方'}</span>
-              <b key={levelBefore[team]} className="sj-level-num">
-                {levelLabel(levelBefore[team])}
-              </b>
-              {team === dealerTeam && <i>本局坐庄</i>}
-            </div>
-          ))}
+          {[myTeam, 1 - myTeam].map((team) => {
+            const up = before[team] !== r.levelsAfter[team];
+            return (
+              <div key={team} className={`sj-res-team${team === myTeam ? ' mine' : ''}`}>
+                <span>{team === myTeam ? '我方' : '对方'}</span>
+                <div className="sj-res-lv">
+                  {/* 升级那一下要看得见：旧级别划掉，新级别翻面进来 */}
+                  {up && <s>{levelLabel(before[team])}</s>}
+                  {up && <em>→</em>}
+                  <b key={r.levelsAfter[team]} className="sj-level-num">
+                    {levelLabel(r.levelsAfter[team])}
+                  </b>
+                </div>
+                {team === dealerTeam && <i>本局坐庄</i>}
+              </div>
+            );
+          })}
         </div>
 
         <div className="sj-res-bar">
