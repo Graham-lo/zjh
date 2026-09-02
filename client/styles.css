@@ -1958,3 +1958,177 @@ button { touch-action: manipulation; }
   .seat:not(.is-me) .tag.looked { left: 8px; padding: 1px 3px; }
   .seat:not(.is-me) .tag.looked i { display: none; }
 }
+
+/* =========================================================================
+   首页 · 选桌（DESIGN 3.1，画板 Main.dc.html / HomeMobile.dc.html）
+
+   结构从「一个游戏 + 入座卡」变成「选桌 → 入座」：左品牌、中三张桌卡、右入座卡。
+   炸金花那一套 `.landing` / `.entry` / `.ladder` / `.btn` 的规则一条都不动，
+   这里只用 `.home` 这一层把布局换掉，并补上桌卡自己的样式。
+   ========================================================================= */
+
+.landing.home {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 48px;
+  max-width: 1560px;
+  padding: 40px 56px calc(40px + env(safe-area-inset-bottom));
+}
+
+/**
+ * 选中的桌卡决定整页的底色 —— 炸金花墨绿（就是 body 本来的底），
+ * 升级深蓝墨。这一层压在内容下面淡入淡出，从首页到牌桌颜色是连续的。
+ */
+.home::before {
+  content: "";
+  position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(58% 40% at 50% -6%, rgba(150, 190, 255, 0.12), transparent 62%),
+    radial-gradient(150% 105% at 48% 44%, #0f1d33 0%, #0a1424 42%, #060b08 76%, #030504 100%);
+  opacity: 0;
+  transition: opacity 0.7s var(--ease);
+}
+.home[data-tint="sj"]::before { opacity: 1; }
+/* 内容压在换色层上面：不定位的话 section 会被这层盖住 */
+.home > section { position: relative; z-index: 1; }
+
+.home-brand { flex: 0 1 300px; max-width: 300px; }
+.home-brand .eyebrow { letter-spacing: 0.32em; font-size: 12px; }
+.home-brand .lead { margin-top: 22px; font-size: 16px; }
+.home-brand .hero-cards { margin-top: 44px; }
+.home-tables { flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+.home-entry { flex: 0 0 380px; }
+
+/* ----------------------------------------------------------------- 桌卡 */
+
+.tcard {
+  position: relative;
+  box-sizing: border-box;
+  display: flex; align-items: center; gap: 22px;
+  padding: 22px 24px; border-radius: 22px; text-align: left; cursor: pointer;
+  border: 1px solid rgba(227, 200, 143, 0.18);
+  /* 左上角泛起的那片绒布色就是这张桌子的底色 */
+  background:
+    radial-gradient(90% 100% at 20% 0%, rgba(var(--tint), 0.26), transparent 60%),
+    linear-gradient(180deg, rgba(22, 33, 27, 0.92), rgba(9, 15, 12, 0.96));
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);
+  transition: transform 0.34s var(--spring), border-color 0.2s, box-shadow 0.3s, background 0.6s var(--ease);
+}
+.tcard:hover { transform: translateY(-2px); border-color: rgba(227, 200, 143, 0.42); }
+/* 选中：抬起 + 金边 + 绒布色泛起 */
+.tcard.on {
+  transform: translateY(-4px);
+  border-color: rgba(227, 200, 143, 0.7);
+  background:
+    radial-gradient(90% 100% at 20% 0%, rgba(var(--tint), 0.9), transparent 60%),
+    linear-gradient(180deg, rgba(22, 33, 27, 0.92), rgba(9, 15, 12, 0.96));
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6), 0 0 40px rgba(227, 200, 143, 0.12);
+}
+.tcard-main { flex: 1; min-width: 0; }
+/* 标题绝不折行；窄的时候是英文小标退到下一行，而不是把「五十K」掰成两截 */
+.tcard-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.tcard-head b {
+  font-family: var(--font-serif); font-size: 30px; font-weight: 900; letter-spacing: 0.04em;
+  background: linear-gradient(180deg, #f7ecd2 20%, #e3c88f 58%, #b08d4f 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  white-space: nowrap;
+}
+.tcard-head span { font-size: 11px; letter-spacing: 0.26em; color: #b39a63; white-space: nowrap; }
+.tcard-blurb { margin: 6px 0 0; font-size: 13.5px; color: #a8b5ab; line-height: 1.7; }
+.tcard-tags { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.tcard-tags span {
+  font-size: 11.5px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12); color: var(--muted);
+}
+.tcard-ladder { margin-top: 14px; }
+.tcard-ladder .ladder { margin-top: 0; max-width: 100%; flex-wrap: nowrap; }
+.tcard-ladder .ladder span { padding: 7px 12px; font-size: 12px; }
+.tcard-ladder .ladder span.top { padding: 7px 14px; }
+.tcard-go { flex: none; padding: 14px 20px; font-size: 15px; }
+/* 13 格阶梯要塞进桌卡，格子比 6 格的窄一号 */
+.tcard-ladder .ladder.long span { padding: 5px 7px; font-size: 10.5px; }
+.tcard-ladder .ladder.long span.top { padding: 5px 9px; }
+/* 13 格阶梯窄屏上退化成 2 3 … K A，五格就够表达「一路打上去」 */
+.ladder.short { display: none; }
+
+/* 五十K 的三枚级牌：当前那张是真牌面，后面两张是描金空位 */
+.lvl-row { display: flex; align-items: center; gap: 10px; }
+.lvl-step { display: inline-flex; align-items: center; gap: 10px; }
+.lvl-arrow { font-style: normal; color: var(--gold-3); font-size: 16px; }
+.lvl-card {
+  width: 44px; height: 58px; border-radius: 7px; display: grid; place-items: center;
+  font-family: var(--font-num); font-size: 26px; font-weight: 700;
+  background: rgba(255, 255, 255, 0.06); color: var(--gold);
+  border: 1px solid rgba(227, 200, 143, 0.3);
+  transition: transform 0.3s var(--spring);
+}
+.tcard:hover .lvl-card.on { transform: translateY(-3px) rotate(-3deg); }
+.lvl-card.on {
+  background: linear-gradient(118deg, #fffdf7, #ebe4d4); color: var(--card-red);
+  border-color: transparent;
+  box-shadow: 0 0 0 2px var(--gold), 0 8px 20px rgba(0, 0, 0, 0.5);
+}
+
+/* ------------------------------------------------------- 首页的响应式档位 */
+
+@media (max-width: 1280px) {
+  .landing.home { flex-wrap: wrap; max-width: 1000px; gap: 30px; padding: 34px 32px; }
+  .home-brand { flex: 1 1 100%; max-width: none; }
+  .home-brand .hero-cards { display: none; }
+  .home-brand .lead { max-width: none; }
+  .home-tables { flex: 1 1 440px; }
+  .home-entry { flex: 1 1 320px; }
+  .ladder.long { display: none; }
+  .ladder.short { display: inline-flex; }
+}
+
+@media (max-width: 900px) {
+  .landing.home {
+    flex-direction: column; align-items: stretch; gap: 20px;
+    padding: 30px 18px calc(30px + env(safe-area-inset-bottom));
+  }
+  .home-brand, .home-tables, .home-entry { flex: none; max-width: none; width: 100%; }
+  .home-brand .lead { margin-top: 12px; font-size: 13.5px; line-height: 1.8; }
+  .tcard { padding: 18px; gap: 14px; }
+  .tcard-head b { font-size: 24px; }
+  .tcard-head span { display: none; }
+  .tcard-blurb { font-size: 13px; }
+  .tcard-tags span:nth-child(3) { display: none; }
+  .tcard-go { padding: 14px 18px; }
+  .lvl-card { width: 34px; height: 46px; font-size: 20px; }
+}
+
+@media (max-width: 430px) {
+  /* 再窄就把按钮放到卡片下面，别让标题被挤成省略号 */
+  .tcard { flex-direction: column; align-items: stretch; gap: 12px; }
+  .tcard-go { width: 100%; }
+}
+
+@media (min-width: 1880px) {
+  .landing.home {
+    max-width: 1860px; gap: 72px;
+    padding: 56px 72px calc(56px + env(safe-area-inset-bottom));
+  }
+  .home-brand { flex: 0 1 420px; max-width: 420px; }
+  .home-brand .lead { font-size: 18px; }
+  .home-tables { flex: 0 1 700px; gap: 22px; }
+  .home-entry { flex: 0 0 460px; }
+  .tcard { padding: 26px 30px; border-radius: 26px; }
+  .tcard-head b { font-size: 36px; }
+  .tcard-blurb { font-size: 15px; }
+  .tcard-tags span { font-size: 12.5px; padding: 5px 12px; }
+  .tcard-ladder .ladder span { padding: 8px 14px; font-size: 13px; }
+  .tcard-go { padding: 16px 28px; font-size: 17px; }
+  .lvl-card { width: 52px; height: 68px; font-size: 30px; }
+}
+
+@media (min-width: 2400px) {
+  .landing.home { max-width: 2200px; gap: 90px; padding: 72px 88px; }
+  .home-brand { flex: 0 1 500px; max-width: 500px; }
+  .home-tables { flex: 0 1 820px; }
+  .home-entry { flex: 0 0 520px; }
+  .tcard-head b { font-size: 40px; }
+  .tcard-blurb { font-size: 16px; }
+  .lvl-card { width: 58px; height: 76px; font-size: 34px; }
+}

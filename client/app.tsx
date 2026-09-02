@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AVATARS } from '../shared/game.ts';
+import type { GameKind } from '../shared/games.ts';
 import type { AccountInfo, AnyGameCommand, AnyPublicRoom, GameEvent } from '../shared/protocol.ts';
 import { Landing, type Identity } from './components/Landing.tsx';
 import { Net, type Auth, type NetStatus } from './net.ts';
@@ -168,7 +169,7 @@ export default function App() {
     net.cmd(c);
   };
 
-  const enter = (kind: 'create' | 'join', code = '') => {
+  const enter = (how: 'create' | 'join', code = '', kind: GameKind = 'zjh') => {
     const net = netRef.current;
     if (!net) return;
     sound.unlock();
@@ -177,7 +178,7 @@ export default function App() {
     setError('');
     const acc = loadAccount();
     const hello = { name: ident.name, avatar: ident.avatar, accountId: acc?.id, accountToken: acc?.token };
-    net.send(kind === 'create' ? { t: 'create', ...hello } : { t: 'join', code, ...hello });
+    net.send(how === 'create' ? { t: 'create', kind, ...hello } : { t: 'join', code, ...hello });
     // 网络卡住时不要让按钮一直转
     setTimeout(() => setBusy(false), 6000);
   };
@@ -198,7 +199,7 @@ export default function App() {
           busy={busy}
           status={status}
           error={error}
-          onCreate={() => enter('create')}
+          onCreate={(kind) => enter('create', '', kind)}
           onJoin={(code) => enter('join', code)}
         />
       )}
