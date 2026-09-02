@@ -5,6 +5,7 @@ import type { AccountInfo, AnyGameCommand, AnyPublicRoom, GameEvent } from '../s
 import { Landing, type Identity } from './components/Landing.tsx';
 import { Net, type Auth, type NetStatus } from './net.ts';
 import { sound, voice } from './sound.ts';
+import { SjTable } from './sj/SjTable.tsx';
 import { Table } from './table.tsx';
 
 const IDENT_KEY = 'zjh:me';
@@ -189,7 +190,7 @@ export default function App() {
         room.kind === 'zjh' ? (
           <Table room={room} cmd={cmd} status={status} latency={latency} batch={batch} onToast={notify} account={account} />
         ) : (
-          <div className="loading">升级牌桌加载中…</div>
+          <SjTable room={room} cmd={cmd} status={status} latency={latency} batch={batch} onToast={notify} account={account} />
         )
       ) : (
         <Landing

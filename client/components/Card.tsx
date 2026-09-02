@@ -1,7 +1,17 @@
-import type { Card } from '../../shared/game.ts';
-
-const SUITS = { S: '♠', H: '♥', C: '♣', D: '♦' } as const;
+const SUITS: Record<string, string> = { S: '♠', H: '♥', C: '♣', D: '♦' };
 const RANKS: Record<number, string> = { 11: 'J', 12: 'Q', 13: 'K', 14: 'A' };
+
+/**
+ * 这个组件同时服务炸金花（一副牌、四门花色）和升级（两副牌、带大小王）。
+ * 所以牌面只要求 `suit + rank` 两个字段：`suit === 'J'` 是王，rank 15 小王、16 大王。
+ */
+export interface AnyCard {
+  suit: string;
+  rank: number;
+}
+
+/** 王牌面（DESIGN 3.2）：大王金冠、小王银冠，侧边竖排 JOKER */
+const RANK_SMALL_JOKER = 15;
 
 export function rankLabel(rank: number) {
   return RANKS[rank] ?? String(rank);
@@ -9,6 +19,13 @@ export function rankLabel(rank: number) {
 
 /** 牌面的三种成色，用来在同一个组件里表达胜/负两种结局 */
 export type CardTone = 'win' | 'fold' | 'shard';
+
+/**
+ * 牌的尺寸档。前两档是炸金花本来就有的；后三档给升级用：
+ * `hand` 底部手牌扇、`play` 出牌区、`tiny` 底牌与分牌堆缩略。
+ * 每一档只在 CSS 里改 `--card-w/--card-h`，牌面内部的字号全部跟着这两个变量算。
+ */
+export type CardSize = 'mini' | 'big' | 'hand' | 'play' | 'tiny';
 
 /**
  * 牌型的稀有度分档。徽章按档位从「实金」一路退到「描边」——
@@ -43,19 +60,21 @@ export function PlayingCard({
   dealKey,
   tone,
 }: {
-  card?: Card;
+  card?: AnyCard;
   faceDown: boolean;
-  size?: 'mini' | 'big';
+  size?: CardSize;
   dealIndex?: number;
   dealKey?: string | number;
   /** 结局态：胜者金边辉光、败者去饱和、比牌败者碎裂坠落 */
   tone?: CardTone;
 }) {
+  const joker = card?.suit === 'J';
   const red = card ? card.suit === 'H' || card.suit === 'D' : false;
-  const rank = card ? rankLabel(card.rank) : '';
-  const suit = card ? SUITS[card.suit] : '';
-  const isCourt = !!card && card.rank >= 11 && card.rank <= 13;
-  const isAce = card?.rank === 14;
+  const rank = card && !joker ? rankLabel(card.rank) : '';
+  const suit = card && !joker ? SUITS[card.suit] : '';
+  const isCourt = !!card && !joker && card.rank >= 11 && card.rank <= 13;
+  const isAce = !joker && card?.rank === 14;
+  const bigJoker = joker && card!.rank > RANK_SMALL_JOKER;
 
   const cls = [
     'pc',
@@ -73,10 +92,19 @@ export function PlayingCard({
       <div className="pc-lift">
         <div className="pc-inner">
           <div
-            className={`pc-face pc-front${isCourt ? ' is-court' : ''}${isAce ? ' is-ace' : ''}`}
+            className={`pc-face pc-front${isCourt ? ' is-court' : ''}${isAce ? ' is-ace' : ''}${joker ? ' is-joker' : ''}`}
             data-red={red || undefined}
+            data-joker={joker ? (bigJoker ? 'big' : 'small') : undefined}
           >
-            {card ? (
+            {joker ? (
+              <>
+                <span className="pc-joker-side">JOKER</span>
+                <span className="pc-center">
+                  <i className="pc-crown">♛</i>
+                </span>
+                <span className="pc-gloss" aria-hidden="true" />
+              </>
+            ) : card ? (
               <>
                 <span className="pc-idx tl">
                   <b>{rank}</b>
