@@ -10,7 +10,7 @@
  */
 
 import {
-  SJ_SUITS, cardFromId, cardOrder, createSjDeck, groupOf, pointsOf,
+  SJ_SUITS, cardFromId, cardOrder, createSjDeck, groupOf, pointsOf, sumPoints,
   type SjCard, type SjCtx, type SjGroup, type SjPlainSuit, type SjRng, type SjTrumpSuit,
 } from './cards.ts';
 import {
@@ -25,6 +25,10 @@ export interface SjSuggestView {
   trump: { suit: SjTrumpSuit | null; level: number };
   trick: { seat: number; cardIds: string[] }[];
   playedIds: string[];
+  /** 我的座位。判断现在领先的是不是**对家**（座位号同奇偶为一队）要用它 */
+  mySeat: number;
+  /** 第几圈。判断是否已进入后半程（该抢就抢）要用它 */
+  trickNo: number;
 }
 
 type Prefer = 'low' | 'high' | 'points';
@@ -246,90 +250,165 @@ function leadCandidates(hand: SjCard[], ctx: SjCtx): { group: SjGroup; unit: SjU
 }
 
 /**
- * 首出（DESIGN 1.10）：先打自己手里的绝张；否则主牌够多时先"抽主"；
- * 再否则从最长的副牌花色出一张不带分的小牌。
+ * 首出候选，**从好到差**排好序（DESIGN 1.10）。
+ *
+ * 机器人取第 0 个、「提示」按这个顺序循环 —— 两边共用同一份判断，
+ * 不会出现"机器人会打、提示瞎给"的分叉。档次：
+ *
+ * 0. **绝张**：没人压得过，先把稳收的收掉；拖拉机 > 对子 > 单张，同级取大。
+ * 1. **抽主**（主牌 ≥ 9 张时）：先小对再小单张，把别人的主榨干，
+ *    后面的副牌小牌才立得住。
+ * 2. **探路牌**：最长副牌花色里最小的一张不带分的牌，输了也不心疼。
+ * 3. 其余的一切：重结构优先、同级从小到大。
+ *
+ * 注意 2 挡在 3 前面，所以"没绝张时不会建议先甩一条压不住的拖拉机"。
  */
-export function botLead(hand: SjCard[], ctx: SjCtx, playedIds: string[], rng?: SjRng): SjCard[] {
+export function rankLeads(hand: SjCard[], ctx: SjCtx, playedIds: string[], rng?: SjRng): SjCard[][] {
   const unseen = unseenCards(hand, playedIds);
   const cands = leadCandidates(hand, ctx);
+  if (!cands.length) return [];
 
-  const sure = cands.filter((c) => isSureMax(c.unit, c.group, unseen, ctx));
-  if (sure.length) {
-    // 绝张里挑最"重"的一手：拖拉机 > 对子 > 单张，同级取大
-    sure.sort((a, b) => unitPriority(b.unit) - unitPriority(a.unit) || b.unit.top - a.unit.top);
-    return sure[0].unit.cards;
-  }
+  const drawTrump = cardsInGroup(hand, 'T', ctx).length >= 9;
 
-  const trumps = cardsInGroup(hand, 'T', ctx);
-  if (trumps.length >= 9) {
-    // 主牌多就先抽主：把别人的主榨干，后面的副牌小牌才立得住
-    const pair = pickUnit(allPairs(hand, 'T', ctx), 'low');
-    if (pair) return pair.cards;
-    const single = pickUnit(allSingles(hand, 'T', ctx), 'low');
-    if (single) return single.cards;
-  }
-
+  // 探路牌：最长的副牌花色（并列时用 rng 打散）里最小的一张；全是主牌就退回整手最小的
   const sideGroups = (SJ_SUITS as SjPlainSuit[])
     .map((s) => ({ group: s as SjGroup, cards: cardsInGroup(hand, s, ctx) }))
     .filter((g) => g.cards.length > 0);
+  let probePool = hand;
   if (sideGroups.length) {
     const most = Math.max(...sideGroups.map((g) => g.cards.length));
     const tied = sideGroups.filter((g) => g.cards.length === most);
-    const pick = tied[rng ? Math.min(tied.length - 1, Math.floor(rng() * tied.length)) : 0];
-    return pickFillers(pick.cards, 1, ctx, 'low');
+    probePool = tied[rng ? Math.min(tied.length - 1, Math.floor(rng() * tied.length)) : 0].cards;
   }
-  return pickFillers(hand, 1, ctx, 'low');
+  const probeId = pickFillers(probePool, 1, ctx, 'low')[0]?.id ?? null;
+
+  return cands
+    .map((c) => {
+      const sure = isSureMax(c.unit, c.group, unseen, ctx);
+      const tier = sure ? 0
+        : drawTrump && c.group === 'T' && c.unit.kind !== 'tractor' ? 1
+        : c.unit.kind === 'single' && c.unit.cards[0].id === probeId ? 2
+        : 3;
+      return {
+        cards: c.unit.cards,
+        tier,
+        prio: -unitPriority(c.unit),
+        // 绝张同级取大（反正没人压得过，先把大的兑现），其余同级取小（别浪费）
+        top: sure ? -c.unit.top : c.unit.top,
+      };
+    })
+    .sort((a, b) => a.tier - b.tier || a.prio - b.prio || a.top - b.top)
+    .map((s) => s.cards);
+}
+
+/**
+ * 首出（DESIGN 1.10）：先打自己手里的绝张；否则主牌够多时先"抽主"；
+ * 再否则从最长的副牌花色出一张不带分的小牌。就是 `rankLeads` 的头一项。
+ */
+export function botLead(hand: SjCard[], ctx: SjCtx, playedIds: string[], rng?: SjRng): SjCard[] {
+  return rankLeads(hand, ctx, playedIds, rng)[0] ?? [];
 }
 
 /* --------------------------------------------------------------- 跟牌 */
 
 /**
- * 跟牌（DESIGN 1.10）：能赢且这轮有分或轮次靠后 → 用最小能赢的牌；
- * 对家已稳赢 → 垫分给他；否则出最小、不带分的牌。
+ * 跟牌候选，**按真实收益从好到差**排好序（DESIGN 1.10）。
+ *
+ * 机器人取第 0 个、「提示」按这个顺序循环 —— 这就是"同一个脑子"的所在：
+ * 排序只写这一份，改了两边一起变，不会再各聪明各的。
+ *
+ * 先看清这一圈的三件事：桌上有多少分、现在谁最大、那个人是不是我对家，
+ * 再分档：
+ *
+ * - **对家已经赢定** → 垫分给他（分越多越靠前），其次垫最小的牌。
+ *   盖过对家排到最后：那一分照样是自家的，但白白烧掉一张大牌，还把对家的位置抢了。
+ * - **对手领先、且这一圈值得抢**（桌上有分，或已到后半程，后面的牌越来越硬）
+ *   → **最小能赢的那一手**排第一，拿下就好，别把大牌浪费掉。
+ * - **压不过 / 这一圈不值得抢** → 垫最没用的：先不带分（别给对手送分），再最小。
+ *   对手甩了张压不过的大牌时走的就是这一档 —— 绝不会把自己的大牌排在前面。
  */
-export function botFollow(
+export function rankFollows(
   hand: SjCard[], lead: SjShape, ctx: SjCtx,
   played: { seat: number; cards: SjCard[] }[], mySeat: number, trickNo: number,
-): SjCard[] {
-  const pointsOnTable = played.reduce((s, p) => s + p.cards.reduce((a, c) => a + pointsOf(c), 0), 0);
+): SjCard[][] {
+  const pointsOnTable = played.reduce((s, p) => s + sumPoints(p.cards), 0);
   const leaderWins = trickWinner(played, ctx);
   const partnerWinning = (leaderWins.seat % 2) === (mySeat % 2);
+  // 值得抢：这一圈有分，或者已经打到后半程（后面的牌越来越硬，能拿就拿）
+  const worthWinning = pointsOnTable > 0 || trickNo >= 13;
 
-  const candidates: SjCard[][] = [];
+  const pool: SjCard[][] = [];
+  const seen = new Set<string>();
   const push = (cards: SjCard[] | null) => {
-    if (cards && cards.length === lead.count) candidates.push(cards);
+    if (!cards || cards.length !== lead.count) return;
+    if (!validateFollow(hand, lead, cards, ctx).ok) return;
+    const key = cards.map((c) => c.id).sort().join(',');
+    if (seen.has(key)) return;
+    seen.add(key);
+    pool.push(cards);
   };
-  const voidInLead = cardsInGroup(hand, lead.group, ctx).length === 0;
-  const low = composeFollow(hand, lead, ctx, 'low');
-  const high = composeFollow(hand, lead, ctx, 'high');
-  const givePoints = composeFollow(hand, lead, ctx, 'points');
-  if (voidInLead) {
+  const inLead = cardsInGroup(hand, lead.group, ctx);
+  if (inLead.length === 0) {
     push(composeTrumpBeat(hand, lead, ctx, 'low'));
     push(composeTrumpBeat(hand, lead, ctx, 'high'));
   }
-  push(low);
-  push(high);
+  push(composeFollow(hand, lead, ctx, 'low'));
+  push(composeFollow(hand, lead, ctx, 'high'));
+  push(composeFollow(hand, lead, ctx, 'points'));
+  // 三种 compose 只给得出「最小 / 最大 / 带分」那几手。要真的挑出**最小能赢的**，
+  // 就得把所有合法的一手都摆上来 —— 单张和对子这两种（占绝大多数圈）能直接枚举完。
+  if (lead.count === 1) for (const c of (inLead.length ? inLead : hand)) push([c]);
+  else if (lead.count === 2 && lead.pairs === 1) {
+    for (const u of allPairs(hand, lead.group, ctx)) push(u.cards);
+    if (!inLead.length) for (const u of allPairs(hand, 'T', ctx)) push(u.cards);
+  }
 
   const wins = (cards: SjCard[]) =>
     trickWinner([...played, { seat: mySeat, cards }], ctx).seat === mySeat;
 
-  // 值得抢：这一圈有分，或者已经打到后半程（后面的牌越来越硬，能拿就拿）
-  const worthWinning = pointsOnTable > 0 || trickNo >= 13;
-  if (worthWinning && !partnerWinning) {
-    const winners = candidates.filter(wins);
-    if (winners.length) {
-      // 最小能赢的那一手：拿下就好，别把大牌浪费掉
-      winners.sort((a, b) => handWeight(a, ctx) - handWeight(b, ctx));
-      return winners[0];
+  /** 档次 + 档内的两级排序键，全都是"越小越靠前" */
+  const score = (cards: SjCard[]): [number, number, number] => {
+    const w = wins(cards);
+    const pts = sumPoints(cards);
+    if (partnerWinning) {
+      // 分越多越先垫给对家；盖过对家的排最后（分照样是自家的，但白烧一张大牌）
+      return w ? [2, handWeight(cards, ctx), 0] : [0, -pts, discardWeight(cards, ctx)];
     }
-  }
-  if (partnerWinning) return givePoints;
-  return low;
+    if (worthWinning && w) return [0, handWeight(cards, ctx), discardWeight(cards, ctx)];
+    return [1, discardWeight(cards, ctx), 0];
+  };
+
+  return pool
+    .map((cards) => ({ cards, key: score(cards) }))
+    .sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.key[2] - b.key[2])
+    .map((s) => s.cards);
+}
+
+/** 跟牌：`rankFollows` 的头一项。兜底是"最小的一手"，永远给得出一手合法的牌 */
+export function botFollow(
+  hand: SjCard[], lead: SjShape, ctx: SjCtx,
+  played: { seat: number; cards: SjCard[] }[], mySeat: number, trickNo: number,
+): SjCard[] {
+  return rankFollows(hand, lead, ctx, played, mySeat, trickNo)[0]
+    ?? composeFollow(hand, lead, ctx, 'low');
 }
 
 /** 一手牌的"重量"，用来在能赢的候选里挑最省的那一手 */
 function handWeight(cards: SjCard[], ctx: SjCtx): number {
   return cards.reduce((s, c) => s + cardOrder(c, ctx), 0);
+}
+
+/**
+ * 垫出去有多可惜：**拆主 > 送分 > 大牌**，和 `pickFillers('low')` 用的是同一把尺子。
+ * 压不过的时候按它从小到大排，第一条就是"最没用的那一手"。
+ * 注意 `cardOrder` 只在组内可比，所以主牌那 10000 的罚分不能省 —— 主牌的 2 和副牌的 2
+ * 编号一样，光看 order 会把主牌当成小牌垫掉。
+ */
+function discardWeight(cards: SjCard[], ctx: SjCtx): number {
+  return cards.reduce((s, c) => s
+    + (groupOf(c, ctx) === 'T' ? 10_000 : 0)
+    + (pointsOf(c) > 0 ? 1_000 : 0)
+    + cardOrder(c, ctx), 0);
 }
 
 /* --------------------------------------------------------------- 出牌入口 */
@@ -353,6 +432,10 @@ export function botPlay(state: SjRoomState, me: SjPlayer, rng?: SjRng): string[]
 /**
  * 「提示」按钮与命令行的候选出法（DESIGN 1.10 末条 / 3.4）。
  * 只用自己的手牌与公开信息，所以客户端可以直接调。
+ *
+ * **排序完全交给 `rankLeads` / `rankFollows`** —— 也就是机器人自己在用的那套判断，
+ * 所以第一条建议就是"会打的人会走的那一步"，而不是固定的"先出大牌"。
+ * 去重后长度为 1 就意味着这一手别无选择，客户端据此替玩家预选。
  */
 export function suggest(view: SjSuggestView, hand: SjCard[], limit = 5): SjCard[][] {
   const ctx = ctxOf(view);
@@ -367,27 +450,13 @@ export function suggest(view: SjSuggestView, hand: SjCard[], limit = 5): SjCard[
   };
 
   if (!view.trick.length) {
-    const unseen = unseenCards(hand, view.playedIds);
-    const cands = leadCandidates(hand, ctx);
-    // 绝张排前面，其余按"重量"从轻到重，和人的直觉一致
-    cands.sort((a, b) => {
-      const sa = isSureMax(a.unit, a.group, unseen, ctx) ? 0 : 1;
-      const sb = isSureMax(b.unit, b.group, unseen, ctx) ? 0 : 1;
-      return sa - sb || unitPriority(b.unit) - unitPriority(a.unit) || a.unit.top - b.unit.top;
-    });
-    for (const c of cands) add(c.unit.cards);
+    for (const cards of rankLeads(hand, ctx, view.playedIds)) add(cards);
     return out;
   }
 
   const played = view.trick.map((p) => ({ seat: p.seat, cards: p.cardIds.map(cardFromId) }));
   const lead = parseShape(played[0].cards, ctx);
   if (!lead) return out;
-  if (cardsInGroup(hand, lead.group, ctx).length === 0) {
-    add(composeTrumpBeat(hand, lead, ctx, 'low'));
-    add(composeTrumpBeat(hand, lead, ctx, 'high'));
-  }
-  add(composeFollow(hand, lead, ctx, 'high'));
-  add(composeFollow(hand, lead, ctx, 'low'));
-  add(composeFollow(hand, lead, ctx, 'points'));
-  return out.filter((cards) => validateFollow(hand, lead, cards, ctx).ok).slice(0, limit);
+  for (const cards of rankFollows(hand, lead, ctx, played, view.mySeat, view.trickNo)) add(cards);
+  return out;
 }

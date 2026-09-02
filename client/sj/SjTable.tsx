@@ -234,8 +234,14 @@ export function SjTable({
    * 的那一手 —— 不点提示也知道该往哪儿选。只用自己的手牌和公开信息算，和机器人同源。
    */
   const hints = useMemo(
-    () => (myTurn ? suggest({ trump: room.trump, trick: room.trick, playedIds: room.playedIds }, hand, 5) : []),
-    [myTurn, room.trick, room.playedIds, hand, room.trump],
+    () => (myTurn
+      // mySeat / trickNo 是判断「领先的是不是对家」「是不是该抢了」的依据，缺一不可
+      ? suggest({
+        trump: room.trump, trick: room.trick, playedIds: room.playedIds,
+        mySeat, trickNo: room.trickNo,
+      }, hand, 5)
+      : []),
+    [myTurn, room.trick, room.playedIds, hand, room.trump, mySeat, room.trickNo],
   );
   /** 当前被建议的那一手，跟着「提示」的循环走 */
   const hintPick = hints.length ? hints[hintIdx % hints.length] : null;

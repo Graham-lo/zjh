@@ -48,6 +48,9 @@ const view = (leadIds: string[]): SjSuggestView => ({
   trump: { suit: 'S', level: 5 },
   trick: [{ seat: 0, cardIds: leadIds }],
   playedIds: [],
+  // 0 号首出、我坐 1 号：领先的是对手不是对家
+  mySeat: 1,
+  trickNo: 1,
 });
 
 test('跟牌只剩一种打法时，建议列表只有一项 —— 这一手可以直接替玩家预选', () => {

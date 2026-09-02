@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { botDeclare, botKou, botLead, isSureMax, suggest, unseenCards } from '../shared/sj/bot.ts';
+import {
+  botDeclare, botFollow, botKou, botLead, isSureMax, suggest, unseenCards,
+  type SjSuggestView,
+} from '../shared/sj/bot.ts';
 import { applySjCommand, sjCtx, timeoutKou, type SjRoomState } from '../shared/sj/engine.ts';
 import { groupOf, sumPoints } from '../shared/sj/cards.ts';
 import { allSingles, parseShape } from '../shared/sj/units.ts';
@@ -147,7 +150,7 @@ test('首出：主牌够多时先抽主', () => {
 /* ------------------------------------------------------------------- 提示 */
 
 test('提示：首出时给若干候选，绝张排在最前面', () => {
-  const view = { trump: { suit: 'S' as const, level: 5 }, trick: [], playedIds: [] };
+  const view = { trump: { suit: 'S' as const, level: 5 }, trick: [], playedIds: [], mySeat: 0, trickNo: 1 };
   const hand = h('JBa D2a D3a D4a H9a');
   const out = suggest(view, hand);
   assert.ok(out.length > 1, '提示要能循环给出多个候选');
@@ -160,6 +163,8 @@ test('提示：跟牌时给出的每一个候选都合法', () => {
     trump: { suit: 'S' as const, level: 5 },
     trick: [{ seat: 0, cardIds: ['HAa', 'HAb'] }],
     playedIds: ['HAa', 'HAb'],
+    mySeat: 1,
+    trickNo: 1,
   };
   const hand = h('H7a H7b H8a H9a S2a D3a');
   const lead = parseShape(h('HAa HAb'), CTX_S5)!;
@@ -177,10 +182,102 @@ test('提示：缺门时会把"毙"作为候选给出来', () => {
     trump: { suit: 'S' as const, level: 5 },
     trick: [{ seat: 0, cardIds: ['HAa', 'HAb'] }],
     playedIds: ['HAa', 'HAb'],
+    mySeat: 1,
+    trickNo: 1,
   };
   const hand = h('S6a S6b D3a D4a');
   const out = suggest(view, hand);
   assert.ok(out.some((cards) => ids(cards).join(' ') === 'S6a S6b'), '主牌对子能毙，应该被提示');
+});
+
+/* ------------------------------------------------- 提示的收益排序（跟牌） */
+
+/**
+ * 座位 0/2 一队、1/3 一队。下面的用例统一坐 1 号或 2 号，
+ * 这样 0 号首出既能当"对手"（我坐 1）也能当"对家"（我坐 2）。
+ */
+const follow = (
+  trick: { seat: number; cardIds: string[] }[], mySeat: number, trickNo = 1,
+): SjSuggestView => ({
+  trump: { suit: 'S', level: 5 },
+  trick,
+  playedIds: trick.flatMap((p) => p.cardIds),
+  mySeat,
+  trickNo,
+});
+
+test('提示：对手打出压不过的大牌时，第一条是小牌 —— 绝不把自己的大牌甩出去', () => {
+  // 0 号（对手）领出 ♥K，桌上已经有 10 分。我手里没有 ♥A、也不能毙（有 ♥ 必跟 ♥），
+  // 压不过就该垫最没用的：♥3。旧实现固定「先给大牌」，会建议把 ♥Q 送掉。
+  const out = suggest(follow([{ seat: 0, cardIds: ['HKa'] }], 1), h('H3a H7a HQa'));
+  assert.deepEqual(ids(out[0]), ['H3a'], '压不过就出最小的');
+  assert.deepEqual(ids(out[out.length - 1]), ['HQa'], '最大的那张排到最后');
+
+  // 没分的一圈同理：不值得为它烧牌
+  const noPoints = suggest(follow([{ seat: 0, cardIds: ['HAa'] }], 1), h('H3a H7a HKa'));
+  assert.deepEqual(ids(noPoints[0]), ['H3a']);
+  assert.deepEqual(ids(noPoints[noPoints.length - 1]), ['HKa'], '♥K 带 10 分，送给对手最亏');
+});
+
+test('提示：能赢又值得抢时，第一条是"最小能赢"而不是最大的那张', () => {
+  // 0 号领出 ♥10（10 分），我有 ♥Q 和 ♥A 都能赢 —— 用 ♥Q 就够了，♥A 留着
+  const out = suggest(follow([{ seat: 0, cardIds: ['HTa'] }], 1), h('H3a H7a HQa HAa'));
+  assert.deepEqual(ids(out[0]), ['HQa'], '最小能赢的那一张');
+  assert.deepEqual(ids(out[1]), ['HAa'], '其余能赢的排后面');
+
+  // 一圈没分、又还在前半程，就不值得为它花牌
+  const idle = suggest(follow([{ seat: 0, cardIds: ['H8a'] }], 1), h('H3a H7a HQa HAa'));
+  assert.deepEqual(ids(idle[0]), ['H3a'], '没分就别抢，出最小的');
+  // 打到后半程（第 13 圈起）牌越来越硬，能拿就拿
+  const late = suggest(follow([{ seat: 0, cardIds: ['H8a'] }], 1, 13), h('H3a H7a HQa HAa'));
+  assert.deepEqual(ids(late[0]), ['HQa'], '后半程该抢了，还是用最小能赢的');
+});
+
+test('提示：对家已经赢定时先垫分，绝不盖过对家', () => {
+  // 0 号是我（2 号）的对家，领出 ♥A 稳赢 —— 该把分喂给他
+  const give = suggest(follow([{ seat: 0, cardIds: ['HAa'] }, { seat: 1, cardIds: ['H3a'] }], 2),
+    h('H4a H7a HKa'));
+  assert.deepEqual(ids(give[0]), ['HKa'], '♥K 带 10 分，垫给对家');
+
+  // 对家领的是 ♥10，我的 ♥K 能盖过他 —— 盖了分照样是自家的，但白烧一张大牌，
+  // 所以第一条必须是"不盖过对家"的那手，♥K 排到最后
+  const dont = suggest(follow([{ seat: 0, cardIds: ['HTa'] }, { seat: 1, cardIds: ['H3a'] }], 2),
+    h('H4a HKa'));
+  assert.deepEqual(ids(dont[0]), ['H4a'], '不盖对家');
+  assert.deepEqual(ids(dont[dont.length - 1]), ['HKa']);
+});
+
+test('提示：缺门时该不该毙，看这一圈有没有分', () => {
+  // ♥ 缺门。有分 → 用最小的主牌毙下来
+  const beat = suggest(follow([{ seat: 0, cardIds: ['HTa'] }], 1), h('S3a S8a D2a DKa'));
+  assert.deepEqual(ids(beat[0]), ['S3a'], '最小能毙的主牌');
+  // 没分 → 别拆主，垫掉最没用的杂牌
+  const idle = suggest(follow([{ seat: 0, cardIds: ['H8a'] }], 1), h('S3a S8a D2a DKa'));
+  assert.deepEqual(ids(idle[0]), ['D2a'], '没分不值得拆主，垫最小的杂牌');
+  // 垫牌的尺子是「拆主 > 送分 > 大牌」：♦K 送 10 分虽然亏，但还没有拆一张主牌亏
+  const at = (id: string) => idle.findIndex((c) => ids(c)[0] === id);
+  assert.ok(at('DKa') < at('S3a'), '主牌排在所有杂牌后面');
+});
+
+test('提示：对子也按同一把尺子排 —— 最小能赢的那一对在前', () => {
+  const win = suggest(follow([{ seat: 0, cardIds: ['HTa', 'HTb'] }], 1),
+    h('H3a H3b HJa HJb HAa HAb'));
+  assert.deepEqual(ids(win[0]).sort(), ['HJa', 'HJb'], '最小能赢的一对');
+
+  const lose = suggest(follow([{ seat: 0, cardIds: ['HKa', 'HKb'] }], 1),
+    h('H3a H3b H7a H7b HQa HQb'));
+  assert.deepEqual(ids(lose[0]).sort(), ['H3a', 'H3b'], '压不过就垫最小的一对');
+});
+
+test('机器人和提示是同一个脑子：botFollow 就是提示的第一条', () => {
+  const view = follow([{ seat: 0, cardIds: ['HTa'] }], 1);
+  const hand = h('H3a H7a HQa HAa');
+  const lead = parseShape(h('HTa'), CTX_S5)!;
+  const played = [{ seat: 0, cards: h('HTa') }];
+  assert.deepEqual(
+    ids(botFollow(hand, lead, CTX_S5, played, 1, 1)),
+    ids(suggest(view, hand)[0]),
+  );
 });
 
 /* --------------------------------------------------------------- 确定性 */

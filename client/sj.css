@@ -440,14 +440,10 @@
   transition: transform 0.24s var(--spring);
 }
 .sj-hand-card-flip, .sj-hand-card-lift { display: block; }
-.sj-hand-card-lift { transition: transform 0.24s var(--spring), filter 0.18s var(--ease); }
+.sj-hand-card-lift { transition: transform 0.24s var(--spring); }
 .sj-hand-card + .sj-hand-card { margin-left: calc(var(--step, 32px) - var(--sj-card-hand-w)); }
-/* 悬浮：只把这张牌提到最上层 + 提亮描边，不改任何几何（z-index 不影响命中判定） */
-.sj-hand-card:hover:not(:disabled) { z-index: 2; }
-.sj-hand-card:hover:not(:disabled) .sj-hand-card-lift { filter: brightness(1.1); }
-.sj-hand-card:hover:not(:disabled) .pc-face {
-  box-shadow: 0 0 0 2px rgba(243, 224, 176, 0.7), 0 14px 26px rgba(0, 0, 0, 0.6);
-}
+/* 手牌**没有悬浮态**：鼠标移过去不亮、不描边、不抬起。反馈只在点下去之后（.on）给。
+   :focus-visible 是键盘可达性，不是悬浮，保留。 */
 .sj-hand-card:focus-visible { outline: none; z-index: 4; }
 .sj-hand-card:focus-visible .pc-face { box-shadow: 0 0 0 3px var(--sj-blue, #6ec1ff); }
 /* 选中抬起 14px + 金边 */
