@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { AVATARS, type GameCommand, type PublicRoom } from '../shared/game.ts';
-import type { AccountInfo, GameEvent } from '../shared/protocol.ts';
+import { AVATARS } from '../shared/game.ts';
+import type { AccountInfo, AnyGameCommand, AnyPublicRoom, GameEvent } from '../shared/protocol.ts';
 import { Landing, type Identity } from './components/Landing.tsx';
 import { Net, type Auth, type NetStatus } from './net.ts';
 import { sound, voice } from './sound.ts';
@@ -51,7 +51,7 @@ function loadAuth(code: string): Auth | null {
 
 export default function App() {
   const [status, setStatus] = useState<NetStatus>('connecting');
-  const [room, setRoom] = useState<PublicRoom | null>(null);
+  const [room, setRoom] = useState<AnyPublicRoom | null>(null);
   const [ident, setIdentState] = useState<Identity>(loadIdent);
   useEffect(() => {
     // 第一次进来是随机分配的昵称，也要落盘，否则下次刷新又换了个人
@@ -148,7 +148,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const cmd = (c: GameCommand) => {
+  const cmd = (c: AnyGameCommand) => {
     const net = netRef.current;
     if (!net || !room) return;
     sound.unlock();
@@ -185,7 +185,11 @@ export default function App() {
   return (
     <>
       {room ? (
-        <Table room={room} cmd={cmd} status={status} latency={latency} batch={batch} onToast={notify} account={account} />
+        room.kind === 'zjh' ? (
+          <Table room={room} cmd={cmd} status={status} latency={latency} batch={batch} onToast={notify} account={account} />
+        ) : (
+          <div className="loading">升级牌桌加载中…</div>
+        )
       ) : (
         <Landing
           ident={ident}

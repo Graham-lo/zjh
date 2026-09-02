@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import type { RoomState } from '../shared/game.ts';
+import type { AnyRoomState } from '../shared/games.ts';
 
 /** 一个跨房间、跨会话的玩家账户 */
 export interface Account {
@@ -12,6 +12,9 @@ export interface Account {
   granted: number;
   hands: number;
   wins: number;
+  /** 升级的局数与胜局。和炸金花的 hands/wins 分开记，两种游戏的"一局"不是一回事 */
+  sjHands: number;
+  sjWins: number;
 }
 
 /**
@@ -49,13 +52,21 @@ export class Store {
         updated_at INTEGER NOT NULL
       );
     `);
+    // 加列是幂等的：老库里没有就补上，已经有了 SQLite 会报错，吞掉即可（DESIGN 2.1）
+    for (const col of ['sj_hands', 'sj_wins']) {
+      try {
+        this.db.exec(`ALTER TABLE accounts ADD COLUMN ${col} INTEGER NOT NULL DEFAULT 0`);
+      } catch {
+        /* 这一列已经存在 */
+      }
+    }
     this.upsert = this.db.prepare(
       'INSERT INTO rooms(code, state, updated_at) VALUES(?, ?, ?) ON CONFLICT(code) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at',
     );
     this.del = this.db.prepare('DELETE FROM rooms WHERE code = ?');
   }
 
-  save(state: RoomState) {
+  save(state: AnyRoomState) {
     this.upsert.run(state.code, JSON.stringify(state), Date.now());
   }
 
@@ -63,13 +74,13 @@ export class Store {
     this.del.run(code);
   }
 
-  loadAll(maxAgeMs: number): RoomState[] {
+  loadAll(maxAgeMs: number): AnyRoomState[] {
     const cutoff = Date.now() - maxAgeMs;
     const rows = this.db.prepare('SELECT state FROM rooms WHERE updated_at >= ?').all(cutoff) as { state: string }[];
-    const out: RoomState[] = [];
+    const out: AnyRoomState[] = [];
     for (const row of rows) {
       try {
-        out.push(JSON.parse(row.state) as RoomState);
+        out.push(JSON.parse(row.state) as AnyRoomState);
       } catch {
         // 损坏的快照直接丢弃，不值得让整个进程起不来
       }
@@ -87,9 +98,9 @@ export class Store {
   createAccount(a: Account) {
     this.db
       .prepare(
-        'INSERT INTO accounts(id, token_hash, name, avatar, chips, granted, hands, wins, updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+        'INSERT INTO accounts(id, token_hash, name, avatar, chips, granted, hands, wins, sj_hands, sj_wins, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
       )
-      .run(a.id, a.tokenHash, a.name, a.avatar, a.chips, a.granted, a.hands, a.wins, Date.now());
+      .run(a.id, a.tokenHash, a.name, a.avatar, a.chips, a.granted, a.hands, a.wins, a.sjHands, a.sjWins, Date.now());
   }
 
   getAccount(id: string): Account | null {
@@ -106,6 +117,8 @@ export class Store {
       granted: Number(row.granted),
       hands: Number(row.hands),
       wins: Number(row.wins),
+      sjHands: Number(row.sj_hands ?? 0),
+      sjWins: Number(row.sj_wins ?? 0),
     };
   }
 
@@ -113,9 +126,9 @@ export class Store {
   saveAccount(a: Account) {
     this.db
       .prepare(
-        'UPDATE accounts SET name = ?, avatar = ?, chips = ?, granted = ?, hands = ?, wins = ?, updated_at = ? WHERE id = ?',
+        'UPDATE accounts SET name = ?, avatar = ?, chips = ?, granted = ?, hands = ?, wins = ?, sj_hands = ?, sj_wins = ?, updated_at = ? WHERE id = ?',
       )
-      .run(a.name, a.avatar, a.chips, a.granted, a.hands, a.wins, Date.now(), a.id);
+      .run(a.name, a.avatar, a.chips, a.granted, a.hands, a.wins, a.sjHands, a.sjWins, Date.now(), a.id);
   }
 
   close() {

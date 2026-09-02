@@ -149,9 +149,12 @@ export class RoomClient {
       case 'welcome':
         this.auth = { code: msg.code, playerId: msg.playerId, token: msg.token };
         if (msg.account) this.account = msg.account;
+        // 命令行 / MCP 这一版只认炸金花，升级房间留到 P3（DESIGN 0 分期表）
+        if (msg.room.kind !== 'zjh') return this.rejectKind();
         this.apply(msg.room, []);
         return;
       case 'room':
+        if (msg.room.kind !== 'zjh') return this.rejectKind();
         this.apply(msg.room, msg.events);
         return;
       case 'error': {
@@ -166,6 +169,14 @@ export class RoomClient {
         this.events.latency?.(this.latency);
         return;
     }
+  }
+
+  private rejectKind() {
+    const msg = '这是一桌升级，命令行版还在开发中，请用网页版加入';
+    this.events.error?.(msg, true);
+    const reject = this.pendingError;
+    this.pendingError = null;
+    reject?.(new Error(msg));
   }
 
   private apply(room: PublicRoom, events: GameEvent[]) {

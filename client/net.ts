@@ -1,5 +1,4 @@
-import type { GameCommand, PublicRoom } from '../shared/game.ts';
-import type { AccountInfo, ClientMsg, GameEvent, ServerMsg } from '../shared/protocol.ts';
+import type { AccountInfo, AnyGameCommand, AnyPublicRoom, ClientMsg, GameEvent, ServerMsg } from '../shared/protocol.ts';
 
 export type NetStatus = 'connecting' | 'online' | 'offline';
 
@@ -13,8 +12,8 @@ export interface NetHandlers {
   onStatus(status: NetStatus): void;
   /** 服务端回执的账户凭证，存下来下次带上，就还是同一个自己 */
   onAccount(account: AccountInfo): void;
-  onWelcome(auth: Auth, room: PublicRoom): void;
-  onRoom(room: PublicRoom, events: GameEvent[]): void;
+  onWelcome(auth: Auth, room: AnyPublicRoom): void;
+  onRoom(room: AnyPublicRoom, events: GameEvent[]): void;
   onError(msg: string, fatal: boolean): void;
   onLatency(ms: number): void;
 }
@@ -124,7 +123,7 @@ export class Net {
     else if (msg.t !== 'ping') this.queue.push(msg);
   }
 
-  cmd(cmd: GameCommand) {
+  cmd(cmd: AnyGameCommand) {
     this.send({ t: 'cmd', cmd });
   }
 }

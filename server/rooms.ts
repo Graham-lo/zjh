@@ -1,12 +1,17 @@
 import type { WebSocket } from 'ws';
 import {
-  applyCommand, botDecision, canAutoStart, claimHostIfVacant, cleanAvatar, cleanName,
-  createHumanPlayer, createInitialRoom, currentPlayer, DEFAULT_SETTINGS, GameError, migrateRoom,
-  randomId, resetToLobby, sanitizeRoom, startRound,
-  timeoutCurrentPlayer, transferHost, COMMAND_TYPES,
-  type GameCommand, type RoomState,
+  canAutoStart, currentPlayer, DEFAULT_SETTINGS, GameError, randomId, resetToLobby, startRound,
+  type RoomState,
 } from '../shared/game.ts';
-import type { AccountInfo, GameEvent, ServerMsg } from '../shared/protocol.ts';
+import {
+  engine, engineFor, isSjRoom, GAME_KINDS, isGameKind,
+  type AnyRoomState, type BotMove, type GameKind,
+} from '../shared/games.ts';
+import {
+  closeDeclaring, finishDealing, SJ_DEAL_MS, SJ_HAND_END_MS, startNextHand, teamOf,
+  type SjCommand, type SjRoomState,
+} from '../shared/sj/engine.ts';
+import type { AccountInfo, AnyGameCommand, GameEvent, ServerMsg } from '../shared/protocol.ts';
 import { Store, type Account } from './store.ts';
 
 const ROOM_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 快照保留 3 天
@@ -26,12 +31,14 @@ export interface Conn {
 }
 
 interface Room {
-  state: RoomState;
+  state: AnyRoomState;
   conns: Set<Conn>;
   timer: NodeJS.Timeout | null;
   hostTimer: NodeJS.Timeout | null;
   saveTimer: NodeJS.Timeout | null;
   touchedAt: number;
+  /** 升级：已经把哪一局的战绩写回账户了，避免重复计数 */
+  creditedHand: number;
 }
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -55,20 +62,9 @@ function randomRoomCode(): string {
   return String(100000 + (b[0] % 900000));
 }
 
-/** 机器人"思考"时长。看牌是个小动作，给短一点，避免节奏拖沓。 */
-function botDelay(cmd: GameCommand): number {
-  const base = cmd.type === 'look' ? 320 : 620;
-  return base + Math.floor(Math.random() * (cmd.type === 'look' ? 260 : 900));
-}
-
-interface Snapshot {
-  pot: number;
-  phase: string;
-  handNo: number;
-  turnSeat: number | null;
-  chatSeq: number;
-  /** 变更前是否处在梭哈表态中 —— 用来把「跟注」区分成「接梭哈」 */
-  allIn: boolean;
+/** 变更前的完整状态。事件派生要的是「之前长什么样」，克隆一份最省心 */
+function snapshot(state: AnyRoomState): AnyRoomState {
+  return structuredClone(state);
 }
 
 export class Hub {
@@ -80,12 +76,17 @@ export class Hub {
     this.store = store;
     let restored = 0;
     for (const raw of store.loadAll(ROOM_TTL_MS)) {
-      // 老快照可能缺新加的字段，先补齐再用
-      const state = migrateRoom(raw);
+      // 老快照可能缺新加的字段，先补齐再用；没有 kind 的一律是炸金花（DESIGN 2.6）
+      const state = engineFor(raw).migrate(raw);
       // 重启后没有任何人是连着的；牌局停在原地等人回来。
       for (const p of state.players) if (!p.isBot) p.online = false;
       state.turnDeadline = null;
-      this.rooms.set(state.code, { state, conns: new Set(), timer: null, hostTimer: null, saveTimer: null, touchedAt: Date.now() });
+      this.rooms.set(state.code, {
+        state, conns: new Set(), timer: null, hostTimer: null, saveTimer: null,
+        touchedAt: Date.now(),
+        // 重启前如果已经打完一局，账户那一笔早就写过了，别再记一次
+        creditedHand: isSjRoom(state) ? (state.result?.handNo ?? 0) : 0,
+      });
       restored++;
     }
     if (restored) console.log(`[hub] 从快照恢复了 ${restored} 个房间`);
@@ -117,18 +118,36 @@ export class Hub {
       granted: DEFAULT_SETTINGS.startingChips,
       hands: 0,
       wins: 0,
+      sjHands: 0,
+      sjWins: 0,
     };
     this.store.createAccount(account);
     return { account, token: fresh };
   }
 
   private accountInfo(a: Account, token: string): AccountInfo {
-    return { id: a.id, token, chips: a.chips, granted: a.granted, hands: a.hands, wins: a.wins };
+    return {
+      id: a.id, token, chips: a.chips, granted: a.granted, hands: a.hands, wins: a.wins,
+      sjHands: a.sjHands, sjWins: a.sjWins,
+    };
   }
 
   /** 把牌桌上的积分和战绩写回账户。跟着房间快照一起防抖落盘。 */
   private syncAccounts(room: Room) {
-    for (const p of room.state.players) {
+    const s = room.state;
+    if (isSjRoom(s)) {
+      // 升级没有积分，只把昵称头像同步回去；局数与胜局在 hand_end 记（creditSj）
+      for (const p of s.players) {
+        if (!p.accountId || p.isBot) continue;
+        const acc = this.store.getAccount(p.accountId);
+        if (!acc) continue;
+        acc.name = p.name;
+        acc.avatar = p.avatar;
+        this.store.saveAccount(acc);
+      }
+      return;
+    }
+    for (const p of (s as RoomState).players) {
       if (!p.accountId || p.isBot) continue;
       const acc = this.store.getAccount(p.accountId);
       if (!acc) continue;
@@ -137,6 +156,30 @@ export class Hub {
       acc.name = p.name;
       acc.avatar = p.avatar;
       acc.wins = p.wins;
+      this.store.saveAccount(acc);
+    }
+  }
+
+  /**
+   * 升级的战绩写回（DESIGN 2.5 末句）。一局结束记一次：
+   * 每个真人 `sj_hands + 1`，赢的那一队 `sj_wins + 1`。
+   * 用 `creditedHand` 挡住重复 —— hand_end 会广播很多次，但只应该记一笔。
+   */
+  private creditSj(room: Room) {
+    const s = room.state;
+    if (!isSjRoom(s)) return;
+    const r = s.result;
+    if (!r || (s.phase !== 'hand_end' && s.phase !== 'match_end')) return;
+    if (room.creditedHand >= r.handNo) return;
+    room.creditedHand = r.handNo;
+    const dealerTeam = teamOf(r.dealerSeat);
+    const winnerTeam = r.outcome.defendersWin ? ((1 - dealerTeam) as 0 | 1) : dealerTeam;
+    for (const p of s.players) {
+      if (!p.accountId || p.isBot) continue;
+      const acc = this.store.getAccount(p.accountId);
+      if (!acc) continue;
+      acc.sjHands += 1;
+      if (teamOf(p.seat) === winnerTeam) acc.sjWins += 1;
       this.store.saveAccount(acc);
     }
   }
@@ -185,6 +228,8 @@ export class Hub {
 
   private broadcast(room: Room, events: GameEvent[] = []) {
     room.touchedAt = Date.now();
+    this.creditSj(room);
+    const eng = engineFor(room.state);
     for (const conn of [...room.conns]) {
       if (!conn.playerId) continue;
       // 被房主移出或自己退出的人，明确告知一次而不是让页面空转
@@ -196,63 +241,17 @@ export class Hub {
         continue;
       }
       // 每个人看到的是自己的视角：别人的暗牌根本不会离开这个进程。
-      this.send(conn, { t: 'room', room: sanitizeRoom(room.state, conn.playerId), events });
+      this.send(conn, { t: 'room', room: eng.sanitize(room.state, conn.playerId), events });
     }
     this.save(room);
   }
 
-  private snapshot(state: RoomState): Snapshot {
-    return {
-      pot: state.pot,
-      phase: state.phase,
-      handNo: state.handNo,
-      turnSeat: state.turnSeat,
-      chatSeq: state.chat.at(-1)?.seq ?? 0,
-      allIn: !!state.allIn,
-    };
-  }
-
-  private deriveEvents(before: Snapshot, state: RoomState, actorId: string, cmd: GameCommand | null): GameEvent[] {
-    const events: GameEvent[] = [];
-    if (cmd) {
-      const spent = state.pot - before.pot;
-      if (spent > 0 && (cmd.type === 'call' || cmd.type === 'raise' || cmd.type === 'all_in' || cmd.type === 'compare')) {
-        // 表态阶段的「跟注」其实是接梭哈，播报要不一样
-        const kind = cmd.type === 'call' && before.allIn ? 'accept' : cmd.type;
-        // 比牌额外带上对手和输家：客户端要靠它演「金蓝对撞」那一下。
-        // 输家一定是这两个人里刚被判成 folded 的那个（比牌是即时结算的）。
-        const extra =
-          cmd.type === 'compare'
-            ? {
-                targetId: cmd.targetId,
-                loserId:
-                  state.players.find((p) => p.id === actorId)?.status === 'folded' ? actorId : cmd.targetId,
-              }
-            : {};
-        events.push({ k: 'bet', playerId: actorId, amount: spent, kind, ...extra });
-      }
-      if (cmd.type === 'look') events.push({ k: 'look', playerId: actorId });
-      if (cmd.type === 'fold') events.push({ k: 'fold', playerId: actorId });
-      if (cmd.type === 'emote') events.push({ k: 'emote', playerId: actorId, id: cmd.id });
-    }
-    const lastChat = state.chat.at(-1);
-    if (lastChat && lastChat.seq > before.chatSeq) events.push({ k: 'chat', seq: lastChat.seq });
-
-    if (state.phase === 'playing' && (before.phase !== 'playing' || state.handNo !== before.handNo)) {
-      events.push({ k: 'deal', handNo: state.handNo, seats: state.players.filter((p) => p.status === 'active').map((p) => p.seat) });
-    }
-    if (state.phase === 'round_end' && before.phase !== 'round_end' && state.result) {
-      if (state.result.revealed.length > 1) events.push({ k: 'showdown', winnerId: state.result.winnerId });
-      events.push({ k: 'win', playerId: state.result.winnerId, amount: state.result.potWon });
-    }
-    if (state.phase === 'playing' && state.turnSeat !== before.turnSeat) {
-      const cur = currentPlayer(state);
-      if (cur) events.push({ k: 'turn', playerId: cur.id });
-    }
-    return events;
-  }
-
   /* -------------------------------------------------------------- 定时器 */
+
+  private later(room: Room, delay: number, run: () => void) {
+    room.timer = setTimeout(run, delay);
+    room.timer.unref?.();
+  }
 
   /**
    * 每次状态变化后重排定时器。这是整个实时体验的心脏：
@@ -261,79 +260,166 @@ export class Hub {
   private arm(room: Room) {
     if (room.timer) clearTimeout(room.timer);
     room.timer = null;
-    const s = room.state;
+    if (isSjRoom(room.state)) return this.armSj(room);
+    const s = room.state as RoomState;
 
     if (s.phase === 'playing') {
-      const cur = currentPlayer(s);
-      if (!cur) return;
-      if (cur.isBot) {
-        let cmd: GameCommand;
-        try {
-          cmd = botDecision(s, cur);
-        } catch {
-          cmd = { type: 'fold' };
-        }
-        room.timer = setTimeout(() => this.runBot(room, cur.id, cmd), botDelay(cmd));
-      } else {
+      const move = engine('zjh').bot(s);
+      if (move) {
+        this.later(room, move.delay, () => this.runZjhBot(room, move));
+      } else if (currentPlayer(s)) {
         const wait = Math.max(400, (s.turnDeadline ?? Date.now()) - Date.now());
-        room.timer = setTimeout(() => this.onTurnTimeout(room), wait);
+        this.later(room, wait, () => this.onTurnTimeout(room));
       }
     } else if (s.phase === 'round_end') {
-      room.timer = setTimeout(() => this.onRoundEnd(room), ROUND_END_MS);
+      this.later(room, ROUND_END_MS, () => this.onRoundEnd(room));
     } else if (canAutoStart(s)) {
-      room.timer = setTimeout(() => this.onAutoStart(room), AUTO_START_MS);
+      this.later(room, AUTO_START_MS, () => this.onAutoStart(room));
     }
-    room.timer?.unref?.();
   }
 
-  private runBot(room: Room, botId: string, cmd: GameCommand) {
-    const s = room.state;
+  private runZjhBot(room: Room, move: BotMove) {
+    const s = room.state as RoomState;
     const cur = currentPlayer(s);
-    if (!cur || cur.id !== botId) return this.arm(room);
-    const before = this.snapshot(s);
+    if (!cur || cur.id !== move.actorId) return this.arm(room);
+    const eng = engine('zjh');
+    const before = snapshot(s);
     try {
-      applyCommand(s, botId, cmd);
+      eng.apply(s, move.actorId, move.cmd);
     } catch {
       // 决策与状态对不上（比如刚被人比牌出局）就退回弃牌，绝不让牌桌卡住
       try {
-        applyCommand(s, botId, { type: 'fold' });
+        eng.apply(s, move.actorId, { type: 'fold' });
       } catch (e) {
         console.error('[hub] 机器人无法行动', e);
         return this.arm(room);
       }
     }
-    this.broadcast(room, this.deriveEvents(before, s, botId, cmd));
+    this.broadcast(room, eng.deriveEvents(before, s, move.actorId, move.cmd));
     this.arm(room);
   }
 
   private onTurnTimeout(room: Room) {
-    const s = room.state;
+    const s = room.state as RoomState;
     if (s.turnDeadline && Date.now() < s.turnDeadline - 100) return this.arm(room);
+    const eng = engine('zjh');
     const cur = currentPlayer(s);
-    const before = this.snapshot(s);
-    if (timeoutCurrentPlayer(s)) {
-      this.broadcast(room, cur ? this.deriveEvents(before, s, cur.id, { type: 'fold' }) : []);
+    const before = snapshot(s);
+    if (eng.timeout(s)) {
+      this.broadcast(room, cur ? eng.deriveEvents(before, s, cur.id, { type: 'fold' }) : []);
     }
     this.arm(room);
   }
 
   private onRoundEnd(room: Room) {
-    if (room.state.phase !== 'round_end') return this.arm(room);
-    const before = this.snapshot(room.state);
-    resetToLobby(room.state);
-    this.broadcast(room, this.deriveEvents(before, room.state, '', null));
+    const s = room.state as RoomState;
+    if (s.phase !== 'round_end') return this.arm(room);
+    const before = snapshot(s);
+    resetToLobby(s);
+    this.broadcast(room, engine('zjh').deriveEvents(before, s, '', null));
     this.arm(room);
   }
 
   private onAutoStart(room: Room) {
-    if (!canAutoStart(room.state)) return this.arm(room);
-    const before = this.snapshot(room.state);
+    const s = room.state as RoomState;
+    if (!canAutoStart(s)) return this.arm(room);
+    const before = snapshot(s);
     try {
-      startRound(room.state, null);
+      startRound(s, null);
     } catch {
       return this.arm(room);
     }
-    this.broadcast(room, this.deriveEvents(before, room.state, '', null));
+    this.broadcast(room, engine('zjh').deriveEvents(before, s, '', null));
+    this.arm(room);
+  }
+
+  /* ------------------------------------------------------ 升级的节拍（2.5） */
+
+  /**
+   * 升级的定时表（DESIGN 2.5）：
+   * dealing 4.6s → declaring 3s（每次有效亮主 +2s）→ kou 45s → 出牌 turnSeconds
+   * → hand_end 9s；机器人（含掉线代打）思考 500–1100ms。
+   */
+  private armSj(room: Room) {
+    const s = room.state as SjRoomState;
+    const now = Date.now();
+    const eng = engineFor(s);
+
+    if (s.phase === 'dealing') {
+      const at = (s.dealStartedAt ?? now) + SJ_DEAL_MS;
+      return this.later(room, Math.max(60, at - now), () => this.sjStep(room, finishDealing));
+    }
+    if (s.phase === 'declaring') {
+      // 还没表态的电脑先各自决定一次，之后才等窗口自然到点
+      const move = eng.bot(s);
+      if (move) return this.later(room, move.delay, () => this.runSjBot(room, move));
+      const at = s.declareEndsAt ?? now;
+      return this.later(room, Math.max(120, at - now), () => this.sjStep(room, closeDeclaring));
+    }
+    if (s.phase === 'kou' || s.phase === 'playing') {
+      // 掉线的人也走这条路：轮到他直接由机器人代打，不等倒计时（DESIGN 1.9）
+      const move = eng.bot(s);
+      if (move) return this.later(room, move.delay, () => this.runSjBot(room, move));
+      const at = s.turnDeadline ?? now;
+      return this.later(room, Math.max(400, at - now), () => this.onSjTimeout(room));
+    }
+    if (s.phase === 'hand_end' && s.settings.autoContinue) {
+      const at = s.turnDeadline ?? now + SJ_HAND_END_MS;
+      return this.later(room, Math.max(200, at - now), () => this.sjStep(room, startNextHand));
+    }
+  }
+
+  /** 不由玩家指令触发的阶段推进（发牌结束、亮主窗口关闭、自动续局） */
+  private sjStep(room: Room, step: (state: SjRoomState) => void) {
+    const s = room.state as SjRoomState;
+    const before = snapshot(s);
+    try {
+      step(s);
+    } catch (e) {
+      console.error('[hub] 升级阶段推进失败', e);
+      return this.arm(room);
+    }
+    this.broadcast(room, engineFor(s).deriveEvents(before, s, '', null));
+    this.arm(room);
+  }
+
+  private runSjBot(room: Room, move: BotMove) {
+    const s = room.state as SjRoomState;
+    const eng = engineFor(s);
+    const before = snapshot(s);
+    try {
+      eng.apply(s, move.actorId, move.cmd);
+    } catch {
+      // 决策和状态对不上时退回一个一定合法的动作，绝不让牌桌卡死
+      try {
+        if (s.phase === 'declaring') eng.apply(s, move.actorId, { type: 'pass' } satisfies SjCommand);
+        else if (eng.timeout(s)) {
+          /* 由超时逻辑接管这一步 */
+        } else return this.arm(room);
+      } catch (e) {
+        console.error('[hub] 升级机器人无法行动', e);
+        return this.arm(room);
+      }
+    }
+    this.broadcast(room, eng.deriveEvents(before, s, move.actorId, move.cmd));
+    this.arm(room);
+  }
+
+  private onSjTimeout(room: Room) {
+    const s = room.state as SjRoomState;
+    if (s.turnDeadline && Date.now() < s.turnDeadline - 100) return this.arm(room);
+    const eng = engineFor(s);
+    const actor = s.players.find((p) => p.seat === (s.phase === 'kou' ? s.dealerSeat : s.turnSeat));
+    const before = snapshot(s);
+    // 事件派生只看 cmd 的 type（出的是哪几张牌从手牌差里算），所以这里给个空壳就够
+    const cmd: SjCommand = s.phase === 'kou' ? { type: 'kou', cardIds: [] } : { type: 'play', cardIds: [] };
+    try {
+      if (!eng.timeout(s)) return this.arm(room);
+    } catch (e) {
+      console.error('[hub] 升级超时代打失败', e);
+      return this.arm(room);
+    }
+    this.broadcast(room, eng.deriveEvents(before, s, actor?.id ?? '', cmd));
     this.arm(room);
   }
 
@@ -345,8 +431,12 @@ export class Hub {
     return room;
   }
 
-  async create(conn: Conn, name: string, avatar: string, agent = false, accountId?: string, accountToken?: string) {
+  async create(
+    conn: Conn, kind: GameKind, name: string, avatar: string, agent = false,
+    accountId?: string, accountToken?: string,
+  ) {
     if (this.rooms.size >= MAX_ROOMS) throw new GameError('服务器房间已满，请稍后再试', 503);
+    if (!isGameKind(kind)) throw new GameError('未知的游戏类型');
     const { account, token: accTok } = await this.resolveAccount(accountId, accountToken, name, avatar);
     const token = newToken();
     const hash = await hashToken(token);
@@ -357,18 +447,20 @@ export class Hub {
     }
     if (!code) throw new GameError('创建房间失败，请重试', 503);
 
-    const host = createHumanPlayer(account.name, account.avatar, 0, hash, agent);
-    host.accountId = account.id;
-    host.chips = account.chips;
-    host.granted = account.granted;
-    host.wins = account.wins;
-    const state = createInitialRoom(code, host);
-    const room: Room = { state, conns: new Set(), timer: null, hostTimer: null, saveTimer: null, touchedAt: Date.now() };
+    const eng = engine(kind);
+    const { state, playerId } = eng.create(code, {
+      name: account.name, avatar: account.avatar, tokenHash: hash, agent,
+      accountId: account.id, chips: account.chips, granted: account.granted, wins: account.wins,
+    });
+    const room: Room = {
+      state, conns: new Set(), timer: null, hostTimer: null, saveTimer: null,
+      touchedAt: Date.now(), creditedHand: 0,
+    };
     this.rooms.set(code, room);
-    this.attach(conn, room, host.id);
+    this.attach(conn, room, playerId);
     this.send(conn, {
-      t: 'welcome', code, playerId: host.id, token,
-      room: sanitizeRoom(state, host.id),
+      t: 'welcome', code, playerId, token,
+      room: eng.sanitize(state, playerId),
       account: this.accountInfo(account, accTok),
     });
     this.broadcast(room);
@@ -377,36 +469,19 @@ export class Hub {
   async join(conn: Conn, code: string, name: string, avatar: string, agent = false, accountId?: string, accountToken?: string) {
     const room = this.room(code);
     const s = room.state;
-    if (s.players.length >= s.settings.maxPlayers) throw new GameError('房间已满');
+    const eng = engineFor(s);
     const { account, token: accTok } = await this.resolveAccount(accountId, accountToken, name, avatar);
-    // 同一个账户不该在一张桌子上占两个座位
-    if (s.players.some((p) => p.accountId === account.id)) {
-      throw new GameError('你已经在这个房间里了，直接用原来的窗口继续', 409);
-    }
     const token = newToken();
     const hash = await hashToken(token);
-    const used = new Set(s.players.map((p) => p.seat));
-    let seat = 0;
-    while (used.has(seat)) seat++;
+    const playerId = eng.join(s, {
+      name: account.name, avatar: account.avatar, tokenHash: hash, agent,
+      accountId: account.id, chips: account.chips, granted: account.granted, wins: account.wins,
+    });
 
-    let finalName = cleanName(account.name);
-    if (s.players.some((p) => p.name === finalName)) finalName = `${finalName}·${seat + 1}`;
-    const player = createHumanPlayer(finalName, cleanAvatar(account.avatar), seat, hash, agent);
-    player.accountId = account.id;
-    player.chips = account.chips;
-    player.granted = account.granted;
-    player.wins = account.wins;
-    s.players.push(player);
-    claimHostIfVacant(s, player.id);
-    const suffix = s.phase === 'playing' ? '，等待下一局' : '';
-    // 直接落日志而不是走命令，避免把"加入"塞进游戏状态机
-    s.actionSeq += 1;
-    s.log.push({ seq: s.actionSeq, at: Date.now(), text: `${player.name} 加入房间${suffix}` });
-
-    this.attach(conn, room, player.id);
+    this.attach(conn, room, playerId);
     this.send(conn, {
-      t: 'welcome', code, playerId: player.id, token,
-      room: sanitizeRoom(s, player.id),
+      t: 'welcome', code, playerId, token,
+      room: eng.sanitize(s, playerId),
       account: this.accountInfo(account, accTok),
     });
     this.broadcast(room);
@@ -415,15 +490,17 @@ export class Hub {
 
   async resume(conn: Conn, code: string, playerId: string, token: string) {
     const room = this.room(code);
+    const eng = engineFor(room.state);
     const player = room.state.players.find((p) => p.id === playerId && !p.isBot);
     if (!player?.tokenHash) throw new GameError('房间里已经没有你的座位了，请重新加入', 401);
     if ((await hashToken(token)) !== player.tokenHash) throw new GameError('登录凭证无效，请重新加入房间', 401);
     player.online = true;
     player.pendingLeave = undefined;
     // 全场只剩电脑时房主会空出来，谁回来谁接手
-    claimHostIfVacant(room.state, playerId);
+    const host = room.state.players.find((p) => p.id === room.state.hostId);
+    if (!host || host.isBot) room.state.hostId = playerId;
     this.attach(conn, room, playerId);
-    this.send(conn, { t: 'welcome', code, playerId, token, room: sanitizeRoom(room.state, playerId) });
+    this.send(conn, { t: 'welcome', code, playerId, token, room: eng.sanitize(room.state, playerId) });
     if (room.hostTimer) {
       clearTimeout(room.hostTimer);
       room.hostTimer = null;
@@ -432,14 +509,15 @@ export class Hub {
     this.arm(room);
   }
 
-  command(conn: Conn, cmd: GameCommand) {
+  command(conn: Conn, cmd: AnyGameCommand) {
     if (!conn.code || !conn.playerId) throw new GameError('尚未加入房间', 401);
-    if (!cmd || typeof cmd.type !== 'string' || !COMMAND_TYPES.has(cmd.type)) throw new GameError('操作无效');
     const room = this.room(conn.code);
+    const eng = engineFor(room.state);
+    if (!cmd || typeof cmd.type !== 'string' || !eng.commandTypes().has(cmd.type)) throw new GameError('操作无效');
     const actorId = conn.playerId;
-    const before = this.snapshot(room.state);
-    applyCommand(room.state, actorId, cmd);
-    const events = this.deriveEvents(before, room.state, actorId, cmd);
+    const before = snapshot(room.state);
+    eng.apply(room.state, actorId, cmd);
+    const events = eng.deriveEvents(before, room.state, actorId, cmd);
 
     if (cmd.type === 'leave') {
       const stillSeated = room.state.players.some((p) => p.id === actorId);
@@ -483,7 +561,7 @@ export class Hub {
           room.hostTimer = null;
           const host = room.state.players.find((p) => p.id === playerId);
           if (!host || host.online) return;
-          transferHost(room.state, playerId);
+          engineFor(room.state).transferHost(room.state, playerId);
           this.broadcast(room);
           this.arm(room);
         }, HOST_GRACE_MS);
@@ -496,10 +574,13 @@ export class Hub {
   stats() {
     let players = 0;
     let conns = 0;
+    const kinds = Object.fromEntries(GAME_KINDS.map((k) => [k, 0])) as Record<GameKind, number>;
     for (const room of this.rooms.values()) {
       players += room.state.players.filter((p) => !p.isBot).length;
       conns += room.conns.size;
+      const kind = room.state.kind as GameKind;
+      if (kind in kinds) kinds[kind] += 1;
     }
-    return { rooms: this.rooms.size, players, conns };
+    return { rooms: this.rooms.size, players, conns, kinds };
   }
 }

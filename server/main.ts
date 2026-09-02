@@ -6,6 +6,7 @@ import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { GameError } from '../shared/game.ts';
+import { isGameKind, type GameKind } from '../shared/games.ts';
 import type { ClientMsg } from '../shared/protocol.ts';
 import { Hub, type Conn } from './rooms.ts';
 import { Store } from './store.ts';
@@ -230,7 +231,11 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
           return hub.send(conn, { t: 'pong', at: msg.at, now: Date.now() });
         case 'create':
           if (!allow(conn.ip, 4)) throw new GameError('操作太频繁，请稍后再试', 429);
-          return await hub.create(conn, msg.name, msg.avatar, !!msg.agent, msg.accountId, msg.accountToken);
+          // kind 缺省炸金花：老客户端的 create 没有这个字段（DESIGN 2.6）
+          return await hub.create(
+            conn, isGameKind(String(msg.kind ?? '')) ? (msg.kind as GameKind) : 'zjh',
+            msg.name, msg.avatar, !!msg.agent, msg.accountId, msg.accountToken,
+          );
         case 'join':
           // 建/进房间比普通操作贵，避免有人拿 6 位房号扫库
           if (!allow(conn.ip, 3)) throw new GameError('操作太频繁，请稍后再试', 429);

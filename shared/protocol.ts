@@ -1,4 +1,6 @@
 import type { GameCommand, PublicRoom } from './game.ts';
+import type { GameKind } from './games.ts';
+import type { SjCommand, SjEvent, SjPublicRoom } from './sj/engine.ts';
 
 export interface ClientHello {
   name: string;
@@ -18,17 +20,30 @@ export interface AccountInfo {
   granted: number;
   hands: number;
   wins: number;
+  /** 升级的局数与胜局（DESIGN 2.1 多游戏框架） */
+  sjHands: number;
+  sjWins: number;
 }
 
+/**
+ * 任意一种房间的公开视图。房间靠 `kind` 自我描述，
+ * 客户端拿到之后先分流再解读（DESIGN 2.3）。
+ */
+export type AnyPublicRoom = PublicRoom | SjPublicRoom;
+
+/** 任意一种游戏的玩家指令。服务端按房间的 kind 交给对应引擎校验 */
+export type AnyGameCommand = GameCommand | SjCommand;
+
 export type ClientMsg =
-  | ({ t: 'create' } & ClientHello)
+  // kind 缺省 'zjh'：老客户端发来的 create 仍然是炸金花（DESIGN 2.3 / 2.6）
+  | ({ t: 'create'; kind?: GameKind } & ClientHello)
   | ({ t: 'join'; code: string } & ClientHello)
   | { t: 'resume'; code: string; playerId: string; token: string }
-  | { t: 'cmd'; cmd: GameCommand }
+  | { t: 'cmd'; cmd: AnyGameCommand }
   | { t: 'ping'; at: number };
 
-/** 一次状态变更伴随的瞬时事件，客户端拿它播动画和音效。状态本身仍以 room 为准。 */
-export type GameEvent =
+/** 炸金花的瞬时事件。客户端拿它播动画和音效，状态本身仍以 room 为准。 */
+export type ZjhEvent =
   | { k: 'deal'; handNo: number; seats: number[] }
   | {
       k: 'bet';
@@ -54,8 +69,14 @@ export type GameEvent =
   | { k: 'turn'; playerId: string }
   | { k: 'presence'; playerId: string; online: boolean };
 
+/**
+ * 一次状态变更伴随的瞬时事件。两种游戏的事件并成一个联合类型，
+ * 客户端用 `switch (ev.k)` 分流；不认识的事件走 default 忽略（DESIGN 2.6）。
+ */
+export type GameEvent = ZjhEvent | SjEvent;
+
 export type ServerMsg =
-  | { t: 'welcome'; code: string; playerId: string; token: string; room: PublicRoom; account?: AccountInfo }
-  | { t: 'room'; room: PublicRoom; events: GameEvent[] }
+  | { t: 'welcome'; code: string; playerId: string; token: string; room: AnyPublicRoom; account?: AccountInfo }
+  | { t: 'room'; room: AnyPublicRoom; events: GameEvent[] }
   | { t: 'error'; msg: string; fatal?: boolean }
   | { t: 'pong'; at: number; now: number };
