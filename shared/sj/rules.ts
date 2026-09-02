@@ -14,7 +14,7 @@ import {
   type SjCard, type SjCtx, type SjGroup,
 } from './cards.ts';
 import {
-  cardsInGroup, parseShape, primaryUnit, runsOf, shapeEquals, unitPriority,
+  cardsInGroup, parseShape, primaryUnit, runsOf, unitPriority,
   type SjRun, type SjShape, type SjUnit,
 } from './units.ts';
 
@@ -153,45 +153,68 @@ function powerOf(hand: SjCard[], group: SjGroup, ctx: SjCtx): GroupPower {
 }
 
 /**
- * 甩牌校验（DESIGN 1.5）：每个单位都要是其他三家该组同类单位里**最大**的。
+ * 甩牌校验（DESIGN 1.5）：其他三家不能用同类单位**严格管上**甩牌中的任何单位。
  *
  * 需要全部手牌，所以只有服务端能判 —— 客户端出牌时无从预判，由服务端裁决后回
- * `sj_throw_fail` 事件。失败时只能出甩出的牌里**最小的那个单位**，其余退回手中。
+ * `sj_throw_fail` 事件。失败时按 QQ 的牌型优先规则，在能被管上的类别里强制出最小单位，
+ * 其余退回手中；相同点数只算顶住，不能管上先出的牌。
  */
 export function validateThrow(shape: SjShape, otherHands: SjCard[][], ctx: SjCtx): SjThrowFail | null {
   const powers = otherHands.map((h) => powerOf(h, shape.group, ctx));
+  const beatable: SjUnit[] = [];
   for (const unit of shape.units) {
     for (const p of powers) {
       if (unit.kind === 'single') {
-        if (p.maxSingle >= unit.top) return { forced: smallestUnit(shape), reason: `甩出的${unitLabel(unit)}压不住别人` };
+        if (p.maxSingle > unit.top) {
+          beatable.push(unit);
+          break;
+        }
       } else if (unit.kind === 'pair') {
-        if (p.maxPair >= unit.top) return { forced: smallestUnit(shape), reason: `甩出的${unitLabel(unit)}压不住别人` };
+        if (p.maxPair > unit.top) {
+          beatable.push(unit);
+          break;
+        }
       } else {
         // n 连对要压过别人所有 ≥n 连对，比较用最高牌
         for (const r of p.runs) {
-          if (r.len >= unit.span && r.top >= unit.top) {
-            return { forced: smallestUnit(shape), reason: `甩出的${unitLabel(unit)}压不住别人` };
+          if (r.len >= unit.span && r.top > unit.top) {
+            beatable.push(unit);
+            break;
           }
         }
+        if (beatable.includes(unit)) break;
       }
     }
   }
-  return null;
+  if (!beatable.length) return null;
+
+  /*
+   * QQ/传统网络升级的“甩错强制出小”不是在整手牌里一概找最小：
+   * 先找确实能被别人管上的牌型；若多种牌型都被管，优先强制出大牌型
+   * （拖拉机 > 对子 > 单张），再在该牌型中出最小的一组。
+   */
+  const priority = Math.max(...beatable.map(unitPriority));
+  const forced = beatable
+    .filter((u) => unitPriority(u) === priority)
+    .sort((a, b) => a.top - b.top)[0];
+  return { forced, reason: `甩出的${unitLabel(forced)}能被别人管上` };
 }
 
 /**
- * 甩牌失败时被迫留下的那个单位 —— 优先级最低、同优先级里最小的一个。
+ * candidate 是否足以覆盖首出结构。
  *
- * 规范只说"最小的那个单位"。按 1.7 的单位次序（拖拉机 > 对子 > 单张）反过来取最小，
- * 和比大小用的是同一把尺子，不另立标准。
+ * “覆盖”而非“完全相等”是 QQ 升级盖毙的关键：首出若是若干散牌，主牌里的对子
+ * 当然可以毙；首出含对子/拖拉机时，毙牌里的相应结构只许更多，不能更少。
  */
-export function smallestUnit(shape: SjShape): SjUnit {
-  let worst = shape.units[0];
-  for (const u of shape.units) {
-    const d = unitPriority(u) - unitPriority(worst);
-    if (d < 0 || (d === 0 && u.top < worst.top)) worst = u;
+export function shapeCovers(candidate: SjShape, lead: SjShape): boolean {
+  if (candidate.count !== lead.count) return false;
+  const lens = candidate.tractors.concat(Array(candidate.pairs).fill(1));
+  for (const need of lead.tractors) {
+    const idx = bestFit(lens, need);
+    if (idx < 0) return false;
+    lens[idx] -= need;
   }
-  return worst;
+  return lens.reduce((sum, n) => sum + n, 0) >= lead.pairs;
 }
 
 export function unitLabel(unit: SjUnit): string {
@@ -215,7 +238,7 @@ export interface SjTrickPlayInput {
 /**
  * 谁赢这一圈（DESIGN 1.7）。`plays[0]` 必须是首出。
  *
- * 能参与比大小的条件很硬：**结构与首出完全一致**，且要么全是首出那一组，
+ * 能参与比大小的条件很硬：**结构覆盖首出要求**，且要么全是首出那一组，
  * 要么（首出不是主时）全是主牌来毙。其余的跟法只是垫牌，再大也不参与。
  * 相等时先出者赢 —— 三色副级牌互相相等、两副同牌也相等，这一条是它们的归宿。
  */
@@ -224,19 +247,24 @@ export function trickWinner(plays: SjTrickPlayInput[], ctx: SjCtx): { seat: numb
   if (!lead) throw new Error('首出必须是同一个花色组的牌');
   let bestIndex = 0;
   let bestTrump = 0;
-  let bestTop = primaryUnit(lead).top;
+  let bestUnit = primaryUnit(lead);
   for (let i = 1; i < plays.length; i++) {
     const shape = parseShape(plays[i].cards, ctx);
-    if (!shape || !shapeEquals(shape, lead)) continue;
+    if (!shape || !shapeCovers(shape, lead)) continue;
     const isTrump = shape.group === 'T' && lead.group !== 'T';
     if (shape.group !== lead.group && !isTrump) continue;
-    const top = primaryUnit(shape).top;
+    const unit = primaryUnit(shape);
     const trump = isTrump ? 1 : 0;
-    // 严格大于才换人：相等留给先出的那一家
-    if (trump > bestTrump || (trump === bestTrump && top > bestTop)) {
+    const unitCmp = unitPriority(unit) - unitPriority(bestUnit);
+    // 先比主/副，再比最大牌型（拖拉机 > 对子 > 单张），最后比该牌型的最大牌。
+    // 全都相等才留给先出者。
+    if (
+      trump > bestTrump ||
+      (trump === bestTrump && (unitCmp > 0 || (unitCmp === 0 && unit.top > bestUnit.top)))
+    ) {
       bestIndex = i;
       bestTrump = trump;
-      bestTop = top;
+      bestUnit = unit;
     }
   }
   return { seat: plays[bestIndex].seat, index: bestIndex };
@@ -247,21 +275,34 @@ export function trickPoints(plays: SjTrickPlayInput[]): number {
   return plays.reduce((sum, p) => sum + sumPoints(p.cards), 0);
 }
 
-/** 这手牌是不是在毙（首出不是主，自己全是主且结构一致） */
+/** 这手牌是不是在毙（首出不是主，自己全是主且结构覆盖首出要求） */
 export function isTrumping(lead: SjShape, cards: SjCard[], ctx: SjCtx): boolean {
   if (lead.group === 'T') return false;
   const shape = parseShape(cards, ctx);
-  return !!shape && shape.group === 'T' && shapeEquals(shape, lead);
+  return !!shape && shape.group === 'T' && shapeCovers(shape, lead);
 }
 
 /* --------------------------------------------------------------- 抠底 */
 
 /**
- * 抠底倍数（DESIGN 1.8）：`2^n`，n = 闲家最后一圈获胜那手牌的张数，上限 ×64。
- * 单张 ×2、对子 ×4、两连对 ×16 —— 都在这条式子上。
+ * 基础抠底指数换算：`2^n`，上限 ×64。
+ * 实际牌型应经 `digMultiplierForLead` 判定，不能直接传整把甩牌的张数。
  */
 export function digMultiplier(cardCount: number): number {
   return Math.min(64, 2 ** Math.max(1, cardCount));
+}
+
+/**
+ * QQ 升级的抠底番数看首出牌型，而不是把一把甩牌的总张数直接塞进 2^n：
+ * 纯散牌甩仍是单抠 ×2；含对子是双抠 ×4；含拖拉机按最长拖拉机的张数翻番。
+ */
+export function digMultiplierForLead(cards: SjCard[], ctx: SjCtx): number {
+  const shape = parseShape(cards, ctx);
+  if (!shape) return 2;
+  const longest = shape.tractors[0] ?? 0;
+  if (longest > 0) return digMultiplier(longest * 2);
+  if (shape.pairs > 0) return 4;
+  return 2;
 }
 
 /* --------------------------------------------------------------- 升级表 */

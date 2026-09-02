@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { EMOTES } from '../../shared/game.ts';
 import { GAME_META, ladderOf } from '../../shared/games.ts';
-import { cardFromId, levelLabel, sortSjHand } from '../../shared/sj/cards.ts';
+import { SUIT_SYMBOL, cardFromId, levelLabel, sortSjHand } from '../../shared/sj/cards.ts';
 import type { SjCommand, SjPublicPlayer, SjPublicRoom, SjTrickRecord } from '../../shared/sj/engine.ts';
 import { suggest } from '../../shared/sj/bot.ts';
 import type { AccountInfo, AnyGameCommand, GameEvent } from '../../shared/protocol.ts';
@@ -20,7 +20,7 @@ import { SjFx, type SjFxJob } from './SjFx.tsx';
 import { DeclaredCards, LastTrick, PlayZone } from './Trick.tsx';
 import { useCountUp } from './useCountUp.ts';
 import {
-  TRUMP_TINT, TRUMP_VOICE, checkPlay, ctxOf, leadShape, leadText, seatBySpot, spotOf,
+  TRUMP_TINT, TRUMP_VOICE, checkPlay, ctxOf, leadShape, leadText, seatBySpot, smartPickForCard, spotOf,
   teamOfSeat, throwFailText, trickPointsOf, trumpGlyph, trumpText, type SjSpot,
 } from './util.ts';
 
@@ -50,6 +50,7 @@ function SeatCard({
   const myTeam = teamOfSeat(room.players.find((p) => p.id === room.viewerId)?.seat ?? 0);
   const sameTeam = teamOfSeat(player.seat) === myTeam;
   const isDealer = player.seat === room.dealerSeat;
+  const voids = room.voidGroups[player.seat] ?? [];
   const cls = [
     'sj-seat', `sj-seat-${spot}`,
     isTurn && 'is-turn',
@@ -82,6 +83,9 @@ function SeatCard({
           {player.isBot && room.phase !== 'lobby' ? ' · 电脑' : ''}
           {!player.online && !player.isBot ? ' · 离线' : ''}
           {player.lastAction ? ` · ${player.lastAction}` : ''}
+          {voids.length > 0 && (
+            <span className="sj-voids"> · 缺{voids.map((g) => g === 'T' ? '主' : SUIT_SYMBOL[g]).join('')}</span>
+          )}
         </div>
       </div>
     </div>
@@ -238,10 +242,10 @@ export function SjTable({
       // mySeat / trickNo 是判断「领先的是不是对家」「是不是该抢了」的依据，缺一不可
       ? suggest({
         trump: room.trump, trick: room.trick, playedIds: room.playedIds,
-        mySeat, trickNo: room.trickNo,
+        mySeat, trickNo: room.trickNo, voidGroups: room.voidGroups,
       }, hand, 5)
       : []),
-    [myTurn, room.trick, room.playedIds, hand, room.trump, mySeat, room.trickNo],
+    [myTurn, room.trick, room.playedIds, room.voidGroups, hand, room.trump, mySeat, room.trickNo],
   );
   /** 当前被建议的那一手，跟着「提示」的循环走 */
   const hintPick = hints.length ? hints[hintIdx % hints.length] : null;
@@ -480,8 +484,8 @@ export function SjTable({
 
   /**
    * 整组切换：组里只要还有没选中的就补齐，全都选中了才整组取消。
-   * 单击一张牌是「一张的组」；首出是对子时 Hand 会把它和它的对子作为一组传进来，
-   * 所以自动配上的对子也能一下取消掉，不会出现「选不掉」的粘滞。
+   * Hand 会把智能识别出的对子/连对/整手跟牌作为一组传进来，所以自动配上的牌
+   * 再点其中任一张就能整组取消，不会出现「选不掉」的粘滞。
    */
   const toggle = (ids: string[]) =>
     setSelected((s) => {
@@ -795,7 +799,9 @@ export function SjTable({
               hidden={kouFly?.to === 'me' ? new Set(kouFly.ids) : undefined}
               onToggle={toggle}
               onSelectMany={selectMany}
-              pairPick={!!lead && (lead.pairs > 0 || lead.tractors.length > 0)}
+              pickForCard={room.phase === 'playing' && myTurn
+                ? (card) => smartPickForCard(hand, card, lead, ctx, hints)
+                : undefined}
               rows={typeof window !== 'undefined' && window.innerWidth <= 780 ? 2 : 1}
               disabled={room.phase === 'playing' && !myTurn}
               lifted={myTurn || kouMine}

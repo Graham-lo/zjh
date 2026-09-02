@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseShape } from '../shared/sj/units.ts';
 import {
-  digMultiplier, followRequirement, isMatchWon, isTopLevel, levelUp, nextDealerSeat, outcomeFor,
-  trickPoints, trickWinner, validateFollow, validateLead, validateThrow,
+  digMultiplier, digMultiplierForLead, followRequirement, isMatchWon, isTopLevel, levelUp,
+  nextDealerSeat, outcomeFor, trickPoints, trickWinner, validateFollow, validateLead, validateThrow,
 } from '../shared/sj/rules.ts';
 import { ladderOf } from '../shared/games.ts';
 import type { SjCtx } from '../shared/sj/cards.ts';
@@ -112,27 +112,47 @@ test('甩牌成功：每个单位都压得住其他三家', () => {
   assert.equal(validateThrow(s, [h('H2a H3a'), h('H4a'), h('D2a')], CTX_S5), null);
 });
 
-test('甩牌失败：别人有一样大的单张，只能出最小的那个单位', () => {
-  const s = shape('HAa HKa');
-  const bad = validateThrow(s, [h('HAb'), h('H4a'), h('D2a')], CTX_S5);
-  assert.ok(bad, '压不住就该被打回来');
-  assert.deepEqual(bad.forced.cards.map((c) => c.id), ['HKa'], '留下最小的那个单位');
+test('甩牌：同大的牌管不上，严格更大才会打回', () => {
+  const s = shape('HAa HKa HKb');
+  assert.equal(validateThrow(s, [h('HAb'), h('H4a'), h('D2a')], CTX_S5), null);
 });
 
 test('甩牌失败：对子被别人的大对子压住', () => {
   const s = shape('H7a H7b H2a');
   const bad = validateThrow(s, [h('HKa HKb'), h('D2a'), h('D3a')], CTX_S5);
   assert.ok(bad);
-  assert.deepEqual(bad.forced.cards.map((c) => c.id), ['H2a'], '单张的优先级最低，先被留下');
+  assert.deepEqual(bad.forced.cards.map((c) => c.id), ['H7a', 'H7b'], '只有对子被管上，就强制出该对子');
 });
 
 test('甩牌失败：n 连对被别人更长的连对压住', () => {
   const s = shape('H7a H7b H8a H8b HAa');
   const bad = validateThrow(s, [h('H9a H9b HTa HTb HJa HJb'), h('D2a'), h('D3a')], CTX_S5);
   assert.ok(bad);
-  assert.equal(bad.forced.kind, 'single');
+  assert.equal(bad.forced.kind, 'tractor');
   // 别人的连对更短、单张也更小，就压不住这一甩
   assert.equal(validateThrow(shape('HAa HAb HKa HKb HQa'), [h('H9a H9b'), h('H8a'), h('D2a')], CTX_S5), null);
+});
+
+test('甩牌失败：单张和对子都能被管时，按 QQ 牌型优先强制出对子', () => {
+  const bad = validateThrow(
+    shape('H7a H7b H2a'),
+    [h('HKa HKb H3a'), h('D2a'), h('D3a')],
+    CTX_S5,
+  );
+  assert.ok(bad);
+  assert.equal(bad.forced.kind, 'pair');
+  assert.deepEqual(bad.forced.cards.map((c) => c.id), ['H7a', 'H7b']);
+});
+
+test('甩牌失败：单张、对子和拖拉机都能被管时，按 QQ 牌型优先强制出拖拉机', () => {
+  const bad = validateThrow(
+    shape('H7a H7b H8a H8b H2a'),
+    [h('H9a H9b HTa HTb H3a'), h('D2a'), h('D3a')],
+    CTX_S5,
+  );
+  assert.ok(bad);
+  assert.equal(bad.forced.kind, 'tractor');
+  assert.equal(bad.forced.span, 2);
 });
 
 /* ------------------------------------------------------------------- 定圈 */
@@ -168,6 +188,8 @@ const TRICK_CASES: TrickCase[] = [
   { name: '甩牌比最高优先单位：大对子赢', plays: ['HKa HKb H2a', 'HAa HAb H3a', 'H4a H4b H6a', 'H7a H8a H9a'], winner: 1 },
   { name: '甩牌里拖拉机说了算', plays: ['H7a H7b H8a H8b HKa', 'H9a H9b HTa HTb H2a', 'H3a H3b H4a H4b HAa', 'H6a HJa HQa CAa DAa'], winner: 1 },
   { name: '甩牌结构不一致的跟法不参与', plays: ['HKa HKb H2a', 'HAa HAb HQa HJa', 'H4a H6a H7a', 'H8a H9a HTa'], winner: 0 },
+  { name: '散牌甩可被主牌对子带单毙', plays: ['HAa HKa HQa', 'S9a S9b S2a', 'H3a H4a H6a', 'H7a H8a HJa'], winner: 1 },
+  { name: '盖毙先比最大牌型：拖拉机大过对子', plays: ['HAa HKa HQa HJa', 'S9a S9b S2a S3a', 'S6a S6b S7a S7b', 'H2a H3a H4a H6a'], winner: 2 },
   { name: '分牌只是分，不影响谁赢', plays: ['H7a', 'HKa', 'HTa', 'H5b'], winner: 1, ctx: { trump: 'S', level: 2 } },
   { name: '无主时级牌毙副牌', plays: ['SAa', 'D5a', 'S2a', 'S3a'], winner: 1, ctx: CTX_NT5 },
   { name: '无主时小王大过级牌', plays: ['S5a', 'JSa', 'S2a', 'S3a'], winner: 1, ctx: CTX_NT5 },
@@ -199,6 +221,12 @@ test('抠底倍数是 2^n，上限 ×64', () => {
   assert.equal(digMultiplier(6), 64);
   assert.equal(digMultiplier(8), 64, '再多也封在 ×64');
   assert.equal(digMultiplier(25), 64);
+});
+
+test('QQ 甩牌抠底按最大牌型定番，不按甩牌总张数', () => {
+  assert.equal(digMultiplierForLead(h('HAa HKa HQa'), CTX_S5), 2, '多张散牌仍是单抠');
+  assert.equal(digMultiplierForLead(h('HAa HKa HKb H2a'), CTX_S5), 4, '含对子按双抠');
+  assert.equal(digMultiplierForLead(h('H9a H9b HTa HTb HKa'), CTX_S5), 16, '两连对按四张翻 16 倍');
 });
 
 /* ------------------------------------------------------------------- 升级表 */

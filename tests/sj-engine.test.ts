@@ -251,7 +251,29 @@ test('出牌要守跟牌规则，不合法时给出原因', () => {
   );
 });
 
-test('甩牌失败：只留最小的单位，闲家甩砸倒扣 10 分', () => {
+test('公开缺门只在玩家实际垫出别组牌时记下，并在新局清空', () => {
+  const { room, o } = started(5);
+  runDeclaring(room, o);
+  timeoutKou(room, o);
+  room.trump = { suit: 'S', level: 5, declarerId: null, strength: 0, cardIds: [] };
+  room.leaderSeat = 0;
+  room.turnSeat = 0;
+  room.trick = [];
+  room.players[0].hand = h('H7a H7b D3a');
+  room.players[1].hand = h('H2a D2a D4a');
+  room.players[2].hand = h('H8a H8b D6a');
+  room.players[3].hand = h('H9a H9b D7a');
+
+  applySjCommand(room, room.players[0].id, { type: 'play', cardIds: ['H7a', 'H7b'] }, o);
+  applySjCommand(room, room.players[1].id, { type: 'play', cardIds: ['H2a', 'D2a'] }, o);
+  assert.deepEqual(room.voidGroups[1], ['H'], '垫牌公开证明 1 号座已缺红桃');
+  assert.deepEqual(room.voidGroups[0], [], '首出或正常跟牌不能凭暗牌推断缺门');
+
+  dealSjHand(room, o);
+  assert.deepEqual(room.voidGroups, [[], [], [], []]);
+});
+
+test('甩牌失败：只强制出能被管上的最小单位，闲家甩砸倒扣 10 分', () => {
   const { room, o } = started(2);
   runDeclaring(room, o);
   timeoutKou(room, o);
@@ -269,7 +291,7 @@ test('甩牌失败：只留最小的单位，闲家甩砸倒扣 10 分', () => {
   room.players[3].hand = h('H9a HTa HJa');
 
   applySjCommand(room, room.players[1].id, { type: 'play', cardIds: ['HAa', 'HKa'] }, o);
-  assert.deepEqual(room.trick[0].cardIds, ['HKa'], '只能出最小的那个单位');
+  assert.deepEqual(room.trick[0].cardIds, ['HKa'], '只能出被管上的最小单位');
   assert.deepEqual(ids(room.players[1].hand).sort(), ['H2a', 'HAa'], '其余退回手里');
   assert.equal(room.defenderPoints, -10, '闲家甩砸，闲家 −10');
   assert.equal(room.lastThrowFail?.penalty, -10);
@@ -314,10 +336,10 @@ test('甩牌成功时整手都算数', () => {
 });
 
 /**
- * 甩牌失败的核心承诺：**最小的那个单位一定被打出去了**，不是"整把退回、什么都没出"。
+ * 甩牌失败的核心承诺：**被管上的牌型中，最小单位一定被打出去了**，不是"整把退回、什么都没出"。
  * 客户端只演了一段"退回手里"的动效，很容易让人以为这一手没出成 —— 用例把这条钉死。
  */
-test('甩牌失败：混合牌型也只留最小的那个单位（对子 < 拖拉机）', () => {
+test('甩牌失败：混合牌型中只有对子被管上，就强制出该对子', () => {
   const { room, o } = started(3);
   runDeclaring(room, o);
   timeoutKou(room, o);
@@ -336,14 +358,14 @@ test('甩牌失败：混合牌型也只留最小的那个单位（对子 < 拖�
 
   applySjCommand(room, room.players[1].id, { type: 'play', cardIds: ['H9a', 'H9b', 'HTa', 'HTb', 'HKa', 'HKb'] }, o);
 
-  assert.deepEqual(room.trick[0].cardIds, ['HKa', 'HKb'], '拖拉机 > 对子，最小的单位是那一对 K');
+  assert.deepEqual(room.trick[0].cardIds, ['HKa', 'HKb'], '只有这对 K 能被管上');
   assert.deepEqual(ids(room.players[1].hand).sort(), ['H9a', 'H9b', 'HTa', 'HTb'], '连对退回手里');
   assert.equal(room.players[1].hand.length + room.trick[0].cardIds.length, 6, '牌不会凭空少');
   assert.equal(room.defenderPoints, -10, '闲家甩砸，闲家 −10');
   assert.deepEqual(room.lastThrowFail?.forcedIds, ['HKa', 'HKb'], '事件要带上被强制打出的那一手');
 });
 
-test('甩牌失败：单张的优先级最低，对子压不住时也先被留下的是单张', () => {
+test('甩牌失败：只有对子被管上时强制出对子，不能错误地改出无关单张', () => {
   const { room, o } = started(3);
   runDeclaring(room, o);
   timeoutKou(room, o);
@@ -361,22 +383,22 @@ test('甩牌失败：单张的优先级最低，对子压不住时也先被留�
 
   applySjCommand(room, room.players[1].id, { type: 'play', cardIds: ['HKa', 'HKb', 'H2a'] }, o);
 
-  assert.deepEqual(room.trick[0].cardIds, ['H2a'], '对子 > 单张，最小的单位是那张 2');
-  assert.deepEqual(ids(room.players[1].hand).sort(), ['HKa', 'HKb'], '对子退回手里');
+  assert.deepEqual(room.trick[0].cardIds, ['HKa', 'HKb'], 'QQ 口径：被管上的是对子，就强制出对子');
+  assert.deepEqual(ids(room.players[1].hand), ['H2a'], '无关单张退回手里');
 
   // 事件层面也要说得清：客户端靠 forcedIds 算「哪几张飞回来了」并写进提示文案
   const evs = deriveSjEvents(
-    { ...room, trick: [], lastThrowFail: null, players: room.players.map((p) => ({ ...p, hand: [...p.hand, ...(p.seat === 1 ? h('H2a') : [])] })) } as never,
+    { ...room, trick: [], lastThrowFail: null, players: room.players.map((p) => ({ ...p, hand: [...p.hand, ...(p.seat === 1 ? h('HKa HKb') : [])] })) } as never,
     room,
     room.players[1].id,
     { type: 'play', cardIds: ['HKa', 'HKb', 'H2a'] },
   );
   const fail = evs.find((e) => e.k === 'sj_throw_fail');
   assert.ok(fail, '要发出 sj_throw_fail 事件');
-  assert.deepEqual(fail.forcedIds, ['H2a']);
+  assert.deepEqual(fail.forcedIds, ['HKa', 'HKb']);
 });
 
-test('抠底：闲家赢最后一圈，底牌分按 2^张数 翻倍', () => {
+test('抠底：闲家单张赢最后一圈，底牌分按 ×2 计入', () => {
   const { room, o } = started(4);
   runDeclaring(room, o);
   timeoutKou(room, o);

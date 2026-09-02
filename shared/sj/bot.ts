@@ -29,6 +29,13 @@ export interface SjSuggestView {
   mySeat: number;
   /** 第几圈。判断是否已进入后半程（该抢就抢）要用它 */
   trickNo: number;
+  /** 各座位已经在桌面上公开暴露的缺门；不是服务端暗牌信息 */
+  voidGroups?: readonly (readonly SjGroup[])[];
+}
+
+interface SjAwareness {
+  mySeat: number;
+  voidGroups?: readonly (readonly SjGroup[])[];
 }
 
 type Prefer = 'low' | 'high' | 'points';
@@ -43,6 +50,21 @@ const ALL_GROUPS: SjGroup[] = ['T', 'S', 'H', 'C', 'D'];
 function without(pool: SjCard[], used: SjCard[]): SjCard[] {
   const ids = new Set(used.map((c) => c.id));
   return pool.filter((c) => !ids.has(c.id));
+}
+
+const knownVoid = (awareness: SjAwareness | undefined, seat: number, group: SjGroup) =>
+  awareness?.voidGroups?.[seat]?.includes(group) ?? false;
+
+const otherSeats = (seat: number) => [1, 2, 3].map((d) => (seat + d) % 4);
+
+function opponentVoidCount(awareness: SjAwareness | undefined, group: SjGroup): number {
+  if (!awareness) return 0;
+  return otherSeats(awareness.mySeat)
+    .filter((seat) => seat % 2 !== awareness.mySeat % 2 && knownVoid(awareness, seat, group)).length;
+}
+
+function partnerIsVoid(awareness: SjAwareness | undefined, group: SjGroup): boolean {
+  return !!awareness && knownVoid(awareness, (awareness.mySeat + 2) % 4, group);
 }
 
 /* --------------------------------------------------------------- 亮主 */
@@ -190,8 +212,8 @@ export function composeFollow(hand: SjCard[], lead: SjShape, ctx: SjCtx, prefer:
 }
 
 /**
- * 缺门时用主牌**毙**：结构必须和首出完全一致才算数（DESIGN 1.7），
- * 配不出同样的结构就返回 null —— 那就只能垫牌。
+ * 缺门时用主牌**毙**：这里先组一手与首出完全同构的保守解；规则层还允许
+ * “对子/拖拉机比首出更多”的覆盖式毙牌，但不必为了毙牌主动多拆结构。
  */
 export function composeTrumpBeat(hand: SjCard[], lead: SjShape, ctx: SjCtx, prefer: Prefer): SjCard[] | null {
   if (lead.group === 'T') return null;
@@ -250,6 +272,39 @@ function leadCandidates(hand: SjCard[], ctx: SjCtx): { group: SjGroup; unit: SjU
 }
 
 /**
+ * 从每门牌的非重叠结构中组出“公开信息已经能证明甩得成”的候选。
+ *
+ * - 三家都已公开缺门：这门剩余牌不会再被同花色管上，可以整门甩；
+ * - 否则只合并逐个能由已出牌证明为最大的单位。
+ *
+ * 这里只判断甩牌能否成立，不把“成立”等同于“一定收圈”——已缺门的对手仍可能用主牌毙。
+ */
+function safeThrowCandidates(
+  hand: SjCard[], ctx: SjCtx, unseen: SjCard[], awareness?: SjAwareness,
+): { group: SjGroup; cards: SjCard[]; opponentVoids: number; partnerVoid: boolean }[] {
+  const out: { group: SjGroup; cards: SjCard[]; opponentVoids: number; partnerVoid: boolean }[] = [];
+  for (const group of ALL_GROUPS) {
+    const groupCards = cardsInGroup(hand, group, ctx);
+    const shape = parseShape(groupCards, ctx);
+    if (!shape?.isThrow) continue;
+    const everyoneElseVoid = !!awareness && otherSeats(awareness.mySeat).every((seat) => knownVoid(awareness, seat, group));
+    const units = everyoneElseVoid
+      ? shape.units
+      : shape.units.filter((unit) => isSureMax(unit, group, unseen, ctx));
+    if (units.length < 2) continue;
+    const cards = units.flatMap((unit) => unit.cards);
+    if (!parseShape(cards, ctx)?.isThrow) continue;
+    out.push({
+      group,
+      cards,
+      opponentVoids: opponentVoidCount(awareness, group),
+      partnerVoid: partnerIsVoid(awareness, group),
+    });
+  }
+  return out;
+}
+
+/**
  * 首出候选，**从好到差**排好序（DESIGN 1.10）。
  *
  * 机器人取第 0 个、「提示」按这个顺序循环 —— 两边共用同一份判断，
@@ -263,7 +318,9 @@ function leadCandidates(hand: SjCard[], ctx: SjCtx): { group: SjGroup; unit: SjU
  *
  * 注意 2 挡在 3 前面，所以"没绝张时不会建议先甩一条压不住的拖拉机"。
  */
-export function rankLeads(hand: SjCard[], ctx: SjCtx, playedIds: string[], rng?: SjRng): SjCard[][] {
+export function rankLeads(
+  hand: SjCard[], ctx: SjCtx, playedIds: string[], rng?: SjRng, awareness?: SjAwareness,
+): SjCard[][] {
   const unseen = unseenCards(hand, playedIds);
   const cands = leadCandidates(hand, ctx);
   if (!cands.length) return [];
@@ -272,32 +329,54 @@ export function rankLeads(hand: SjCard[], ctx: SjCtx, playedIds: string[], rng?:
 
   // 探路牌：最长的副牌花色（并列时用 rng 打散）里最小的一张；全是主牌就退回整手最小的
   const sideGroups = (SJ_SUITS as SjPlainSuit[])
-    .map((s) => ({ group: s as SjGroup, cards: cardsInGroup(hand, s, ctx) }))
+    .map((s) => ({
+      group: s as SjGroup,
+      cards: cardsInGroup(hand, s, ctx),
+      opponentVoids: opponentVoidCount(awareness, s),
+      partnerVoid: partnerIsVoid(awareness, s),
+    }))
     .filter((g) => g.cards.length > 0);
   let probePool = hand;
   if (sideGroups.length) {
-    const most = Math.max(...sideGroups.map((g) => g.cards.length));
-    const tied = sideGroups.filter((g) => g.cards.length === most);
+    // 长门优先；对家已缺门是配合机会；对手已缺门则很容易被毙，主动避开。
+    const score = (g: typeof sideGroups[number]) => g.cards.length * 4 + (g.partnerVoid ? 2 : 0) - g.opponentVoids * 6;
+    const most = Math.max(...sideGroups.map(score));
+    const tied = sideGroups.filter((g) => score(g) === most);
     probePool = tied[rng ? Math.min(tied.length - 1, Math.floor(rng() * tied.length)) : 0].cards;
   }
   const probeId = pickFillers(probePool, 1, ctx, 'low')[0]?.id ?? null;
 
-  return cands
-    .map((c) => {
+  const ranked = cands.map((c) => {
       const sure = isSureMax(c.unit, c.group, unseen, ctx);
-      const tier = sure ? 0
+      const opponentVoids = opponentVoidCount(awareness, c.group);
+      // 副牌即便是该门最大，对手已缺门时也可能被主牌毙，不再冒充“稳赢”。
+      const tier = sure && (c.group === 'T' || opponentVoids === 0) ? 0
         : drawTrump && c.group === 'T' && c.unit.kind !== 'tractor' ? 1
         : c.unit.kind === 'single' && c.unit.cards[0].id === probeId ? 2
         : 3;
       return {
         cards: c.unit.cards,
         tier,
+        team: (partnerIsVoid(awareness, c.group) ? -1 : 0) + opponentVoids * 2,
         prio: -unitPriority(c.unit),
         // 绝张同级取大（反正没人压得过，先把大的兑现），其余同级取小（别浪费）
         top: sure ? -c.unit.top : c.unit.top,
       };
-    })
-    .sort((a, b) => a.tier - b.tier || a.prio - b.prio || a.top - b.top)
+    });
+
+  for (const thrown of safeThrowCandidates(hand, ctx, unseen, awareness)) {
+    ranked.push({
+      cards: thrown.cards,
+      // 没有已知缺门对手时，能一次清掉的安全甩牌优先于拆开逐手走。
+      tier: thrown.opponentVoids ? 2 : 0,
+      team: (thrown.partnerVoid ? -1 : 0) + thrown.opponentVoids * 2,
+      prio: -100 - thrown.cards.length,
+      top: -maxOrder(thrown.cards, ctx),
+    });
+  }
+
+  return ranked
+    .sort((a, b) => a.tier - b.tier || a.team - b.team || a.prio - b.prio || a.top - b.top)
     .map((s) => s.cards);
 }
 
@@ -305,8 +384,10 @@ export function rankLeads(hand: SjCard[], ctx: SjCtx, playedIds: string[], rng?:
  * 首出（DESIGN 1.10）：先打自己手里的绝张；否则主牌够多时先"抽主"；
  * 再否则从最长的副牌花色出一张不带分的小牌。就是 `rankLeads` 的头一项。
  */
-export function botLead(hand: SjCard[], ctx: SjCtx, playedIds: string[], rng?: SjRng): SjCard[] {
-  return rankLeads(hand, ctx, playedIds, rng)[0] ?? [];
+export function botLead(
+  hand: SjCard[], ctx: SjCtx, playedIds: string[], rng?: SjRng, awareness?: SjAwareness,
+): SjCard[] {
+  return rankLeads(hand, ctx, playedIds, rng, awareness)[0] ?? [];
 }
 
 /* --------------------------------------------------------------- 跟牌 */
@@ -320,8 +401,9 @@ export function botLead(hand: SjCard[], ctx: SjCtx, playedIds: string[], rng?: S
  * 先看清这一圈的三件事：桌上有多少分、现在谁最大、那个人是不是我对家，
  * 再分档：
  *
- * - **对家已经赢定** → 垫分给他（分越多越靠前），其次垫最小的牌。
+ * - **自己是末家且对家已经赢定** → 垫分给他（分越多越靠前），其次垫最小的牌。
  *   盖过对家排到最后：那一分照样是自家的，但白白烧掉一张大牌，还把对家的位置抢了。
+ * - **对家只是暂时领先、后面还有对手** → 不送分，先保住分牌，避免被后手截走。
  * - **对手领先、且这一圈值得抢**（桌上有分，或已到后半程，后面的牌越来越硬）
  *   → **最小能赢的那一手**排第一，拿下就好，别把大牌浪费掉。
  * - **压不过 / 这一圈不值得抢** → 垫最没用的：先不带分（别给对手送分），再最小。
@@ -334,8 +416,7 @@ export function rankFollows(
   const pointsOnTable = played.reduce((s, p) => s + sumPoints(p.cards), 0);
   const leaderWins = trickWinner(played, ctx);
   const partnerWinning = (leaderWins.seat % 2) === (mySeat % 2);
-  // 值得抢：这一圈有分，或者已经打到后半程（后面的牌越来越硬，能拿就拿）
-  const worthWinning = pointsOnTable > 0 || trickNo >= 13;
+  const lastToAct = played.length === 3;
 
   const pool: SjCard[][] = [];
   const seen = new Set<string>();
@@ -361,6 +442,13 @@ export function rankFollows(
   else if (lead.count === 2 && lead.pairs === 1) {
     for (const u of allPairs(hand, lead.group, ctx)) push(u.cards);
     if (!inLead.length) for (const u of allPairs(hand, 'T', ctx)) push(u.cards);
+  } else if (lead.units.length === 1 && lead.units[0].kind === 'tractor') {
+    const span = lead.units[0].span;
+    if (inLead.length >= lead.count) {
+      for (const u of allTractors(hand, lead.group, ctx).filter((u) => u.span === span)) push(u.cards);
+    } else if (!inLead.length) {
+      for (const u of allTractors(hand, 'T', ctx).filter((u) => u.span === span)) push(u.cards);
+    }
   }
 
   const wins = (cards: SjCard[]) =>
@@ -370,10 +458,16 @@ export function rankFollows(
   const score = (cards: SjCard[]): [number, number, number] => {
     const w = wins(cards);
     const pts = sumPoints(cards);
-    if (partnerWinning) {
-      // 分越多越先垫给对家；盖过对家的排最后（分照样是自家的，但白烧一张大牌）
+    if (partnerWinning && lastToAct) {
+      // 我是末家时胜负已经锁定：分越多越先垫给对家；盖过对家的排最后。
       return w ? [2, handWeight(cards, ctx), 0] : [0, -pts, discardWeight(cards, ctx)];
     }
+    if (partnerWinning) {
+      // 后面还有人没出，不能把“对家暂时领先”误判成稳赢，更不能提前把分喂上桌。
+      return w ? [2, handWeight(cards, ctx), 0] : [1, discardWeight(cards, ctx), 0];
+    }
+    // 候选本身带分也会让这一圈变得值得抢；旧实现只看桌面已有分，会把自己的 K 垫给对手。
+    const worthWinning = pointsOnTable + pts > 0 || trickNo >= 13;
     if (worthWinning && w) return [0, handWeight(cards, ctx), discardWeight(cards, ctx)];
     return [1, discardWeight(cards, ctx), 0];
   };
@@ -416,7 +510,12 @@ function discardWeight(cards: SjCard[], ctx: SjCtx): number {
 /** 机器人（或超时代打）该出什么。返回一定通过 `validateFollow` 的牌 id */
 export function botPlay(state: SjRoomState, me: SjPlayer, rng?: SjRng): string[] {
   const ctx = ctxOf(state);
-  if (!state.trick.length) return botLead(me.hand, ctx, state.playedIds, rng).map((c) => c.id);
+  if (!state.trick.length) {
+    return botLead(me.hand, ctx, state.playedIds, rng, {
+      mySeat: me.seat,
+      voidGroups: state.voidGroups,
+    }).map((c) => c.id);
+  }
 
   const played = state.trick.map((p) => ({ seat: p.seat, cards: p.cardIds.map(cardFromId) }));
   const lead = parseShape(played[0].cards, ctx);
@@ -450,7 +549,7 @@ export function suggest(view: SjSuggestView, hand: SjCard[], limit = 5): SjCard[
   };
 
   if (!view.trick.length) {
-    for (const cards of rankLeads(hand, ctx, view.playedIds)) add(cards);
+    for (const cards of rankLeads(hand, ctx, view.playedIds, undefined, view)) add(cards);
     return out;
   }
 

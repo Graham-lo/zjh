@@ -147,6 +147,23 @@ test('首出：主牌够多时先抽主', () => {
   assert.equal(groupOf(lead[0], CTX_S5), 'T', '9 张主牌，先抽主');
 });
 
+test('首出：公开信息证明多张副牌都是最大时，会把安全甩牌作为整手候选', () => {
+  const view: SjSuggestView = {
+    trump: { suit: 'S', level: 5 }, trick: [], playedIds: ['HAb'], mySeat: 0, trickNo: 8,
+  };
+  const out = suggest(view, h('HAa HKa D2a'));
+  assert.deepEqual(ids(out[0]), ['HAa', 'HKa'], '两张都已是该门最大，应优先一次甩掉');
+});
+
+test('首出：三家都已公开缺门时，整门副牌会进入甩牌候选', () => {
+  const view: SjSuggestView = {
+    trump: { suit: 'S', level: 5 }, trick: [], playedIds: [], mySeat: 0, trickNo: 18,
+    voidGroups: [[], ['H'], ['H'], ['H']],
+  };
+  const out = suggest(view, h('H2a H7a HKa D2a'));
+  assert.ok(out.some((cards) => ids(cards).sort().join(' ') === 'H2a H7a HKa'));
+});
+
 /* ------------------------------------------------------------------- 提示 */
 
 test('提示：首出时给若干候选，绝张排在最前面', () => {
@@ -233,17 +250,24 @@ test('提示：能赢又值得抢时，第一条是"最小能赢"而不是最大
   assert.deepEqual(ids(late[0]), ['HQa'], '后半程该抢了，还是用最小能赢的');
 });
 
-test('提示：对家已经赢定时先垫分，绝不盖过对家', () => {
-  // 0 号是我（2 号）的对家，领出 ♥A 稳赢 —— 该把分喂给他
-  const give = suggest(follow([{ seat: 0, cardIds: ['HAa'] }, { seat: 1, cardIds: ['H3a'] }], 2),
+test('提示：只有末家才把“对家领先”当成赢定，之前不会冒险送分', () => {
+  // 0 号是我（2 号）的对家，但 3 号对手还没出；此时先保住 K，不能提前把分喂上桌。
+  const risky = suggest(follow([{ seat: 0, cardIds: ['HAa'] }, { seat: 1, cardIds: ['H3a'] }], 2),
     h('H4a H7a HKa'));
+  assert.deepEqual(ids(risky[0]), ['H4a'], '后面还有对手时不提前送 K');
+
+  // 我坐 0 号末家，2 号对家已经用 A 锁定这一圈，才把 K 垫给他。
+  const give = suggest(follow([
+    { seat: 1, cardIds: ['H3a'] }, { seat: 2, cardIds: ['HAa'] }, { seat: 3, cardIds: ['H4a'] },
+  ], 0), h('H6a H7a HKa'));
   assert.deepEqual(ids(give[0]), ['HKa'], '♥K 带 10 分，垫给对家');
 
-  // 对家领的是 ♥10，我的 ♥K 能盖过他 —— 盖了分照样是自家的，但白烧一张大牌，
+  // 末家时对家当前是 ♥10，我的 ♥K 能盖过他 —— 盖了分照样是自家的，但白烧一张大牌，
   // 所以第一条必须是"不盖过对家"的那手，♥K 排到最后
-  const dont = suggest(follow([{ seat: 0, cardIds: ['HTa'] }, { seat: 1, cardIds: ['H3a'] }], 2),
-    h('H4a HKa'));
-  assert.deepEqual(ids(dont[0]), ['H4a'], '不盖对家');
+  const dont = suggest(follow([
+    { seat: 1, cardIds: ['H3a'] }, { seat: 2, cardIds: ['HTa'] }, { seat: 3, cardIds: ['H4a'] },
+  ], 0), h('H6a HKa'));
+  assert.deepEqual(ids(dont[0]), ['H6a'], '不盖对家');
   assert.deepEqual(ids(dont[dont.length - 1]), ['HKa']);
 });
 
@@ -267,6 +291,13 @@ test('提示：对子也按同一把尺子排 —— 最小能赢的那一对在
   const lose = suggest(follow([{ seat: 0, cardIds: ['HKa', 'HKb'] }], 1),
     h('H3a H3b H7a H7b HQa HQb'));
   assert.deepEqual(ids(lose[0]).sort(), ['H3a', 'H3b'], '压不过就垫最小的一对');
+});
+
+test('提示：拖拉机枚举全部同长度候选，选择最小能赢的一条', () => {
+  const leadIds = ['H7a', 'H7b', 'H8a', 'H8b'];
+  const out = suggest(follow([{ seat: 0, cardIds: leadIds }], 1),
+    h('H9a H9b HTa HTb HJa HJb HQa HQb'));
+  assert.deepEqual(ids(out[0]).sort(), ['H9a', 'H9b', 'HTa', 'HTb']);
 });
 
 test('机器人和提示是同一个脑子：botFollow 就是提示的第一条', () => {

@@ -5,12 +5,12 @@
  * 跟牌合法性（甩牌除外，那要别人的手牌，由服务端裁决），所以这里不重写任何规则。
  */
 import {
-  SUIT_NAME, SUIT_SYMBOL, cardFromId, cardsLabel, levelLabel,
+  SUIT_NAME, SUIT_SYMBOL, cardFromId, cardsLabel, groupOf, levelLabel,
   type SjCard, type SjCtx, type SjPlainSuit, type SjTrumpSuit,
 } from '../../shared/sj/cards.ts';
 import type { SjPublicPlayer, SjPublicRoom, SjTrumpState } from '../../shared/sj/engine.ts';
-import { parseShape, type SjShape } from '../../shared/sj/units.ts';
-import { shapeLabel, unitLabel, validateFollow, validateLead } from '../../shared/sj/rules.ts';
+import { allPairs, allTractors, cardsInGroup, parseShape, type SjShape } from '../../shared/sj/units.ts';
+import { followRequirement, shapeLabel, unitLabel, validateFollow, validateLead } from '../../shared/sj/rules.ts';
 import type { VoiceKey } from '../sound.ts';
 
 /** 桌面顶灯的光池色随主花色变 —— 整桌最强的记忆点（DESIGN 3.2） */
@@ -154,6 +154,48 @@ export function checkPlay(hand: SjCard[], selected: SjCard[], lead: SjShape | nu
   const check = validateFollow(hand, lead, selected, ctx);
   if (!check.ok) return { ok: false, label: `出牌 · ${selected.length} 张`, reason: check.reason, shape };
   return { ok: true, label: shape ? labelOf(shape) : `跟牌 · ${selected.length} 张`, reason: '', shape };
+}
+
+/* ------------------------------------------------------------ 智能点选 */
+
+/**
+ * 单击一张牌时应该预选的完整单位/出法。
+ *
+ * 首出按“最长连对 > 对子 > 单张”扩展；跟牌先采用收益排序里包含该牌的合法整手，
+ * 再按必须跟的拖拉机/对子结构补一个本地兜底。这里只改变选中态，绝不替玩家提交出牌。
+ */
+export function smartPickForCard(
+  hand: SjCard[], clicked: SjCard, lead: SjShape | null, ctx: SjCtx,
+  ranked: readonly SjCard[][] = [],
+): string[] {
+  if (lead) {
+    const rankedHit = ranked.find((cards) => cards.some((c) => c.id === clicked.id));
+    if (rankedHit) return rankedHit.map((c) => c.id);
+
+    const groupCards = cardsInGroup(hand, lead.group, ctx);
+    if (groupCards.length >= lead.count && groupCards.some((c) => c.id === clicked.id)) {
+      const req = followRequirement(groupCards, lead, ctx);
+      for (const span of req.tractors.slice().sort((a, b) => b - a)) {
+        const tractor = allTractors(hand, lead.group, ctx)
+          .filter((u) => u.span === span && u.cards.some((c) => c.id === clicked.id))
+          .sort((a, b) => b.span - a.span || a.top - b.top)[0];
+        if (tractor) return tractor.cards.map((c) => c.id);
+      }
+      if (req.pairs > 0) {
+        const pair = allPairs(hand, lead.group, ctx).find((u) => u.cards.some((c) => c.id === clicked.id));
+        if (pair) return pair.cards.map((c) => c.id);
+      }
+    }
+    return [clicked.id];
+  }
+
+  const group = groupOf(clicked, ctx);
+  const tractor = allTractors(hand, group, ctx)
+    .filter((u) => u.cards.some((c) => c.id === clicked.id))
+    .sort((a, b) => b.span - a.span || a.top - b.top)[0];
+  if (tractor) return tractor.cards.map((c) => c.id);
+  const pair = allPairs(hand, group, ctx).find((u) => u.cards.some((c) => c.id === clicked.id));
+  return pair ? pair.cards.map((c) => c.id) : [clicked.id];
 }
 
 /* ------------------------------------------------------------ 甩牌失败文案 */

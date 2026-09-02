@@ -16,11 +16,11 @@ import { SJ_VARIANTS, type SjKind, ladderOf } from '../games.ts';
 import {
   cardFromId, cardsLabel, createSjDeck, groupOf, levelLabel, pointCards, shuffleSj, sortSjHand,
   sumPoints, trumpLabel,
-  type SjCard, type SjCtx, type SjRng, type SjTrumpSuit,
+  type SjCard, type SjCtx, type SjGroup, type SjRng, type SjTrumpSuit,
 } from './cards.ts';
-import { parseShape, type SjShape } from './units.ts';
+import { cardsInGroup, parseShape, type SjShape } from './units.ts';
 import {
-  digMultiplier, isMatchWon, isTrumping, levelUp, nextDealerSeat, outcomeFor, shapeLabel,
+  digMultiplierForLead, isMatchWon, isTrumping, levelUp, nextDealerSeat, outcomeFor, shapeLabel,
   trickPoints, trickWinner, validateFollow, validateLead, validateThrow,
   type SjOutcome,
 } from './rules.ts';
@@ -142,6 +142,11 @@ export interface SjRoomState {
   capturedPointCards: SjCard[];
   /** 本局已经打出的所有牌 id，按顺序。公开信息，机器人和「记牌」都靠它 */
   playedIds: string[];
+  /**
+   * 公开确认的缺门，按座位保存。只有某人跟牌时实际打出了别组牌才记入，
+   * 不会根据服务端暗牌偷推；客户端、真人和电脑看到的是同一份记牌信息。
+   */
+  voidGroups: SjGroup[][];
   /** 最近一次甩牌失败，客户端拿它播红戳记；下一次出牌清空 */
   lastThrowFail: SjThrowFailRecord | null;
   result?: SjHandResult;
@@ -322,6 +327,7 @@ export function createSjRoom(kind: SjKind, code: string, host: SjPlayer): SjRoom
     penaltyPoints: 0,
     capturedPointCards: [],
     playedIds: [],
+    voidGroups: Array.from({ length: SJ_SEATS }, () => []),
     lastThrowFail: null,
   };
 }
@@ -359,6 +365,7 @@ export function dealSjHand(state: SjRoomState, opts?: SjEngineOpts) {
   state.penaltyPoints = 0;
   state.capturedPointCards = [];
   state.playedIds = [];
+  state.voidGroups = Array.from({ length: SJ_SEATS }, () => []);
   state.lastThrowFail = null;
   state.result = undefined;
 
@@ -565,6 +572,11 @@ function doPlay(state: SjRoomState, actor: SjPlayer, cardIds: string[], opts?: S
   } else {
     const check = validateFollow(actor.hand, lead, cards, ctx);
     if (!check.ok) throw new GameError(check.reason);
+    // 只有实际垫了别组牌，桌上所有人才确定他已把首出花色跟光；这是公开记牌，不是读暗牌。
+    if (cardsInGroup(cards, lead.group, ctx).length < lead.count) {
+      const voids = state.voidGroups[actor.seat] ?? (state.voidGroups[actor.seat] = []);
+      if (!voids.includes(lead.group)) voids.push(lead.group);
+    }
   }
 
   removeFromHand(actor, played);
@@ -644,9 +656,9 @@ export function finishHand(state: SjRoomState, opts?: SjEngineOpts) {
   let dig: SjHandResult['dig'];
   const last = state.lastTrick;
   if (last && teamOf(last.winnerSeat) !== dTeam) {
-    // 最后一圈由闲家赢 → 抠底：底牌分 × 2^(那手牌的张数)，上限 ×64
-    const count = last.plays.find((p) => p.seat === last.winnerSeat)?.cardIds.length ?? 1;
-    const multiplier = digMultiplier(count);
+    // QQ 口径按末圈首出的牌型定番：散牌甩仍单抠，含对双抠，拖拉机按其张数翻番。
+    const leadCards = last.plays[0]?.cardIds.map(cardFromId) ?? [];
+    const multiplier = digMultiplierForLead(leadCards, sjCtx(state));
     const total = bottomPoints * multiplier;
     dig = { base: bottomPoints, multiplier, total };
     state.defenderPoints += total;
@@ -960,6 +972,12 @@ export function migrateSjRoom(state: SjRoomState): SjRoomState {
   state.penaltyPoints ??= 0;
   state.capturedPointCards ??= [];
   state.playedIds ??= [];
+  if (!Array.isArray(state.voidGroups)) {
+    state.voidGroups = Array.from({ length: SJ_SEATS }, () => []);
+  } else {
+    state.voidGroups = Array.from({ length: SJ_SEATS }, (_, seat) =>
+      Array.isArray(state.voidGroups[seat]) ? [...new Set(state.voidGroups[seat])] : []);
+  }
   state.lastThrowFail ??= null;
   for (const p of state.players ?? []) {
     p.avatar ||= AVATARS[0];

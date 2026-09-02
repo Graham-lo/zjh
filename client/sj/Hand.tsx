@@ -33,7 +33,7 @@ export function Hand({
   hinted,
   onToggle,
   onSelectMany,
-  pairPick,
+  pickForCard,
   rows = 1,
   disabled,
   lifted,
@@ -46,11 +46,8 @@ export function Hand({
   /** 整组切换：组里还有没选中的就补齐，全选中了才整组取消 */
   onToggle(ids: string[]): void;
   onSelectMany(ids: string[]): void;
-  /**
-   * 首出是对子/连对时置 true：单击一张牌自动带上它的对子。
-   * 首出单张时保持单击选单张，否则想垫两张单牌反而要先取消一张。
-   */
-  pairPick?: boolean;
+  /** 单击一张牌时，由牌桌规则层决定要不要扩成对子、连对或一手完整跟牌 */
+  pickForCard?(card: SjCard): string[];
   rows?: 1 | 2;
   disabled?: boolean;
   /** 轮到我时整手牌轻微上浮 6px */
@@ -156,8 +153,8 @@ export function Hand({
                   if (dragging.current && !selected.has(c.id)) onSelectMany([c.id]);
                 }}
                 onClick={() => {
-                  const twin = pairPick ? twinOf(c) : undefined;
-                  onToggle(twin ? [c.id, twin.id] : [c.id]);
+                  const ids = pickForCard?.(c) ?? [c.id];
+                  onToggle(ids.length ? ids : [c.id]);
                 }}
                 onDoubleClick={() => {
                   // 双击自动带上它的对子（首出是单张时，这是唯一的成对选法）

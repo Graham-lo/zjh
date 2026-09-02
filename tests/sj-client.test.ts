@@ -6,9 +6,10 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPlay, throwFailText } from '../client/sj/util.ts';
+import { checkPlay, smartPickForCard, throwFailText } from '../client/sj/util.ts';
 import { suggest, type SjSuggestView } from '../shared/sj/bot.ts';
 import { parseShape } from '../shared/sj/units.ts';
+import { validateFollow } from '../shared/sj/rules.ts';
 import { CTX_S5, h } from './sj-helpers.ts';
 
 /* --------------------------------------------------------- 出牌按钮 */
@@ -68,4 +69,27 @@ test('跟牌只剩一种打法时，建议列表只有一项 —— 这一手可
 test('还有得选的时候建议不止一项 —— 不会替玩家做决定', () => {
   const many = suggest(view(['H3a']), h('HAa H2a SKa'));
   assert.ok(many.length > 1, '出大出小是两种打法，得让玩家自己挑');
+});
+
+/* --------------------------------------------------------- 单击智能联选 */
+
+test('首出单击对子中的任一张，直接预选整对', () => {
+  const hand = h('H7a H7b HKa D2a');
+  assert.deepEqual(smartPickForCard(hand, hand[0], null, CTX_S5).sort(), ['H7a', 'H7b']);
+});
+
+test('首出单击连对中的任一张，优先预选最长完整拖拉机', () => {
+  const hand = h('H7a H7b H8a H8b H9a H9b HKa');
+  assert.deepEqual(
+    smartPickForCard(hand, hand.find((c) => c.id === 'H8a')!, null, CTX_S5).sort(),
+    ['H7a', 'H7b', 'H8a', 'H8b', 'H9a', 'H9b'],
+  );
+});
+
+test('跟拖拉机时单击其中一张，预选一手完整合法连对', () => {
+  const hand = h('H6a H6b H7a H7b H8a H8b HKa');
+  const lead = parseShape(h('H9a H9b HTa HTb'), CTX_S5)!;
+  const picked = smartPickForCard(hand, hand.find((c) => c.id === 'H7a')!, lead, CTX_S5);
+  assert.equal(picked.length, 4);
+  assert.ok(validateFollow(hand, lead, h(picked.join(' ')), CTX_S5).ok);
 });
