@@ -102,6 +102,8 @@ export interface RoundResult {
 }
 
 export interface RoomState {
+  /** 房间类型。多游戏框架靠它派发引擎（DESIGN 2.1）；炸金花永远是 'zjh' */
+  kind: 'zjh';
   id: string;
   code: string;
   hostId: string;
@@ -351,6 +353,7 @@ export function createHumanPlayer(
 
 export function createInitialRoom(code: string, host: PlayerState): RoomState {
   return {
+    kind: 'zjh',
     id: randomId('room'),
     code,
     hostId: host.id,
@@ -383,6 +386,8 @@ export function createInitialRoom(code: string, host: PlayerState): RoomState {
  * 每次从快照恢复都过一遍这里，以后再加设置项也不会重演。
  */
 export function migrateRoom(state: RoomState): RoomState {
+  // 老快照是多游戏框架之前存的，没有 kind —— 那时候只有炸金花一种房间（DESIGN 2.6）
+  state.kind ??= 'zjh';
   state.settings = { ...DEFAULT_SETTINGS, ...(state.settings ?? {}) };
   state.log ??= [];
   state.chat ??= [];
