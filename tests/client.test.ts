@@ -43,7 +43,7 @@ test('合法动作与代价和服务端算的一致', () => {
   const acts = legalActions(view);
 
   const call = acts.find((a) => a.action === 'call');
-  assert.equal(call?.cost, 100, '没看牌时跟注就是一个底注');
+  assert.equal(call?.cost, room.settings.betOptions[0], '没看牌时跟注就是一个底注');
   // 第一轮且人人有钱，梭哈不该开放
   assert.equal(acts.some((a) => a.action === 'all_in'), false);
   // 看牌和弃牌任何时候都在
@@ -52,7 +52,7 @@ test('合法动作与代价和服务端算的一致', () => {
 
   applyCommand(room, actor.id, { type: 'look' });
   const after = legalActions(sanitizeRoom(room, actor.id));
-  assert.equal(after.find((a) => a.action === 'call')?.cost, 200, '看牌后翻倍');
+  assert.equal(after.find((a) => a.action === 'call')?.cost, room.settings.betOptions[0] * 2, '看牌后翻倍');
   assert.equal(after.some((a) => a.action === 'look'), false, '看过就不该再给看牌');
 });
 

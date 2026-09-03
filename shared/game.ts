@@ -55,6 +55,8 @@ export interface PlayerState {
   bared: boolean;
   hand: Card[];
   isBot: boolean;
+  /** 机器人的基础风格；临场战术会切换，但不会把当前是诈唬还是价值下注暴露出来。 */
+  botStyle?: string;
   /** 跨房间跨会话的账户 id。换个房间还是同一个人，积分接着上次 */
   accountId?: string;
   /** 这一桌坐下以来的净变化，输赢一目了然 */
@@ -119,6 +121,8 @@ export interface RoomState {
   createdAt: number;
   /** 全服筹码基线的一次性迁移版本，防止每次重启重复补发。 */
   chipGrantVersion: number;
+  /** 底注/加注档位的一次性迁移版本。 */
+  economyVersion: number;
   /**
    * 定向可见：seen[观看者id] = 他有权看到底牌的玩家 id 列表。
    * 比牌是两个人之间的事 —— 双方互相看到对方的牌，没参与的人什么都看不到，
@@ -154,9 +158,9 @@ export interface PendingAllIn {
 export const DEFAULT_SETTINGS: GameSettings = {
   maxPlayers: 6,
   startingChips: 500_000,
-  ante: 100,
+  ante: 1_000,
   // 第一个是开局的底注档，其余是可选的加注档
-  betOptions: [100, 1000, 3000, 5000],
+  betOptions: [1_000, 20_000, 50_000, 100_000],
   special235: true,
   maxRounds: 8,
   escalateFrom: 3,
@@ -167,6 +171,7 @@ export const DEFAULT_SETTINGS: GameSettings = {
 
 /** 版本每提升一次，旧房间/旧账户会在保持净战绩不变的前提下补到当前筹码基线。 */
 export const CHIP_GRANT_VERSION = 1;
+export const ZJH_ECONOMY_VERSION = 1;
 
 export const AVATARS = ['🐯', '🦊', '🐼', '🐵', '🐸', '🦁', '🐺', '🐷', '🐨', '🦉', '🐲', '🦄'];
 export const EMOTES = ['👍', '😂', '😱', '🤔', '🔥', '💰', '🙏', '😭'];
@@ -473,6 +478,7 @@ export function createInitialRoom(code: string, host: PlayerState): RoomState {
     log: [],
     createdAt: Date.now(),
     chipGrantVersion: CHIP_GRANT_VERSION,
+    economyVersion: ZJH_ECONOMY_VERSION,
   };
 }
 
@@ -488,8 +494,13 @@ export function migrateRoom(state: RoomState): RoomState {
   // 老快照是多游戏框架之前存的，没有 kind —— 那时候只有炸金花一种房间（DESIGN 2.6）
   state.kind ??= 'zjh';
   state.settings = { ...DEFAULT_SETTINGS, ...(state.settings ?? {}) };
-  // 初始/重置筹码是全服经济规则，不是房主可调整的房规；旧房间恢复后也必须升级到当前额度。
+  // 初始/重置筹码与下注档位是全服经济规则，不是房主可调整的房规；旧房间恢复后也必须升级。
   state.settings.startingChips = DEFAULT_SETTINGS.startingChips;
+  state.settings.ante = DEFAULT_SETTINGS.ante;
+  state.settings.betOptions = [...DEFAULT_SETTINGS.betOptions];
+  state.economyVersion = ZJH_ECONOMY_VERSION;
+  // 进行中的旧牌局不在半路改变当前单价；大厅和结算阶段直接显示新底注，下一局自然按新档位开。
+  if (state.phase !== 'playing') state.betUnit = DEFAULT_SETTINGS.betOptions[0];
   state.log ??= [];
   state.roundNo ??= 0;
   state.seen ??= {};
@@ -505,6 +516,7 @@ export function migrateRoom(state: RoomState): RoomState {
     p.granted ??= 0;
     p.bared ??= false;
     p.online ??= false;
+    if (p.isBot) p.botStyle ??= botStyleLabel(p);
   }
   if ((state.chipGrantVersion ?? 0) < CHIP_GRANT_VERSION) {
     for (const p of state.players ?? []) {
@@ -1126,12 +1138,17 @@ export function applyCommand(state: RoomState, actorId: string, command: GameCom
       const used = new Set(state.players.map((p) => p.seat));
       let seat = 0;
       while (used.has(seat)) seat++;
-      const idx = BOT_NAMES.findIndex((n) => !state.players.some((p) => p.name === n));
-      const name = idx >= 0 ? BOT_NAMES[idx] : `电脑${seat + 1}`;
+      // 每桌从六种人格里随机抽不重复的角色；最多五个机器人，所以狡诈型等风格不会总被固定顺序挤掉。
+      const available = BOT_NAMES
+        .map((name, index) => ({ name, index }))
+        .filter(({ name }) => !state.players.some((p) => p.name === name));
+      const chosen = available.length ? available[randomIndex(available.length)] : null;
+      const name = chosen?.name ?? `电脑${seat + 1}`;
+      const id = randomId('bot');
       state.players.push({
-        id: randomId('bot'), name, avatar: BOT_AVATARS[idx >= 0 ? idx : 0], seat,
+        id, name, avatar: BOT_AVATARS[chosen?.index ?? 0], seat,
         chips: state.settings.startingChips, ready: true, status: 'waiting', looked: false, bared: false,
-        hand: [], isBot: true, online: true, bet: 0, wins: 0, net: 0, granted: 0,
+        hand: [], isBot: true, botStyle: botStyleLabel({ id, name }), online: true, bet: 0, wins: 0, net: 0, granted: 0,
       });
       pushLog(state, `${name}（电脑）加入房间`);
       return;
@@ -1233,13 +1250,237 @@ export function timeoutCurrentPlayer(state: RoomState): boolean {
 
 /* ------------------------------------------------------------- 机器人 AI */
 
+export interface BotPersonality {
+  /** 主动加注、比牌和价值梭哈的倾向 */
+  aggression: number;
+  /** 在边缘赔率下继续游戏的宽松程度 */
+  looseness: number;
+  /** 合适局面下诈唬的频率 */
+  bluffRate: number;
+  /** 愿意为了获取信息而看牌、避开高波动的程度 */
+  patience: number;
+  /** 愿意用有效筹码承受波动的程度 */
+  riskTolerance: number;
+  /** 强牌慢打、弱牌代表强牌的混合程度 */
+  deception: number;
+  /** 根据桌况偏离基础性格的幅度 */
+  adaptability: number;
+}
+
+const BOT_STYLE_LABELS: Record<string, string> = {
+  阿凯: '激进',
+  老陈: '稳健',
+  小北: '松凶',
+  阿杰: '紧凶',
+  小林: '理性',
+  老王: '狡诈',
+};
+
+const BOT_PERSONALITIES: Record<string, BotPersonality> = {
+  阿凯: { aggression: 0.78, looseness: 0.58, bluffRate: 0.10, patience: 0.38, riskTolerance: 0.72, deception: 0.42, adaptability: 0.66 },
+  老陈: { aggression: 0.36, looseness: 0.34, bluffRate: 0.03, patience: 0.86, riskTolerance: 0.32, deception: 0.35, adaptability: 0.48 },
+  小北: { aggression: 0.58, looseness: 0.72, bluffRate: 0.09, patience: 0.50, riskTolerance: 0.58, deception: 0.55, adaptability: 0.72 },
+  阿杰: { aggression: 0.72, looseness: 0.46, bluffRate: 0.07, patience: 0.44, riskTolerance: 0.75, deception: 0.46, adaptability: 0.62 },
+  小林: { aggression: 0.48, looseness: 0.40, bluffRate: 0.04, patience: 0.78, riskTolerance: 0.44, deception: 0.38, adaptability: 0.82 },
+  老王: { aggression: 0.64, looseness: 0.56, bluffRate: 0.16, patience: 0.58, riskTolerance: 0.64, deception: 0.88, adaptability: 0.86 },
+};
+
+export function botStyleLabel(bot: Pick<PlayerState, 'id' | 'name'>): string {
+  return BOT_STYLE_LABELS[bot.name] ?? '多变';
+}
+
+/**
+ * 性格跟着机器人身份走，不会每一步随机换人格。预置机器人各有明显风格，
+ * 额外创建的机器人则从 id 稳定派生一套均衡参数。
+ */
+export function botPersonality(bot: Pick<PlayerState, 'id' | 'name'>): BotPersonality {
+  const preset = BOT_PERSONALITIES[bot.name];
+  if (preset) return { ...preset };
+  const trait = (name: string) => pseudoRandom(`${bot.id}:personality:${name}`);
+  return {
+    aggression: 0.35 + trait('aggression') * 0.45,
+    looseness: 0.30 + trait('looseness') * 0.45,
+    bluffRate: 0.03 + trait('bluff') * 0.13,
+    patience: 0.35 + trait('patience') * 0.50,
+    riskTolerance: 0.30 + trait('risk') * 0.48,
+    deception: 0.30 + trait('deception') * 0.58,
+    adaptability: 0.40 + trait('adaptability') * 0.48,
+  };
+}
+
+interface BotOpponentView {
+  id: string;
+  seat: number;
+  chips: number;
+  looked: boolean;
+  bet: number;
+  wins: number;
+  lastAction?: string;
+}
+
+const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+
+/** 这里只提取公开字段，刻意没有 hand；后面的决策代码拿不到对手暗牌。 */
+function botOpponentViews(state: RoomState, bot: PlayerState): BotOpponentView[] {
+  return state.players
+    .filter((p) => p.id !== bot.id && p.status === 'active')
+    .map((p) => ({
+      id: p.id,
+      seat: p.seat,
+      chips: p.chips,
+      looked: p.looked,
+      bet: p.bet,
+      wins: p.wins,
+      lastAction: p.lastAction,
+    }));
+}
+
+/** 从公开动作估计对手施加的压力，不推断、更不读取他的牌。 */
+function opponentActionHeat(action?: string): number {
+  if (!action) return 0.08;
+  if (action.includes('梭哈')) return 0.95;
+  if (action.includes('加到')) return 0.70;
+  if (action.includes('比牌胜')) return 0.62;
+  if (action.startsWith('跟')) return 0.30;
+  if (action === '看牌') return 0.18;
+  return 0.10;
+}
+
+function tablePressure(state: RoomState, opponents: BotOpponentView[]): number {
+  if (!opponents.length) return 0;
+  const actionPressure = opponents.reduce((sum, p) => sum + opponentActionHeat(p.lastAction), 0) / opponents.length;
+  const commitment = opponents.reduce(
+    (sum, p) => sum + Math.min(1, p.bet / Math.max(state.settings.ante, state.pot)),
+    0,
+  ) / opponents.length;
+  const looked = opponents.filter((p) => p.looked).length / opponents.length;
+  return clamp01(actionPressure * 0.58 + commitment * 0.27 + looked * 0.15);
+}
+
+/** 每个公开局面上的随机量是确定的：可复测，也不会因为改了对手暗牌而改变。 */
+function botRoll(state: RoomState, bot: PlayerState, purpose: string): number {
+  return pseudoRandom(`${bot.id}:${state.handNo}:${state.roundNo}:${state.turnCount}:${state.actionSeq}:${purpose}`);
+}
+
+/**
+ * 基础性格只是长期倾向，临场会切换档位：高压/短码收紧，后位单挑或大筹码领先时施压，
+ * 后段则减少试探。adaptability 决定偏离基础人格能有多远。
+ */
+function adaptPersonality(
+  base: BotPersonality,
+  state: RoomState,
+  bot: PlayerState,
+  opponents: BotOpponentView[],
+  pressure: number,
+  position: number,
+  costFraction: number,
+): BotPersonality {
+  const p = { ...base };
+  const shift = base.adaptability;
+  const averageOpponentStack = opponents.length
+    ? opponents.reduce((sum, opponent) => sum + opponent.chips, 0) / opponents.length
+    : bot.chips;
+
+  if (pressure >= 0.58 || costFraction >= 0.12) {
+    // 防守档：对手持续施压或一口价已伤到身家时，连激进型也会收紧范围。
+    p.aggression -= 0.18 * shift;
+    p.looseness -= 0.22 * shift;
+    p.bluffRate *= 1 - 0.72 * shift;
+    p.riskTolerance -= 0.16 * shift;
+    p.patience += 0.12 * shift;
+  } else if (opponents.length <= 2 && position >= 0.5 && pressure < 0.34) {
+    // 偷池档：人少、后位、没人表现强势时，稳健型也会扩大施压与诈唬频率。
+    p.aggression += 0.16 * shift;
+    p.looseness += 0.10 * shift;
+    p.bluffRate *= 1 + 0.85 * shift;
+    p.riskTolerance += 0.08 * shift;
+  }
+
+  if (bot.chips >= averageOpponentStack * 1.35 && state.pot <= bot.chips * 0.45) {
+    // 大筹码档：利用覆盖优势，但仍受底池赔率约束，不做无脑碾压。
+    p.aggression += 0.12 * shift;
+    p.bluffRate *= 1 + 0.35 * shift;
+    p.riskTolerance += 0.06 * shift;
+  }
+
+  if (state.roundNo >= 4) {
+    // 收口档：后段减少试探和慢吞吞的边缘跟注，更明确地做价值或退出。
+    p.aggression += 0.08 * shift;
+    p.looseness -= 0.08 * shift;
+    p.patience -= 0.10 * shift;
+  }
+
+  return {
+    ...p,
+    aggression: clamp01(p.aggression),
+    looseness: clamp01(p.looseness),
+    bluffRate: clamp01(p.bluffRate),
+    patience: clamp01(p.patience),
+    riskTolerance: clamp01(p.riskTolerance),
+  };
+}
+
+function winEquity(singleOpponentPercentile: number, opponentCount: number): number {
+  return Math.pow(clamp01(singleOpponentPercentile), Math.max(1, opponentCount));
+}
+
+/** 比牌只按公开投入、动作强度和座次挑目标，不使用目标的 hand。 */
+function compareTarget(
+  state: RoomState,
+  bot: PlayerState,
+  opponents: BotOpponentView[],
+): BotOpponentView | undefined {
+  const M = state.settings.maxPlayers;
+  return [...opponents].sort((a, b) => {
+    const score = (p: BotOpponentView) =>
+      opponentActionHeat(p.lastAction) * 2
+      + p.bet / Math.max(1, state.pot)
+      + (p.looked ? 0.18 : 0)
+      + Math.min(0.12, p.wins * 0.005);
+    const byThreat = score(b) - score(a);
+    if (Math.abs(byThreat) > 1e-9) return byThreat;
+    return ((a.seat - bot.seat + M) % M) - ((b.seat - bot.seat + M) % M);
+  })[0];
+}
+
 /**
  * 给一个机器人算出下一步。纯函数，不改状态 —— 服务器拿到结果后带延迟执行，
  * 这样电脑玩家看起来像在思考，而不是在人类点完的瞬间全部行动完毕。
+ *
+ * 信息边界在进入决策层前就强制执行：对手 hand 永远清空，机器人没看牌时自己的
+ * hand 也清空。以后即使有人误写了读取暗牌的策略，拿到的也只会是空数组。
  */
 export function botDecision(state: RoomState, bot: PlayerState): GameCommand {
-  const active = activePlayers(state);
-  const opponents = Math.max(1, active.length - 1);
+  const players = state.players.map((p) => ({
+    ...p,
+    hand: p.id === bot.id && bot.looked ? p.hand : [],
+  }));
+  const visibleState: RoomState = {
+    ...state,
+    players,
+    // 机器人只会在 playing 阶段行动；显式清掉可能含历史摊牌的结果与定向可见表。
+    result: undefined,
+    seen: {},
+  };
+  const visibleBot = players.find((p) => p.id === bot.id);
+  if (!visibleBot) throw new GameError('机器人不在当前房间');
+  return decideBot(visibleState, visibleBot);
+}
+
+function decideBot(state: RoomState, bot: PlayerState): GameCommand {
+  const opponents = botOpponentViews(state, bot);
+  const opponentCount = Math.max(1, opponents.length);
+  const basePersonality = botPersonality(bot);
+  const pressure = tablePressure(state, opponents);
+  const cost = callCost(state, bot);
+  const costFraction = cost / Math.max(1, bot.chips);
+  const effectiveStack = Math.max(1, Math.min(bot.chips, ...opponents.map((p) => p.chips)));
+  const stackToPot = effectiveStack / Math.max(1, state.pot);
+  const activeCount = opponents.length + 1;
+  const position = activeCount <= 2 ? 1 : (state.turnCount % activeCount) / (activeCount - 1);
+  const personality = adaptPersonality(
+    basePersonality, state, bot, opponents, pressure, position, costFraction,
+  );
 
   // 有人梭哈时只有两条路：接或者弃。先看牌，再按赔率决定。
   if (state.allIn) {
@@ -1248,56 +1489,116 @@ export function botDecision(state: RoomState, bot: PlayerState): GameCommand {
     // 刚才那一下看牌可能把价顶过了身家，接受时服务端会夹到全部筹码，赔率也按这个实付算。
     if (bot.chips <= 0) return { type: 'fold' };
     const price = Math.min(state.allIn.base * 2, bot.chips);
-    const chance = Math.pow(handPercentile(bot.hand), Math.max(1, state.allIn.accepted.length));
-    return chance > price / (state.pot + price) * 0.9 ? { type: 'call' } : { type: 'fold' };
+    const showdownOpponents = Math.max(1, state.allIn.accepted.filter((id) => id !== bot.id).length);
+    const strength = handPercentile(bot.hand);
+    const equity = winEquity(strength, showdownOpponents);
+    const potOdds = price / Math.max(1, state.pot + price);
+    const riskTax = (1 - personality.riskTolerance) * 0.055 + pressure * 0.035;
+    const temperament = (personality.looseness - 0.5) * 0.045;
+    return equity + temperament >= potOdds + riskTax ? { type: 'call' } : { type: 'fold' };
   }
 
-  // 先决定要不要看牌：闷牌便宜，但第二轮开始必须看。
-  if (!bot.looked && (state.roundNo >= 2 || Math.random() < 0.55)) return { type: 'look' };
-
-  const cost = callCost(state, bot);
-  // 没看牌时按平均牌力估；看了牌就用真实分位。
-  const pct = bot.looked ? handPercentile(bot.hand) : 0.5;
-  // 赢下所有对手的粗略概率
-  const equity = Math.pow(pct, opponents);
-  const potOdds = cost / (state.pot + cost);
-  // 每个机器人每局有一点固定的"性格"，同一局里表现一致
-  const mood = pseudoRandom(`${bot.id}:${state.handNo}`);
-  const bluff = (mood - 0.5) * 0.12;
-
-  if (bot.chips <= cost) {
-    // 跟不起了：牌好就梭（被动梭哈不受轮次限制），牌烂就弃。
-    return equity + bluff > 0.28 ? { type: 'all_in' } : { type: 'fold' };
-  }
-
-  // 亏赔率太多就弃牌。闷牌阶段成本低，容忍度高一些。
-  const foldLine = bot.looked ? potOdds * 0.75 : potOdds * 0.35;
-  if (equity + bluff < foldLine && Math.random() < 0.85) return { type: 'fold' };
-
-  // 抓到大牌时偶尔直接梭哈，把所有人拖下水
-  if (canAllInNow(state) && bot.looked && equity > 0.9 && Math.random() < 0.25) {
-    return { type: 'all_in' };
-  }
-
-  // 牌很好且开放比牌时，主动开火。
-  if (
-    canCompareNow(state) && active.length > 1 && bot.looked &&
-    bot.chips > compareCost(state, bot) && equity > 0.72 && Math.random() < 0.4
-  ) {
-    const targets = active.filter((p) => p.id !== bot.id);
-    if (targets.length) {
-      const target = targets[Math.floor(Math.random() * targets.length)];
-      return { type: 'compare', targetId: target.id };
+  // 闷牌便宜且能隐藏信息，但注码、对手压力或轮次升高时，理性的玩家会先看牌再决定。
+  if (!bot.looked) {
+    const informationNeed = clamp01(
+      0.18 + personality.patience * 0.48 + pressure * 0.34 + costFraction * 2.2 + (state.roundNo - 1) * 0.25,
+    );
+    if (state.roundNo >= 2 || costFraction >= 0.045 || botRoll(state, bot, 'look') < informationNeed) {
+      return { type: 'look' };
     }
   }
 
-  // 加注：牌好时价值加注，偶尔闷牌诈一手。
-  const idx = state.settings.betOptions.indexOf(state.betUnit);
-  const nextUnit = idx >= 0 ? state.settings.betOptions[idx + 1] : undefined;
-  if (nextUnit && bot.chips > nextUnit * (bot.looked ? 2 : 1) * 1.5) {
-    const wantValue = bot.looked && equity > 0.62 && Math.random() < 0.45;
-    const wantBluff = !bot.looked && Math.random() < 0.1;
-    if (wantValue || wantBluff) return { type: 'raise', unit: nextUnit };
+  // 没看牌时按平均牌力估；看了牌就用真实分位。
+  const strength = bot.looked ? handPercentile(bot.hand) : 0.5;
+  const equity = winEquity(strength, opponentCount);
+  const potOdds = cost / Math.max(1, state.pot + cost);
+  const requiredEquity = clamp01(
+    potOdds
+      + pressure * 0.075
+      + costFraction * (1 - personality.riskTolerance) * 0.10
+      - personality.looseness * 0.045
+      - position * 0.022,
+  );
+  const plannedBluff = opponentCount <= 2
+    && position >= 0.5
+    && pressure < 0.34
+    && stackToPot >= 3
+    && (!bot.looked || strength < 0.40)
+    && botRoll(state, bot, 'bluff-raise') < personality.bluffRate;
+
+  if (bot.chips <= cost) {
+    // 跟不起了：用真实梭哈价重算底池赔率，不能只因已经投过钱就追注。
+    const shove = allInCost(state, bot);
+    const shoveOdds = shove / Math.max(1, state.pot + shove);
+    const edge = equity + (personality.looseness - 0.5) * 0.05 - (1 - personality.riskTolerance) * 0.035;
+    return edge >= shoveOdds ? { type: 'all_in' } : { type: 'fold' };
+  }
+
+  // 牌力、赔率、位置和压力共同决定弃牌；性格只影响边缘局面，不会让弱牌无脑追高注。
+  const decisionNoise = (botRoll(state, bot, 'continue') - 0.5) * 0.035;
+  if (equity + decisionNoise < requiredEquity && !plannedBluff) return { type: 'fold' };
+
+  // 有虚有实：强牌在前位或已有对手施压时，偶尔只跟一手设陷阱。
+  // 这个模式不对外显示，否则“陷阱”本身就失去意义；下一轮会重新按新局面判断。
+  const slowPlay = bot.looked
+    && strength >= 0.84
+    && stackToPot >= 1.35
+    && pressure >= 0.16
+    && botRoll(state, bot, 'slow-play')
+      < personality.deception * (0.16 + pressure * 0.34 + (1 - position) * 0.10);
+
+  // 极强牌在低 SPR 或后段主动收口；极少数老练型机器人会在单挑低压力局面诈唬梭哈。
+  if (!slowPlay && canAllInNow(state) && bot.looked) {
+    const shove = allInCost(state, bot);
+    const shoveOdds = shove / Math.max(1, state.pot + shove);
+    const valueShove = strength >= 0.88
+      && equity >= shoveOdds + 0.08
+      && (stackToPot <= 2.6 || state.roundNo >= 5)
+      && botRoll(state, bot, 'value-shove') < 0.22 + personality.aggression * 0.45;
+    const bluffShove = opponentCount === 1
+      && strength < 0.42
+      && pressure < 0.28
+      && stackToPot >= 3
+      && botRoll(state, bot, 'bluff-shove') < personality.bluffRate * 0.22;
+    if (valueShove || bluffShove) return { type: 'all_in' };
+  }
+
+  // 牌很好且开放比牌时，优先挑战公开表现最有威胁、投入最多的人。
+  if (
+    !slowPlay && canCompareNow(state) && opponents.length > 0 && bot.looked &&
+    bot.chips > compareCost(state, bot) &&
+    strength >= (opponentCount === 1 ? 0.62 : 0.74) &&
+    equity >= compareCost(state, bot) / Math.max(1, state.pot + compareCost(state, bot)) + 0.07 &&
+    botRoll(state, bot, 'compare') < 0.18 + personality.aggression * 0.42
+  ) {
+    const target = compareTarget(state, bot, opponents);
+    if (target) return { type: 'compare', targetId: target.id };
+  }
+
+  // 价值加注会按牌力、底池和有效筹码选择 2万/5万/10万，而不是永远只点下一档。
+  const multiplier = bot.looked ? 2 : 1;
+  const affordable = state.settings.betOptions.filter(
+    (unit) => unit > state.betUnit && bot.chips > unit * multiplier,
+  );
+  if (affordable.length) {
+    const valueEdge = equity - requiredEquity;
+    const wantValue = !slowPlay && bot.looked
+      && strength >= 0.66
+      && valueEdge >= -0.015
+      && botRoll(state, bot, 'value-raise') < 0.18 + personality.aggression * 0.55 + Math.max(0, valueEdge);
+    const bluffSpot = plannedBluff;
+
+    if (wantValue || bluffSpot) {
+      if (bluffSpot && !wantValue) return { type: 'raise', unit: affordable[0] };
+      const stackFraction = strength >= 0.95 ? 0.46 : strength >= 0.87 ? 0.29 : strength >= 0.74 ? 0.18 : 0.11;
+      const targetCost = Math.min(
+        bot.chips * 0.66,
+        Math.max(state.pot * (0.70 + personality.aggression * 0.75), effectiveStack * stackFraction),
+      );
+      const sized = affordable.filter((unit) => unit * multiplier <= targetCost);
+      const unit = sized.length ? sized[sized.length - 1] : affordable[0];
+      return { type: 'raise', unit };
+    }
   }
 
   return { type: 'call' };

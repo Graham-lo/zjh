@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  allInBase, allInCost, applyCommand, botDecision, canAllInNow, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
+  allInBase, allInCost, applyCommand, botDecision, botPersonality, canAllInNow, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
   compareHands, createHumanPlayer, createInitialRoom, currentPlayer, dealCategoryForRoll, dealWeightedHands, evaluateHand,
   handPercentile, migrateRoom, sanitizeRoom, startRound, timeoutCurrentPlayer, transferHost,
   type Card, type RoomState,
@@ -113,7 +113,7 @@ test('只有已准备且在线的人入局，掉线的人留座位等下一局',
   startRound(room, room.hostId);
   assert.equal(room.players[2].status, 'waiting');
   assert.equal(room.players[2].hand.length, 0);
-  assert.equal(room.pot, 200);
+  assert.equal(room.pot, room.settings.ante * 2);
 });
 
 test('底注会把人交空时自动补分，不会留下只能弃牌的死角', () => {
@@ -133,7 +133,7 @@ test('看牌后跟注翻倍；单挑时对手弃牌直接收锅', () => {
   applyCommand(room, actor.id, { type: 'look' });
   const before = actor.chips;
   applyCommand(room, actor.id, { type: 'call' });
-  assert.equal(before - actor.chips, 200);
+  assert.equal(before - actor.chips, room.settings.betOptions[0] * 2);
   assert.equal(room.turnSeat, other.seat);
   applyCommand(room, other.id, { type: 'fold' });
   assert.equal(room.phase, 'round_end');
@@ -151,7 +151,7 @@ test('比牌花两倍跟注额，单挑时立即开放', () => {
   const price = compareCost(room, actor);
   applyCommand(room, actor.id, { type: 'compare', targetId: target.id });
   assert.equal(before - actor.chips, price);
-  assert.equal(price, 200);
+  assert.equal(price, room.settings.betOptions[0] * 2);
   assert.equal(room.phase, 'round_end');
   assert.equal(room.result?.winnerId, target.id);
 });
@@ -299,21 +299,40 @@ test('老快照缺字段时会被补齐，不会出现 undefined 轮', () => {
   const room = makeRoom(2);
   // 模拟一个在 allInFromRound 上线之前存下来的房间
   room.settings.startingChips = 50_000;
+  room.settings.ante = 100;
+  room.settings.betOptions = [100, 1_000, 3_000, 5_000];
+  room.betUnit = 100;
   room.players[0].chips = 12_345;
   room.players[0].granted = 50_000;
   delete (room as Partial<typeof room>).chipGrantVersion;
+  delete (room as Partial<typeof room>).economyVersion;
   delete (room.settings as Partial<typeof room.settings>).allInFromRound;
   delete (room.settings as Partial<typeof room.settings>).maxRounds;
   migrateRoom(room);
   assert.equal(room.settings.allInFromRound, 3);
   assert.equal(room.settings.maxRounds, 8);
   assert.equal(room.settings.startingChips, 500_000, '旧房间恢复后也使用新的 50 万重置额度');
+  assert.equal(room.settings.ante, 1_000, '旧房间下一局也使用新的底注');
+  assert.deepEqual(room.settings.betOptions, [1_000, 20_000, 50_000, 100_000], '旧房间同步新的加注档位');
+  assert.equal(room.betUnit, 1_000, '大厅里的旧房间立即显示新底注');
   assert.equal(room.players[0].chips, 500_000, '旧房间中的低余额玩家立即补到 50 万');
   assert.equal(room.players[0].granted, 537_655, '补发额同步计入 granted，净战绩不变');
   const migrated = [room.players[0].chips, room.players[0].granted];
   migrateRoom(room);
   assert.deepEqual([room.players[0].chips, room.players[0].granted], migrated, '迁移只能执行一次');
   assert.equal(typeof room.settings.allInFromRound, 'number');
+});
+
+test('进行中的旧牌局同步新档位，但不在半路强改当前单价', () => {
+  const room = makeRoom(2);
+  startRound(room, room.hostId);
+  room.settings.ante = 100;
+  room.settings.betOptions = [100, 1_000, 3_000, 5_000];
+  room.betUnit = 5_000;
+  delete (room as Partial<typeof room>).economyVersion;
+  migrateRoom(room);
+  assert.deepEqual(room.settings.betOptions, [1_000, 20_000, 50_000, 100_000]);
+  assert.equal(room.betUnit, 5_000, '本局当前单价保持不动，下一局才从新底注开始');
 });
 
 test('场上有人跟不起时，梭哈提前开放', () => {
@@ -660,14 +679,14 @@ test('本桌累计跨局叠加，且桌上净变化恒为零', () => {
   };
 
   const h1 = playHand();
-  assert.equal(h1.winner.net, 100, '赢家净赚对手那份底注');
-  assert.equal(h1.loser.net, -100);
+  assert.equal(h1.winner.net, room.settings.ante, '赢家净赚对手那份底注');
+  assert.equal(h1.loser.net, -room.settings.ante);
 
   // 第二局庄位轮转，谁赢由座位决定；无论谁赢，累计都是在第一局基础上叠加
   const netsBefore = new Map(room.players.map((p) => [p.id, p.net]));
   const h2 = playHand();
-  assert.equal(h2.winner.net, netsBefore.get(h2.winner.id)! + 100, '赢家在原有累计上再加');
-  assert.equal(h2.loser.net, netsBefore.get(h2.loser.id)! - 100, '输家在原有累计上再减');
+  assert.equal(h2.winner.net, netsBefore.get(h2.winner.id)! + room.settings.ante, '赢家在原有累计上再加');
+  assert.equal(h2.loser.net, netsBefore.get(h2.loser.id)! - room.settings.ante, '输家在原有累计上再减');
 });
 
 test('补分要记进 granted，否则净战绩会被冲掉', () => {
@@ -805,6 +824,161 @@ test('中途弃牌的人不会在结算时被亮牌', () => {
 });
 
 /* ----------------------------------------------------------- 机器人 */
+
+test('机器人有稳定且不同的性格，不会每一步随机换人格', () => {
+  const aggressive = botPersonality({ id: 'same', name: '阿凯' });
+  const patient = botPersonality({ id: 'same', name: '老陈' });
+  assert.ok(aggressive.aggression > patient.aggression);
+  assert.ok(patient.patience > aggressive.patience);
+  assert.deepEqual(botPersonality({ id: 'same', name: '阿凯' }), aggressive);
+});
+
+test('一桌会随机抽到多个不重复的机器人基础风格', () => {
+  const room = makeRoom(1, 5);
+  const styles = room.players.filter((p) => p.isBot).map((p) => p.botStyle);
+  assert.equal(styles.length, 5);
+  assert.equal(new Set(styles).size, 5);
+});
+
+test('机器人防偷看：对手暗牌与闷牌时自己的牌都不会影响决策', () => {
+  const room = makeRoom(1, 3);
+  startRound(room, room.hostId);
+  const bot = room.players.find((p) => p.isBot)!;
+  room.turnSeat = bot.seat;
+  room.compareUnlockAt = 999;
+  bot.looked = true;
+  bot.hand = [c(13, 'S'), c(13, 'H'), c(13, 'D')];
+  const expected = botDecision(room, bot);
+
+  const changed = structuredClone(room);
+  const changedBot = changed.players.find((p) => p.id === bot.id)!;
+  const hiddenHands = [
+    [c(14, 'S'), c(14, 'H'), c(14, 'D')],
+    [c(2, 'S'), c(4, 'H'), c(7, 'D')],
+    [c(10, 'C'), c(11, 'C'), c(12, 'C')],
+  ];
+  let i = 0;
+  for (const p of changed.players) {
+    if (p.id !== bot.id) p.hand = hiddenHands[i++ % hiddenHands.length];
+  }
+  assert.deepEqual(botDecision(changed, changedBot), expected);
+
+  const blind = structuredClone(room);
+  const blindBot = blind.players.find((p) => p.id === bot.id)!;
+  blindBot.looked = false;
+  const blindExpected = botDecision(blind, blindBot);
+  blindBot.hand = [c(2, 'S'), c(3, 'H'), c(5, 'D')];
+  assert.deepEqual(botDecision(blind, blindBot), blindExpected, '没有看牌时连自己的实际牌面也不能参与决策');
+});
+
+test('机器人会按牌力和有效筹码使用 10 万高档价值加注', () => {
+  const room = makeRoom(1, 3);
+  startRound(room, room.hostId);
+  const bot = room.players.find((p) => p.isBot)!;
+  bot.name = '阿凯';
+  bot.looked = true;
+  bot.hand = [c(14, 'S'), c(14, 'H'), c(14, 'D')];
+  room.turnSeat = bot.seat;
+  room.compareUnlockAt = 999;
+  room.pot = 50_000;
+  room.betUnit = 1_000;
+
+  let found = false;
+  for (let seq = 0; seq < 80; seq++) {
+    room.actionSeq = seq;
+    const cmd = botDecision(room, bot);
+    if (cmd.type !== 'raise') continue;
+    assert.equal(cmd.unit, 100_000);
+    found = true;
+    break;
+  }
+  assert.equal(found, true, '顶级牌在合适局面应该能选择最高价值档，而不是永远只加下一档');
+});
+
+test('机器人拿弱牌面对高注和多人压力会止损弃牌', () => {
+  const room = makeRoom(1, 3);
+  startRound(room, room.hostId);
+  const bot = room.players.find((p) => p.isBot)!;
+  bot.looked = true;
+  bot.hand = [c(2, 'S'), c(4, 'H'), c(7, 'D')];
+  room.turnSeat = bot.seat;
+  room.betUnit = 100_000;
+  room.pot = 220_000;
+  for (const p of room.players) {
+    if (p.id !== bot.id) {
+      p.looked = true;
+      p.bet = 100_000;
+      p.lastAction = '加到 100000';
+    }
+  }
+  assert.deepEqual(botDecision(room, bot), { type: 'fold' });
+});
+
+test('狡诈型会临场变招：低压力后位能诈唬，同一弱牌遇高压立即收手', () => {
+  const room = makeRoom(1, 2);
+  startRound(room, room.hostId);
+  const bot = room.players.find((p) => p.isBot)!;
+  bot.name = '老王';
+  bot.looked = true;
+  bot.hand = [c(2, 'S'), c(4, 'H'), c(7, 'D')];
+  room.turnSeat = bot.seat;
+  room.turnCount = 2; // 三人桌后位
+  room.compareUnlockAt = 999;
+  room.pot = 3_000;
+  room.betUnit = 1_000;
+
+  let bluffSeq = -1;
+  for (let seq = 0; seq < 240; seq++) {
+    room.actionSeq = seq;
+    const cmd = botDecision(room, bot);
+    if (cmd.type === 'raise') {
+      bluffSeq = seq;
+      break;
+    }
+  }
+  assert.ok(bluffSeq >= 0, '低压力好位置应该混入少量诈唬，而不是弱牌永远同一个动作');
+
+  room.actionSeq = bluffSeq;
+  room.betUnit = 50_000;
+  room.pot = 150_000;
+  for (const p of room.players) {
+    if (p.id !== bot.id) {
+      p.looked = true;
+      p.bet = 50_000;
+      p.lastAction = '加到 50000';
+    }
+  }
+  assert.deepEqual(botDecision(room, bot), { type: 'fold' }, '桌况转为高压后不能继续机械诈唬');
+});
+
+test('狡诈型顶级牌有时慢打设陷阱、有时直接价值加注', () => {
+  const room = makeRoom(1, 2);
+  startRound(room, room.hostId);
+  const bot = room.players.find((p) => p.isBot)!;
+  bot.name = '老王';
+  bot.looked = true;
+  bot.hand = [c(14, 'S'), c(14, 'H'), c(14, 'D')];
+  room.turnSeat = bot.seat;
+  room.turnCount = 0; // 前位更适合藏强度
+  room.compareUnlockAt = 999;
+  room.pot = 60_000;
+  room.betUnit = 20_000;
+  for (const p of room.players) {
+    if (p.id !== bot.id) {
+      p.looked = true;
+      p.bet = 20_000;
+      p.lastAction = '加到 20000';
+    }
+  }
+
+  const actions = new Set<string>();
+  for (let seq = 0; seq < 320; seq++) {
+    room.actionSeq = seq;
+    actions.add(botDecision(room, bot).type);
+  }
+  assert.ok(actions.has('call'), '强牌应该有慢打设陷阱的线路');
+  assert.ok(actions.has('raise'), '强牌也应该有直接做大底池的线路');
+});
 
 test('机器人的决策永远是当前状态下的合法操作', () => {
   for (let trial = 0; trial < 60; trial++) {

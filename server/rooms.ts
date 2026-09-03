@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import {
   canAutoStart, CHIP_GRANT_VERSION, currentPlayer, DEFAULT_SETTINGS, GameError, randomId, resetToLobby, startRound,
+  ZJH_ECONOMY_VERSION,
   type RoomState,
 } from '../shared/game.ts';
 import {
@@ -76,9 +77,12 @@ export class Hub {
     this.store = store;
     let restored = 0;
     let chipMigrated = 0;
+    let economyMigrated = 0;
     for (const raw of store.loadAll(ROOM_TTL_MS)) {
       const needsChipMigration = !isSjRoom(raw)
         && ((raw as RoomState).chipGrantVersion ?? 0) < CHIP_GRANT_VERSION;
+      const needsEconomyMigration = !isSjRoom(raw)
+        && ((raw as RoomState).economyVersion ?? 0) < ZJH_ECONOMY_VERSION;
       // 老快照可能缺新加的字段，先补齐再用；没有 kind 的一律是炸金花（DESIGN 2.6）
       const state = engineFor(raw).migrate(raw);
       // 重启后没有任何人是连着的；牌局停在原地等人回来。
@@ -91,14 +95,16 @@ export class Hub {
         creditedHand: isSjRoom(state) ? (state.result?.handNo ?? 0) : 0,
       });
       // 迁移后立即落盘，旧房间无需等待玩家重新进入或下一次操作。
-      if (needsChipMigration) {
+      if (needsChipMigration || needsEconomyMigration) {
         store.save(state);
-        chipMigrated++;
       }
+      if (needsChipMigration) chipMigrated++;
+      if (needsEconomyMigration) economyMigrated++;
       restored++;
     }
     if (restored) console.log(`[hub] 从快照恢复了 ${restored} 个房间`);
     if (chipMigrated) console.log(`[hub] 已升级 ${chipMigrated} 个旧炸金花房间的筹码基线`);
+    if (economyMigrated) console.log(`[hub] 已升级 ${economyMigrated} 个旧炸金花房间的下注档位`);
     setInterval(() => this.sweep(), 60_000).unref();
   }
 
