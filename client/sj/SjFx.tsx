@@ -13,7 +13,6 @@ import { TRUMP_TINT, suitName } from './util.ts';
 
 export type SjFxJob =
   | { kind: 'declare'; trump: SjTrumpSuit; who: string; strength: number; reinforce: boolean }
-  | { kind: 'flip'; card: SjCard; trump: SjTrumpSuit }
   | { kind: 'chao'; trump: SjTrumpSuit; who: string; strength: number; cards: SjCard[] }
   | { kind: 'throwFail'; who: string; penalty: number; forcedIds: string[] }
   | { kind: 'dig'; who: string; base: number; multiplier: number; total: number; bottom: SjCard[] }
@@ -23,7 +22,6 @@ export type SjFxJob =
 /** 每种特效占屏多久。抠底最长 —— 那是一局里唯一值得停下来看的地方 */
 export const SJ_FX_MS: Record<SjFxJob['kind'], number> = {
   declare: 1700,
-  flip: 2100,
   chao: 2400,
   throwFail: 1600,
   dig: 4400,
@@ -125,26 +123,6 @@ function Chao({ job }: { job: Extract<SjFxJob, { kind: 'chao' }> }) {
   );
 }
 
-/* ----------------------------------------------------------- 翻底定主 */
-
-function Flip({ job }: { job: Extract<SjFxJob, { kind: 'flip' }> }) {
-  const beat = useBeats([120]);
-  return (
-    <div className="overlay sj-fx sj-fx-flip" style={{ ['--tint' as string]: TRUMP_TINT[job.trump] }} aria-hidden="true">
-      <div className="sj-fx-pool" />
-      <div className="sj-fx-core">
-        <div className={`sj-fx-flipcard${beat ? ' up' : ''}`}>
-          <PlayingCard card={job.card} faceDown={!beat} size="big" />
-        </div>
-        <div className="sj-fx-who">
-          无人亮主 · 翻底定主 <b>{cardLabel(job.card)}</b> → {job.trump === 'NT' ? '无主' : `${suitName(job.trump)} 主`}
-        </div>
-      </div>
-      <div className="overlay-vignette" />
-    </div>
-  );
-}
-
 /* --------------------------------------------------------------- 甩牌失败 */
 
 function ThrowFail({ job }: { job: Extract<SjFxJob, { kind: 'throwFail' }> }) {
@@ -230,8 +208,6 @@ export function SjFx({ job, onDone }: { job: SjFxJob; onDone(): void }) {
   switch (job.kind) {
     case 'declare':
       return <Declare job={job} />;
-    case 'flip':
-      return <Flip job={job} />;
     case 'chao':
       return <Chao job={job} />;
     case 'throwFail':

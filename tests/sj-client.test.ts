@@ -6,8 +6,12 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
-  checkPlay, declareOptions, declareVoice, handEndVoice, playVoice, smartPickForCard, throwFailText,
+  applySweep, blameCards, checkPlay, declareOptions, declareVoice, fillCandidates, handEndVoice,
+  hintModeOf, hintedIds, kouAdmit, pickOne, pickUnit, playVoice, soleFollow, sweepModeOf,
+  throwFailText,
+  unitPickForCard,
 } from '../client/sj/util.ts';
 import { SJ_VOICE_LINES, ZJH_VOICE_LINES } from '../client/voice-lines.ts';
 import { suggest, type SjSuggestView } from '../shared/sj/bot.ts';
@@ -128,27 +132,285 @@ test('抄底条上点得亮的每一手服务端都收得下，没画出来的�
   assert.ok(rejected > 0, '一次都没拒过，反向那一半没验到');
 });
 
-/* --------------------------------------------------------- 单击智能联选 */
+/* ------------------------------------------------------- 双击整单位 */
 
-test('首出单击对子中的任一张，直接预选整对', () => {
+test('双击对子里的任一张，选中整对', () => {
   const hand = h('H7a H7b HKa D2a');
-  assert.deepEqual(smartPickForCard(hand, hand[0], null, CTX_S5).sort(), ['H7a', 'H7b']);
+  assert.deepEqual(unitPickForCard(hand, hand[0], CTX_S5).sort(), ['H7a', 'H7b']);
 });
 
-test('首出单击连对中的任一张，优先预选最长完整拖拉机', () => {
+test('双击连对里的任一张，选中包含它的最长拖拉机', () => {
   const hand = h('H7a H7b H8a H8b H9a H9b HKa');
   assert.deepEqual(
-    smartPickForCard(hand, hand.find((c) => c.id === 'H8a')!, null, CTX_S5).sort(),
+    unitPickForCard(hand, hand.find((c) => c.id === 'H8a')!, CTX_S5).sort(),
     ['H7a', 'H7b', 'H8a', 'H8b', 'H9a', 'H9b'],
   );
 });
 
-test('跟拖拉机时单击其中一张，预选一手完整合法连对', () => {
-  const hand = h('H6a H6b H7a H7b H8a H8b HKa');
-  const lead = parseShape(h('H9a H9b HTa HTb'), CTX_S5)!;
-  const picked = smartPickForCard(hand, hand.find((c) => c.id === 'H7a')!, lead, CTX_S5);
-  assert.equal(picked.length, 4);
-  assert.ok(validateFollow(hand, lead, h(picked.join(' ')), CTX_S5).ok);
+test('双击一张没伴的牌，只选它自己 —— 双击也不做"智能整手"', () => {
+  const hand = h('H7a H9a HKa D2a');
+  assert.deepEqual(unitPickForCard(hand, hand.find((c) => c.id === 'H9a')!, CTX_S5), ['H9a']);
+});
+
+/* ------------------------------------------------------- 提示 / 补齐 / 换一手 */
+
+test('一颗按钮三种身份：没选牌是提示，选了不合法是补齐，合法了是换一手', () => {
+  assert.equal(hintModeOf(0, false), 'hint');
+  assert.equal(hintModeOf(0, true), 'hint');
+  assert.equal(hintModeOf(2, false), 'fill');
+  assert.equal(hintModeOf(2, true), 'swap');
+});
+
+test('补齐只在包含已选牌的合法整手里找，且一张都不动已选的牌', () => {
+  const hand = h('H7a H9a HTa HJa HKa S6a D2a');
+  const lead = parseShape(h('HAa HKb HQa'), CTX_S5)!;
+  const picked = h('H7a');
+  const cands = fillCandidates(hand, picked, lead, CTX_S5);
+  assert.ok(cands.length > 1, '这个局面有多种垫法，补齐不该只给一种');
+  for (const play of cands) {
+    assert.ok(play.some((c) => c.id === 'H7a'), '补齐把玩家已经选的牌弄丢了');
+    assert.ok(validateFollow(hand, lead, play, CTX_S5).ok);
+  }
+  // 默认最保守：不带分、牌小的排在最前
+  assert.equal(cands[0].some((c) => c.id === 'HKa'), false, '第一候选不该主动把 K 送出去');
+});
+
+test('补齐优先采用机器人给的收益排序里包含已选牌的那一手', () => {
+  const hand = h('H7a H9a HTa HJa HKa S6a D2a');
+  const lead = parseShape(h('HAa HKb HQa'), CTX_S5)!;
+  const ranked = [h('H7a HKa HJa'), h('H9a HTa HJa')];
+  const cands = fillCandidates(hand, h('H7a'), lead, CTX_S5, ranked);
+  assert.deepEqual(cands.map((p) => p.map((c) => c.id)), [['H7a', 'HKa', 'HJa']]);
+});
+
+test('这几张凑不成一手时补齐给不出候选，调用方据此提示而不是偷偷改选中态', () => {
+  // 有对必出对：带着 H9a 的三张里凑不出合法跟牌
+  const hand = h('H7a H7b H9a S6a D2a');
+  const lead = parseShape(h('HAa HAb'), CTX_S5)!;
+  assert.deepEqual(fillCandidates(hand, h('H9a'), lead, CTX_S5), []);
+});
+
+/* ================================================================
+ * 选牌场景清单（docs/shengji/SELECT-SCENARIOS.md）
+ *
+ * 编号一一对应，改交互之前先看这一段：这里钉住的是"手感"，
+ * 而手感回归在界面上很难被发现 —— 点一下多选了三张，人往往只觉得"怪"，说不出哪里怪。
+ * ================================================================ */
+
+/** 选中集写成 id 排序数组，断言读起来才像人话 */
+const sel = (s: Set<string>) => [...s].sort();
+const S = (...ids: string[]) => new Set(ids);
+
+/* ------------------------------------------------------- §1 首出 */
+
+test('S1 首出点一张牌只选这一张，再点就取消', () => {
+  const hand = h('H7a H7b H8a HKa D2a');
+  const one = pickOne(S(), hand, hand[0], null, CTX_S5);
+  assert.deepEqual(sel(one), ['H7a']);
+  assert.deepEqual(sel(pickOne(one, hand, hand[0], null, CTX_S5)), []);
+});
+
+test('S2 首出点对子里的一张不会自动成对，双击才成对', () => {
+  const hand = h('H7a H7b HKa D2a');
+  const one = pickOne(S(), hand, hand[0], null, CTX_S5);
+  assert.deepEqual(sel(one), ['H7a']);
+  assert.deepEqual(sel(pickUnit(one, hand, hand[0], CTX_S5)), ['H7a', 'H7b']);
+});
+
+test('S3 首出点拖拉机里的一张也只选这一张，不自动扩成拖拉机', () => {
+  const hand = h('H7a H7b H8a H8b H9a H9b HKa');
+  const c = hand.find((x) => x.id === 'H8a')!;
+  assert.deepEqual(sel(pickOne(S(), hand, c, null, CTX_S5)), ['H8a']);
+});
+
+test('S4 横扫：模式由按下的那一张决定，往回扫就撤销', () => {
+  const row = ['H7a', 'H7b', 'H8a', 'H8b', 'H9a'];
+  // 按在没选中的牌上 = 这一趟是"选"
+  assert.equal(sweepModeOf(S(), 'H7a'), 'add');
+  const five = applySweep(S(), row, 'add');
+  assert.deepEqual(sel(five), row.slice().sort());
+  // 按在已选中的牌上 = 这一趟是"取消"
+  assert.equal(sweepModeOf(five, 'H7a'), 'remove');
+  assert.deepEqual(sel(applySweep(five, row.slice(0, 3), 'remove')), ['H8b', 'H9a']);
+  // 拖动过程中每次都从"按下时的那一份"重算，所以往回拖是撤销而不是越拖越多
+  assert.deepEqual(sel(applySweep(S(), row.slice(0, 2), 'add')), ['H7a', 'H7b']);
+});
+
+test('K1 扣底选满 8 张之后第 9 张收不下，已经选上的一张都不动', () => {
+  const eight = S('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h');
+  const nine = kouAdmit(eight, ['i'], 8);
+  assert.deepEqual(nine, { ids: [], overflow: true }, '第 9 张必须点不上，而且要给得出提示');
+  // 已经在里面的不占额度：重新点一张已选的牌不会被当成"又要加一张"
+  assert.deepEqual(kouAdmit(eight, ['c'], 8), { ids: [], overflow: false });
+});
+
+test('K3 扣底横扫扫过头：能收的先收下，只有被截断的那几张算 overflow', () => {
+  const six = S('a', 'b', 'c', 'd', 'e', 'f');
+  // 扫过 c d e f g h i（其中 cdef 已经在里面）：只剩 2 个额度，收 g h，i 被挡下
+  const got = kouAdmit(six, ['c', 'd', 'e', 'f', 'g', 'h', 'i'], 8);
+  assert.deepEqual(got, { ids: ['g', 'h'], overflow: true });
+  // 正好扫满不算 overflow：不该为了"刚好选满"弹一句提示
+  assert.deepEqual(kouAdmit(six, ['g', 'h'], 8), { ids: ['g', 'h'], overflow: false });
+});
+
+test('S5 提示填进来的一手，每一张都还能单独点掉', () => {
+  const hand = h('H7a H7b H8a H8b HKa D2a');
+  const filled = S('H7a', 'H7b', 'H8a', 'H8b');
+  const after = pickOne(filled, hand, hand.find((c) => c.id === 'H8a')!, null, CTX_S5);
+  assert.deepEqual(sel(after), ['H7a', 'H7b', 'H8b'], '系统选的牌必须放得下');
+});
+
+test('S6 首出跨花色组：按钮灰、说明原因，不替用户改', () => {
+  const hand = h('HAa S6a');
+  const bad = checkPlay(hand, h('HAa S6a'), null, CTX_S5);
+  assert.equal(bad.ok, false);
+  assert.match(bad.reason, /同一个花色组/);
+});
+
+test('S7 同门 A A K 可以甩，按之前先说清罚分风险', () => {
+  const hand = h('HAa HAb HKa H2a');
+  const out = checkPlay(hand, h('HAa HAb HKa'), null, CTX_S5);
+  assert.equal(out.ok, true, '甩得成不成由服务端裁决，客户端不能拦');
+  assert.equal(out.label, '甩牌 3 张');
+  assert.match(out.note, /罚 10 分/);
+});
+
+/* ------------------------------------------------------- §2 跟牌 */
+
+/** 跟牌场景的公共写法：点一张之后的选中集 */
+function follow(handSpec: string, clicked: string, leadSpec: string, from: string[] = []): string[] {
+  const hand = h(handSpec);
+  const lead = parseShape(h(leadSpec), CTX_S5)!;
+  const card = hand.find((c) => c.id === clicked)!;
+  return sel(pickOne(new Set(from), hand, card, lead, CTX_S5));
+}
+
+test('F1 首出单张：点该门任一张都合法；点别门牌不合法且说明原因', () => {
+  const hand = h('H7a H9a S6a D2a');
+  const lead = parseShape(h('HAa'), CTX_S5)!;
+  assert.deepEqual(follow('H7a H9a S6a D2a', 'H7a', 'HAa'), ['H7a'], '该门有两张，规则不强迫哪一张');
+  assert.equal(checkPlay(hand, h('H7a'), lead, CTX_S5).ok, true);
+
+  assert.deepEqual(follow('H7a H9a S6a D2a', 'D2a', 'HAa'), ['D2a'], '不合法也只加这一张，不替用户改');
+  const bad = checkPlay(hand, h('D2a'), lead, CTX_S5);
+  assert.equal(bad.ok, false);
+  assert.match(bad.reason, /红桃/);
+});
+
+test('F2 首出对子、我有该门对子：点一张补上它的另一半，第二对一张不碰', () => {
+  // 一对：只有这一条路
+  assert.deepEqual(follow('H7a H7b H9a HKa D2a', 'H7a', 'HAa HAb'), ['H7a', 'H7b']);
+  // 两对：包含 H7a 的合法出法仍然只有 {77} 一种，所以补的还是另一半 ——
+  // 但**绝不会**把第二对也扫进来（那才是"智能选牌"）。见 tests/sj-complete.test.ts 里的说明
+  assert.deepEqual(follow('H7a H7b H9a H9b D2a', 'H7a', 'HAa HAb'), ['H7a', 'H7b']);
+});
+
+test('F3 首出对子、我该门只有 2 张单张：点一张补齐唯一的另一张', () => {
+  assert.deepEqual(follow('H7a H9a S6a D2a', 'H7a', 'HAa HAb'), ['H7a', 'H9a']);
+});
+
+test('F4 首出对子、我该门 3 张单张无对：点一张不补，选满 2 张按钮才亮', () => {
+  assert.deepEqual(follow('H7a H9a HKa S6a', 'H7a', 'HAa HAb'), ['H7a']);
+  const hand = h('H7a H9a HKa S6a');
+  const lead = parseShape(h('HAa HAb'), CTX_S5)!;
+  assert.equal(checkPlay(hand, h('H7a'), lead, CTX_S5).ok, false);
+  assert.equal(checkPlay(hand, h('H7a H9a'), lead, CTX_S5).ok, true);
+});
+
+test('F5 首出拖拉机：唯一同长连对时补齐整条，有多条候选时只补另一半', () => {
+  assert.deepEqual(
+    follow('H7a H7b H8a H8b H9a HQa', 'H7a', 'HAa HAb HKa HKb'),
+    ['H7a', 'H7b', 'H8a', 'H8b'],
+    '唯一一条二连对，整条都躲不开',
+  );
+  assert.deepEqual(
+    follow('H7a H7b H8a H8b H9a H9b HKa', 'H8a', 'HTa HTb HJa HJb'),
+    ['H8a', 'H8b'],
+    '三连对有两种拆法，只有 H8b 是两种拆法都带的',
+  );
+});
+
+test('F6 首出拖拉机、该门有对子但连不成：补法唯一才补，否则等用户', () => {
+  // 两个对子，拖拉机降级成两个对子槽 —— 两对都得出，唯一解
+  assert.deepEqual(
+    follow('H7a H7b HQa HQb H2a S6a', 'H7a', 'HAa HAb HKa HKb'),
+    ['H7a', 'H7b', 'HQa', 'HQb'],
+  );
+  // 三个对子：填哪两对是用户的事，只补另一半
+  assert.deepEqual(
+    follow('H7a H7b HQa HQb H3a H3b S6a', 'H7a', 'HAa HAb HKa HKb'),
+    ['H7a', 'H7b'],
+  );
+});
+
+test('F7 首出 n 张、我该门正好 n 张：点任一张补齐全部', () => {
+  assert.deepEqual(follow('H7a H9a HKa S6a D2a', 'H9a', 'HAa HAb HQa'), ['H7a', 'H9a', 'HKa']);
+});
+
+test('F8 首出 n 张、我该门不够 n 张：补齐该门全部，垫哪张不管', () => {
+  assert.deepEqual(follow('H7a H9a S6a S8a D2a', 'H7a', 'HAa HKa HQa'), ['H7a', 'H9a']);
+});
+
+test('F9 缺门：主牌副牌混着垫都行，一张都不补', () => {
+  assert.deepEqual(follow('S6a S8a D2a D3a', 'S6a', 'HAa HKa'), ['S6a']);
+  const hand = h('S6a S8a D2a D3a');
+  const lead = parseShape(h('HAa HKa'), CTX_S5)!;
+  assert.equal(checkPlay(hand, h('S6a D2a'), lead, CTX_S5).ok, true, '缺门时混着垫是合法的');
+});
+
+test('F10 缺门点一张主牌不会自动凑成"毙"；主牌正好 n 张时才补', () => {
+  assert.deepEqual(follow('S6a S7a D2a D3a', 'S6a', 'HAa HKa'), ['S6a'], '还能垫副牌，不强迫');
+  assert.deepEqual(follow('S6a S7a', 'S6a', 'HAa HKa'), ['S6a', 'S7a'], '手里就这两张，躲不开');
+  const hand = h('S6a S7a D2a D3a');
+  const lead = parseShape(h('HAa HKa'), CTX_S5)!;
+  const bi = checkPlay(hand, h('S6a S7a'), lead, CTX_S5);
+  assert.equal(bi.ok, true);
+  assert.match(bi.note, /毙/);
+});
+
+test('F11 甩牌首出（对 + 单）：对子槽唯一就补对子，填充槽绝不自动填', () => {
+  assert.deepEqual(follow('H7a H7b H9a HTa S6a', 'H7a', 'HAa HAb HKa'), ['H7a', 'H7b']);
+});
+
+test('F12 有对子却出两张单：按钮灰、说清原因，并指出该怪哪几张', () => {
+  const hand = h('H7a H7b H9a HTa S6a');
+  const lead = parseShape(h('HAa HAb'), CTX_S5)!;
+  const bad = checkPlay(hand, h('H9a HTa'), lead, CTX_S5);
+  assert.equal(bad.ok, false);
+  assert.match(bad.reason, /对子/);
+  assert.deepEqual(sel(blameCards(hand, h('H9a HTa'), lead, CTX_S5)), ['H7a', 'H7b']);
+  // 合法的一手不该怪任何人
+  assert.deepEqual(sel(blameCards(hand, h('H7a H7b'), lead, CTX_S5)), []);
+});
+
+test('F13 唯一合法解：整手被迫时才算，用户点掉还能点回来', () => {
+  const hand = h('H7a H7b HKa D2a');
+  const lead = parseShape(h('HAa HAb'), CTX_S5)!;
+  const only = soleFollow(hand, lead, CTX_S5);
+  assert.deepEqual(only!.map((c) => c.id).sort(), ['H7a', 'H7b']);
+  // 部分被迫不算唯一解：该门 3 张单张，填哪两张是用户的事
+  assert.equal(soleFollow(h('H7a H9a HKa S6a'), lead, CTX_S5), null);
+  // 点掉一张再点回来，回到同一手
+  const off = pickOne(S('H7a', 'H7b'), hand, hand[0], lead, CTX_S5);
+  assert.deepEqual(sel(off), ['H7b']);
+  assert.deepEqual(sel(pickOne(off, hand, hand[0], lead, CTX_S5)), ['H7a', 'H7b']);
+});
+
+test('F14 先选 2 张再点提示：整个选择被替换成一手完整候选，且含原来那 2 张', () => {
+  const hand = h('H7a H9a HTa HJa HKa S6a D2a');
+  const lead = parseShape(h('HAa HKb HQa'), CTX_S5)!;
+  const picked = h('H7a H9a');
+  const [first] = fillCandidates(hand, picked, lead, CTX_S5);
+  assert.equal(first.length, lead.count, '换上来的是完整的一手，不是零头');
+  for (const c of picked) assert.ok(first.some((x) => x.id === c.id), '用户已经选的牌被弄丢了');
+});
+
+test('F15 选择非空时不画被动建议，免得两种描边混在一起', () => {
+  const pick = h('H7a H7b');
+  assert.deepEqual(sel(hintedIds(true, 0, pick)!), ['H7a', 'H7b']);
+  assert.equal(hintedIds(true, 1, pick), undefined);
+  assert.equal(hintedIds(false, 0, pick), undefined);
+  assert.equal(hintedIds(true, 0, null), undefined);
 });
 
 /* --------------------------------------------------------- 语音（DESIGN 3.6） */
@@ -214,4 +476,32 @@ test('结算的连读分清大光小光、上台与守住', () => {
   assert.deepEqual(handEndVoice({ defendersWin: false, up: 1, label: '庄家升一级' }), ['sj_shouzhu', 'sj_levelup']);
   assert.deepEqual(handEndVoice({ defendersWin: true, up: 0, label: '闲家上台' }), ['sj_shangtai']);
   assert.deepEqual(handEndVoice({ defendersWin: true, up: 2, label: '上台 · 升两级' }), ['sj_shangtai', 'sj_levelup']);
+});
+
+/* --------------------------------------------- 布局回归：选牌不许把牌挪走 */
+
+/**
+ * 这两条只能读源码钉：node --test 里没有 DOM，量不到布局。
+ * 但它们都是**真的踩过的坑**，而且都是一改就复发的那种，所以宁可用静态检查兜住。
+ */
+test('手牌的状态类名必须带 sj- 前缀：全局 .hint 会把被提示的牌压下去 12px', async () => {
+  const src = await readFile(new URL('../client/sj/Hand.tsx', import.meta.url), 'utf8');
+  // 全局 styles.css 里 `.hint { margin: 12px 0 0 }`、将来还可能有别的裸类名，
+  // 一旦命中就是「提示一出现整行手牌错位」，横扫会从手指底下溜走
+  assert.ok(!/['"` ](hint|blame)['"` ]/.test(src), 'Hand.tsx 里出现了不带 sj- 前缀的 hint/blame 类名');
+  assert.match(src, /' sj-hint'/);
+  assert.match(src, /' sj-blame'/);
+});
+
+test('出牌条下方的说明只有一行、而且永远占位，长高了会把手牌顶下去', async () => {
+  const tsx = await readFile(new URL('../client/sj/SjTable.tsx', import.meta.url), 'utf8');
+  const css = await readFile(new URL('../client/sj.css', import.meta.url), 'utf8');
+  // 三条说明（不合法的原因 / 打法提醒 / 唯一出法）必须是同一个三元链，不能各自成行
+  assert.equal((tsx.match(/className="sj-why-slot"/g) ?? []).length, 1);
+  assert.ok(!/<div className="sj-why"/.test(tsx), 'sj-why 应当是 slot 里的 span，不能自己占一个 div');
+  // 占位高度和行高必须成对出现，且数字对得上，否则空/满两态差几个像素
+  for (const [slot, line] of [['18px', '18px'], ['20px', '20px']]) {
+    assert.ok(css.includes(`min-height: ${slot}`), `sj.css 少了 min-height: ${slot}`);
+    assert.ok(css.includes(`line-height: ${line}`), `sj.css 少了 line-height: ${line}`);
+  }
 });

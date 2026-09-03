@@ -64,8 +64,8 @@ export function DeclareBar({
           ? iAmDeclarer
             ? `你亮了 ${trumpGlyph(room.trump.suit)}，别人要反必须更强`
             : `${declarer.name} 亮了 ${trumpGlyph(room.trump.suit)}（${strengthNote(room.trump.strength)}），反主必须严格更强`
-          : '无人亮主则翻底牌定主'}
-        {' · 扣完底还要挨个问一轮抄底'}
+          : '一个人都不亮，本局就默认无主'}
+        {declarer ? ' · 扣完底还要挨个问一轮抄底' : ' · 无主局没人能抄底，扣完直接开打'}
       </span>
     </div>
   );

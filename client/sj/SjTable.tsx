@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { EMOTES } from '../../shared/game.ts';
 import { GAME_META, ladderOf } from '../../shared/games.ts';
-import { SUIT_SYMBOL, cardFromId, levelLabel, sortSjHand } from '../../shared/sj/cards.ts';
-import type { SjCommand, SjPublicPlayer, SjPublicRoom, SjTrickRecord } from '../../shared/sj/engine.ts';
+import { SUIT_SYMBOL, cardFromId, levelLabel, sortSjHand, type SjCard } from '../../shared/sj/cards.ts';
+import {
+  SJ_DEAL_CARD_MS, SJ_DEAL_MS,
+  type SjCommand, type SjPublicPlayer, type SjPublicRoom, type SjTrickRecord,
+} from '../../shared/sj/engine.ts';
 import { suggest } from '../../shared/sj/bot.ts';
 import type { AccountInfo, AnyGameCommand, GameEvent } from '../../shared/protocol.ts';
 import { PlayingCard } from '../components/Card.tsx';
@@ -15,19 +18,20 @@ import { sound, voice } from '../sound.ts';
 import { ChaoBar } from './ChaoBar.tsx';
 import { DeclareBar } from './DeclareBar.tsx';
 import { Hand } from './Hand.tsx';
-import { KouDi, KouWaiting } from './KouDi.tsx';
+import { KOU_NEED, KouDi, KouWaiting } from './KouDi.tsx';
 import { Scoreboard, MiniBoard } from './Scoreboard.tsx';
 import { SjFx, type SjFxJob } from './SjFx.tsx';
 import { DeclaredCards, LastTrick, PlayZone } from './Trick.tsx';
 import { useCountUp } from './useCountUp.ts';
 import {
-  TRUMP_TINT, TRUMP_VOICE, checkPlay, ctxOf, declareVoice, handEndVoice, leadShape, leadText, playVoice,
-  seatBySpot, smartPickForCard, spotOf, teamOfSeat, throwFailText, trickPointsOf, trumpGlyph, trumpText,
-  type SjSpot,
+  HINT_LABEL, TRUMP_TINT, applySweep, blameCards, checkPlay, ctxOf, declareVoice,
+  fillCandidates, handEndVoice, hintModeOf, hintedIds, kouAdmit, leadShape, leadText, pickOne, pickUnit,
+  playVoice, seatBySpot, soleFollow, spotOf, teamOfSeat, throwFailText, trickPointsOf, trumpGlyph, trumpText, type SjSpot,
 } from './util.ts';
 
-/** 发牌动画的总长，和服务端的 SJ_DEAL_MS 是同一个数（45ms/张 × 25 张 + 余量） */
-const DEAL_MS = 4600;
+/** 扣底选满之后再点一张的提示语（SELECT-SCENARIOS K1） */
+const KOU_FULL_TIP = `已选满 ${KOU_NEED} 张，先放下一张`;
+
 /** 收圈：金边亮 300ms 后四手牌叠飞向赢家 */
 const COLLECT_MS = 1100;
 
@@ -208,6 +212,8 @@ export function SjTable({
   const [muted, setMuted] = useState(!sound.enabled);
   const [mutedVoice, setMutedVoice] = useState(!voice.enabled);
   const [dealAt, setDealAt] = useState(0);
+  /** 发牌过程中的重绘节拍：牌是按发牌序一张张到手的，不重绘就看不到它们进来 */
+  const [dealTick, setDealTick] = useState(0);
   const [collect, setCollect] = useState<{ id: number; rec: SjTrickRecord } | null>(null);
   /** 扣底：8 张底牌从桌心飞向庄家（DESIGN 3.5） */
   const [kouFly, setKouFly] = useState<{ id: number; to: SjSpot; ids: string[] } | null>(null);
@@ -240,11 +246,38 @@ export function SjTable({
   const selectedCards = useMemo(() => hand.filter((c) => selected.has(c.id)), [hand, selected]);
   const seats = useMemo(() => seatBySpot(room, mySeat), [room.players, mySeat]);
 
+  /**
+   * 发牌是**一张张**到手的，不是整手一次出现。
+   *
+   * 亮主窗口从第一张就开放，所以"这张牌到底发到没有"是有意义的规则：第 k 张（0-based）
+   * 在 `dealStartedAt + (k+1) * SJ_DEAL_CARD_MS` 到手，之前它不进扇子、也不能拿去亮主。
+   * 发牌序由服务端在 `room.dealOrder` 里单独留着（手牌本身早排过序了，看不出先后）；
+   * 老版本服务端没有这个字段时 `dealOrder` 是空数组 —— 那就退回"整手直接出现"的老行为。
+   */
+  const dealtIds = useMemo(() => {
+    const order = room.dealOrder;
+    if (room.phase !== 'dealing' || !order.length || room.dealStartedAt == null) return null;
+    const arrived = Math.floor((Date.now() - room.dealStartedAt) / SJ_DEAL_CARD_MS);
+    if (arrived >= order.length) return null;
+    return new Set(order.slice(0, Math.max(0, arrived)));
+    // dealTick 是节拍：它一变就重算「已经到手几张」
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.phase, room.dealOrder, room.dealStartedAt, dealTick]);
+  /** 已经飞到手里的牌。亮主条只认这一份 —— 还没到手的级牌不能拿去亮 */
+  const dealtHand = useMemo(() => (dealtIds ? hand.filter((c) => dealtIds.has(c.id)) : hand), [hand, dealtIds]);
+  /** 还在半空中的牌：交给 Hand 的 hidden，它们一到点就插进扇子，后面的牌顺势让位 */
+  const undealtIds = useMemo(
+    () => (dealtIds ? hand.filter((c) => !dealtIds.has(c.id)).map((c) => c.id) : []),
+    [hand, dealtIds],
+  );
+
   const myTurn = room.phase === 'playing' && room.turnSeat === mySeat;
   // 扣底的不一定是庄家：抄底成功的人也要重新扣一次（DESIGN 1.4b）
   const kouMine = room.phase === 'kou' && mySeat === room.kouSeat;
   // 出牌、扣底、抄底询问都走同一个 turnDeadline，快到点时补一记轻滴答
   useHurryTick(room.turnDeadline, myTurn || kouMine || (room.phase === 'chao' && room.chaoSeat === mySeat));
+  // 无人亮主时窗口是 8 秒，桌心得把这 8 秒读出来 —— 它是本局最后一次抢庄的机会（DESIGN 1.4）
+  const declareLeft = useCountdown(room.phase === 'declaring' ? room.declareEndsAt : null);
   const check = useMemo(
     () => checkPlay(hand, selectedCards, lead, ctx),
     [hand, selectedCards, lead, ctx.trump, ctx.level],
@@ -254,15 +287,35 @@ export function SjTable({
    * 建议出法（最多 5 个候选）。「提示」按钮循环它们，同时它的第一项就是**被动高亮**
    * 的那一手 —— 不点提示也知道该往哪儿选。只用自己的手牌和公开信息算，和机器人同源。
    */
+  // mySeat / trickNo 是判断「领先的是不是对家」「是不是该抢了」的依据，缺一不可
+  const suggestView = useMemo(
+    () => ({
+      trump: room.trump, trick: room.trick, playedIds: room.playedIds,
+      mySeat, trickNo: room.trickNo, voidGroups: room.voidGroups,
+      // 局势字段：机器人大脑（B 线程）用它们判断「该抢还是该垫」，多传不影响老签名
+      dealerSeat: room.dealerSeat, kouSeat: room.kouSeat,
+      defenderPoints: room.defenderPoints, handTrickPoints: room.handTrickPoints,
+    }),
+    [
+      room.trump, room.trick, room.playedIds, mySeat, room.trickNo, room.voidGroups,
+      room.dealerSeat, room.kouSeat, room.defenderPoints, room.handTrickPoints,
+    ],
+  );
   const hints = useMemo(
-    () => (myTurn
-      // mySeat / trickNo 是判断「领先的是不是对家」「是不是该抢了」的依据，缺一不可
-      ? suggest({
-        trump: room.trump, trick: room.trick, playedIds: room.playedIds,
-        mySeat, trickNo: room.trickNo, voidGroups: room.voidGroups,
-      }, hand, 5)
-      : []),
-    [myTurn, room.trick, room.playedIds, room.voidGroups, hand, room.trump, mySeat, room.trickNo],
+    () => (myTurn ? suggest(suggestView, hand, 5) : []),
+    [myTurn, suggestView, hand],
+  );
+  /** 那颗按钮此刻是「提示」还是「补齐」还是「换一手」 */
+  const hintMode = hintModeOf(selectedCards.length, check.ok);
+  /** 整手都被规则钉死的那一手（自动预选 + 「唯一出法」标注都用它） */
+  const sole = useMemo(
+    () => (myTurn ? soleFollow(hand, lead, ctx) : null),
+    [myTurn, hand, lead, ctx.trump, ctx.level],
+  );
+  /** 这一手不合法时该怪哪几张牌 —— 只指出来，不替用户改 */
+  const blamed = useMemo(
+    () => (myTurn && !check.ok ? blameCards(hand, selectedCards, lead, ctx) : undefined),
+    [myTurn, check.ok, hand, selectedCards, lead, ctx.trump, ctx.level],
   );
   /** 当前被建议的那一手，跟着「提示」的循环走 */
   const hintPick = hints.length ? hints[hintIdx % hints.length] : null;
@@ -271,19 +324,23 @@ export function SjTable({
   useEffect(() => setSelected(new Set()), [room.trickNo, room.phase, room.handNo]);
   useEffect(() => setHintIdx(0), [room.trickNo, room.turnSeat]);
   /**
-   * 唯一解自动预选：轮到我、而 `suggest` 去重之后只剩一种打法时（跟牌时很常见 ——
-   * 这门花色只剩一张、或者手里那一对必须整对跟出），直接把那一手选好。
+   * 唯一解自动预选：轮到我、而**规则本身**只允许一种出法时（这门花色只剩这么多张，
+   * 或者手里那一对非整对跟出不可），直接把那一手选好。
+   *
+   * 判据是 `forcedCompletion(hand, [], lead)` 而不是「机器人只给了一个建议」——
+   * 建议少不等于规则唯一，拿建议做预选就是替玩家做了决定。这里要求补齐出来的
+   * 张数正好等于该跟的张数，也就是**整手都被迫**，才动手。
    *
    * **只自动选，绝不自动出牌**：替人做决定和替人点确认是两回事，出牌永远等玩家按。
    * 依赖只有「轮次」，所以玩家把它取消掉之后不会又被选回来，不会粘住。
    */
   const turnKey = `${room.handNo}:${room.trickNo}:${room.trick.length}`;
   useEffect(() => {
-    if (!myTurn || hints.length !== 1) return;
-    const only = hints[0].map((c) => c.id);
+    if (!myTurn || !sole) return;
+    const only = sole.map((c) => c.id);
     // 函数式更新：清空选牌的那个 effect 排在前面，这里看到的一定是清空之后的状态
     setSelected((s) => (s.size ? s : new Set(only)));
-  }, [turnKey, myTurn, hints.length]);
+  }, [turnKey, myTurn]);
   /**
    * 结算面板等牌桌把这一拍演完再升起来（沿用炸金花开牌亮相的两拍节奏）。
    * 抠底那一段自己就要 4.4s，所以不是定长等待，而是等特效队列清空。
@@ -348,12 +405,6 @@ export function SjTable({
             kind: 'declare', trump: ev.trump, who: nameOf(ev.playerId),
             strength: ev.strength, reinforce: ev.reinforce,
           });
-          break;
-        }
-        case 'sj_flip': {
-          sound.play('flip');
-          voice.play('sj_flip', TRUMP_VOICE[ev.trump]);
-          pushFx({ kind: 'flip', card: ev.card, trump: ev.trump });
           break;
         }
         case 'sj_chao': {
@@ -498,42 +549,92 @@ export function SjTable({
     prevDecl.current = p && p.declaredIds.length ? { id: p.id, cards: p.declaredIds.map(cardFromId) } : null;
   }, [room.trump.declarerId, room.trump.cardIds.join(',')]);
 
-  /* 发牌动画只在开头那 4.6 秒里播 */
-  const dealing = dealAt > 0 && Date.now() - dealAt < DEAL_MS;
+  /* 发牌动画只在开头那一段里播（长度就是服务端的 SJ_DEAL_MS） */
+  const dealing = dealAt > 0 && Date.now() - dealAt < SJ_DEAL_MS;
   useEffect(() => {
     if (!dealAt) return;
-    const t = setTimeout(() => setDealAt(0), DEAL_MS);
+    const t = setTimeout(() => setDealAt(0), SJ_DEAL_MS);
     return () => clearTimeout(t);
   }, [dealAt]);
+  /* 发牌阶段按节拍重绘，牌才会一张张进来（服务端不会为每一张推一次事件） */
+  useEffect(() => {
+    if (room.phase !== 'dealing') return;
+    const t = setInterval(() => setDealTick((n) => n + 1), Math.round(SJ_DEAL_CARD_MS / 4));
+    return () => clearInterval(t);
+  }, [room.phase, room.handNo]);
 
   if (!me) return <div className="loading">正在回到牌桌…</div>;
 
   /* ---------------------------------------------------------- 交互 */
 
   /**
-   * 整组切换：组里只要还有没选中的就补齐，全都选中了才整组取消。
-   * Hand 会把智能识别出的对子/连对/整手跟牌作为一组传进来，所以自动配上的牌
-   * 再点其中任一张就能整组取消，不会出现「选不掉」的粘滞。
+   * 扣底封顶（SELECT-SCENARIOS K1）：选满 8 张之后**第 9 张点不上**，并说清为什么。
+   *
+   * 拦在这里而不是只把「确认扣底」变灰 —— 灰按钮只告诉玩家"不对"，不告诉他哪里不对；
+   * 一张牌点下去没反应还更糟，所以必须配一句提示。放下永远不拦（`next` 变小就直接放行）。
    */
-  const toggle = (ids: string[]) =>
-    setSelected((s) => {
-      const next = new Set(s);
-      const allOn = ids.every((id) => next.has(id));
-      for (const id of ids) allOn ? next.delete(id) : next.add(id);
-      return next;
-    });
-  const selectMany = (ids: string[]) =>
-    setSelected((s) => {
-      const next = new Set(s);
-      for (const id of ids) next.add(id);
-      return next;
-    });
+  const kouFull = (next: Set<string>) => {
+    if (!kouMine || next.size <= KOU_NEED) return false;
+    onToast(KOU_FULL_TIP);
+    return true;
+  };
 
+  /**
+   * 单击一张牌：**只动这一张**。
+   *
+   * 取消永远是纯粹的取消（哪怕这张是系统补上的，也一张张放得下）；选中之后才问一句
+   * 「规则允许它单独出现吗」—— `forcedCompletion` 返回的是所有合法出法的交集，
+   * 也就是**躲不开**的那些牌。规则不强迫就一张都不加，这不是启发式，是交集的推论。
+   */
+  const pickCard = (card: SjCard) => {
+    const next = pickOne(selected, hand, card, lead, ctx, room.phase === 'playing' && myTurn);
+    if (!kouFull(next)) setSelected(next);
+  };
+
+  /**
+   * 双击：用户主动要整个单位（最长拖拉机 > 对子 > 这一张），全选或全消。
+   *
+   * 双击的第一下已经走过 `pickCard` 把这张牌切换过一次了，所以「整组是不是已经选上」
+   * 要看**其余那几张**，否则整条连对双击一下会又被选回来，放不下。
+   */
+  const pickCardUnit = (card: SjCard) => {
+    const next = pickUnit(selected, hand, card, ctx);
+    if (!kouFull(next)) setSelected(next);
+  };
+
+  /**
+   * 按住横扫：Hand 已经把「扫过哪一段、是选还是消」算好了，这里照办。
+   *
+   * 扣底时封顶 —— 扫过头的那几张收不下，但**能收的先收下**（整段作废反而更莫名其妙），
+   * 只在真被截断时提示一句。取消永远不封顶。
+   */
+  const sweep = (ids: string[], mode: 'add' | 'remove') => {
+    if (kouMine && mode === 'add') {
+      const admit = kouAdmit(selected, ids, KOU_NEED);
+      if (admit.overflow) onToast(KOU_FULL_TIP);
+      return setSelected(applySweep(selected, admit.ids, 'add'));
+    }
+    setSelected(applySweep(selected, ids, mode));
+  };
+
+  /**
+   * 一颗按钮三种身份（DESIGN 3.4）：没选牌是「提示」，选了但凑不成一手是「补齐」，
+   * 已经合法就是「换一手」。
+   *
+   * 「补齐」只在**包含当前选中牌**的合法出法里找，玩家已经选的牌一张都不动 ——
+   * 一手都找不到就说明这几张凑不出合法的一手，那时候要说清楚，而不是偷偷把选中态换掉。
+   */
   const doHint = () => {
-    if (!hints.length) return onToast('这一手没有别的打法了');
-    const pick = hints[hintIdx % hints.length];
+    // 只有「补齐」要保住玩家已经选的牌；「提示」和「换一手」都是整手换掉，直接用建议列表。
+    // 补齐要在更宽的候选里找超集：5 个建议里未必有包含玩家已选牌的那一手
+    const pool = hintMode === 'fill'
+      ? fillCandidates(hand, selectedCards, lead, ctx, suggest(suggestView, hand, 60))
+      : hints;
+    if (!pool.length) {
+      return onToast(hintMode === 'fill' ? '这几张凑不成一手，先放下再提示' : '这一手没有别的打法了');
+    }
     setHintIdx((i) => i + 1);
-    setSelected(new Set(pick.map((c) => c.id)));
+    setSelected(new Set(pool[hintIdx % pool.length].map((c) => c.id)));
     sound.play('tap');
   };
 
@@ -746,7 +847,13 @@ export function SjTable({
               </div>
             )}
             {room.phase === 'dealing' && <div className="sj-status">发牌中 · 亮主已经开放</div>}
-            {room.phase === 'declaring' && <div className="sj-status">亮主窗口 · 无人亮主就翻底定主</div>}
+            {room.phase === 'declaring' && (
+              <div className="sj-status">
+                {room.trump.suit
+                  ? <>亮主窗口 · 已亮 <b>{trumpText(room.trump.suit, room.trump.level)}</b> · 反主要更强</>
+                  : <>无人亮主 · {declareLeft} 秒后默认<b>无主</b></>}
+              </div>
+            )}
             {room.phase === 'chao' && (
               <div className="sj-status">
                 抄底询问 · {trumpText(room.trump.suit, room.trump.level)}
@@ -775,7 +882,8 @@ export function SjTable({
           {(room.phase === 'dealing' || room.phase === 'declaring') && (
             <DeclareBar
               room={room}
-              hand={hand}
+              // 还在半空中的牌不能拿去亮主：亮主窗口从第一张就开，但你亮的必须是已经到手的牌
+              hand={dealtHand}
               onDeclare={(ids) => send({ type: 'declare', cardIds: ids })}
               onPass={() => send({ type: 'pass' })}
             />
@@ -811,7 +919,8 @@ export function SjTable({
               <TurnLine room={room} myTurn={myTurn} mySeat={mySeat} />
               <div className="sj-play-actions">
                 <button className="btn tier" disabled={!myTurn} onClick={doHint}>
-                  提示{hints.length > 1 ? ` ${(hintIdx % hints.length) + 1}/${hints.length}` : ''}
+                  {HINT_LABEL[hintMode]}
+                  {hintMode !== 'fill' && hints.length > 1 ? ` ${(hintIdx % hints.length) + 1}/${hints.length}` : ''}
                 </button>
                 <button className="btn primary sj-go" disabled={!myTurn || !check.ok} onClick={doPlay}>
                   {check.label}
@@ -826,26 +935,45 @@ export function SjTable({
                   看上一轮
                 </button>
               </div>
-              {myTurn && !check.ok && selectedCards.length > 0 && <div className="sj-why">{check.reason}</div>}
+              {/*
+                这一行**永远占位**，哪怕没话说也留着（`.sj-why-slot` 有 min-height）。
+                手机上手牌就贴在牌桌下面：让提示语随选牌出现/消失，整排手牌会跟着上下跳 26px ——
+                横扫到一半牌从手指底下溜走，正是「选牌绝不动牌」要挡住的那种事。
+                所以最多只显示一条，优先级：不合法的原因 > 打法提醒 > 唯一解。
+              */}
+              <div className="sj-why-slot">
+                {myTurn && !check.ok && selectedCards.length > 0
+                  ? <span className="sj-why">{check.reason}</span>
+                  : myTurn && check.ok && check.note
+                    ? <span className="sj-why note">{check.note}</span>
+                    : myTurn && sole
+                      ? <span className="sj-why note">这一手只有一种出法（可以点掉再点回来）</span>
+                      : null}
+              </div>
             </div>
           )}
         </div>
 
         {/* ------------------------------------------------ 手牌 */}
         {hand.length > 0 && room.phase !== 'lobby' && (
-          <div className={`sj-hand-wrap${dealing ? ' dealing' : ''}`}>
+          <div
+            className={`sj-hand-wrap${dealing ? ' dealing' : ''}`}
+            // 拿得到发牌序时错位由「到点才出现」本身给，CSS 不再另外排队；
+            // 老服务端没有 dealOrder 时退回按扇形下标错位，节奏同样是这一个常量
+            style={{ ['--sj-deal-step' as string]: `${room.dealOrder.length ? 0 : SJ_DEAL_CARD_MS}ms` }}
+          >
             <Hand
               cards={hand}
               selected={selected}
-              // 还没动手时把建议的那一手标出来；一旦开始选牌就撤掉，
-              // 免得金色描边和选中的金边混在一起分不清哪个是自己选的
-              hinted={myTurn && !selected.size && hintPick ? new Set(hintPick.map((c) => c.id)) : undefined}
-              hidden={kouFly?.to === 'me' ? new Set(kouFly.ids) : undefined}
-              onToggle={toggle}
-              onSelectMany={selectMany}
-              pickForCard={room.phase === 'playing' && myTurn
-                ? (card) => smartPickForCard(hand, card, lead, ctx, hints)
+              hinted={hintedIds(myTurn, selected.size, hintPick)}
+              blamed={blamed}
+              hidden={undealtIds.length || kouFly?.to === 'me'
+                ? new Set([...undealtIds, ...(kouFly?.to === 'me' ? kouFly.ids : [])])
                 : undefined}
+              dealing={dealing}
+              onPick={pickCard}
+              onPickUnit={pickCardUnit}
+              onSweep={sweep}
               rows={typeof window !== 'undefined' && window.innerWidth <= 780 ? 2 : 1}
               disabled={room.phase === 'playing' && !myTurn}
               lifted={myTurn || kouMine}

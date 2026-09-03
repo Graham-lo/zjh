@@ -9,6 +9,7 @@ import { sumPoints } from '../shared/sj/cards.ts';
 import { GameError } from '../shared/game.ts';
 import { ladderOf } from '../shared/games.ts';
 import { SJ_DECL_TIER, legalDeclarations } from '../shared/sj/rules.ts';
+import { SJ_DECLARE_MS, SJ_DECLARE_QUIET_MS } from '../shared/sj/engine.ts';
 import {
   h, ids, makeSjRoom, mulberry32, playHand, playOutTricks, runChao, runDeclaring, runToPlaying,
 } from './sj-helpers.ts';
@@ -28,11 +29,10 @@ function assertNoHandLeak(room: SjRoomState) {
     const view = sanitizeSjRoom(room, viewer.id);
     const json = JSON.stringify(view);
     assert.ok(!json.includes('tokenHash'), '视图里不该有登录凭证');
-    // 亮主的牌明牌摆在座位前、翻底那张全场看过 —— 这两类是规范要求公开的
+    // 亮主的牌明牌摆在座位前 —— 这一类是规范要求公开的
     const shownByDesign = new Set<string>([
       ...room.trump.cardIds,
       ...room.players.flatMap((p) => p.declaredIds),
-      ...(room.flipped ? [room.flipped.id] : []),
     ]);
     for (const other of room.players) {
       if (other.id === viewer.id) continue;
@@ -45,23 +45,6 @@ function assertNoHandLeak(room: SjRoomState) {
       }
     }
   }
-}
-
-/** 把某张牌换到底牌第一张，同时保持全场 108 张不重不漏 —— 翻底定主的用例要用 */
-function forceBottomFirst(room: SjRoomState, id: string) {
-  const inBottom = room.bottom.findIndex((c) => c.id === id);
-  if (inBottom >= 0) {
-    [room.bottom[0], room.bottom[inBottom]] = [room.bottom[inBottom], room.bottom[0]];
-    return;
-  }
-  for (const p of room.players) {
-    const i = p.hand.findIndex((c) => c.id === id);
-    if (i >= 0) {
-      [p.hand[i], room.bottom[0]] = [room.bottom[0], p.hand[i]];
-      return;
-    }
-  }
-  throw new Error(`牌堆里找不到 ${id}`);
 }
 
 /**
@@ -190,24 +173,51 @@ test('亮主形式非法时报错', () => {
   assert.throws(() => applySjCommand(room, p0.id, { type: 'declare', cardIds: ['H5a'] }, o), /不在你手里/);
 });
 
-test('四个人都不亮就立刻翻底定主，房主坐庄', () => {
+test('四个人都不亮就立刻结束窗口，默认无主、房主坐庄', () => {
   const { room, o } = started();
   finishDealing(room, o);
-  forceBottomFirst(room, 'HAa');
   for (const p of room.players) applySjCommand(room, p.id, { type: 'pass' }, o);
   assert.equal(room.phase, 'kou', '四个人都不亮，窗口立即结束');
-  assert.equal(room.trump.suit, 'H');
+  assert.equal(room.trump.suit, 'NT', '不再翻底定主：没人亮就是无主');
   assert.equal(room.trump.declarerId, null);
-  assert.equal(room.flipped?.id, 'HAa', '翻出来那张全场可见');
+  assert.equal(room.trump.strength, 0);
+  assert.equal(room.flipped, null, '底牌一张都不翻');
   assert.equal(room.dealerSeat, 0, '无人亮主则房主坐庄');
+  assert.equal(room.bottom.length, 0, '底牌整副交给庄家扣，不留一张在桌上');
 });
 
-test('翻到王就是无主', () => {
-  const { room, o } = started();
+test('无人亮主的窗口是 8 秒，有人亮了才缩回 3 秒', () => {
+  const quiet = started(7);
+  finishDealing(quiet.room, quiet.o);
+  assert.equal(
+    quiet.room.declareEndsAt, quiet.o.now + SJ_DECLARE_QUIET_MS,
+    '一个人都没亮：这 8 秒是本局最后一次抢庄的机会',
+  );
+
+  const loud = started(7);
+  const p2 = loud.room.players[2];
+  p2.hand = h('H5a S6a S7a S8a');
+  applySjCommand(loud.room, p2.id, { type: 'declare', cardIds: ['H5a'] }, loud.o);
+  finishDealing(loud.room, loud.o);
+  assert.equal(
+    loud.room.declareEndsAt, loud.o.now + SJ_DECLARE_MS,
+    '已经有人亮了：窗口只用留够别人反主，每次有效反主再各自 +2s',
+  );
+});
+
+test('无人亮主的一局跳过抄底：扣完底直接开打，谁都不能再抄', () => {
+  const { room, o } = started(8);
   finishDealing(room, o);
-  forceBottomFirst(room, 'JBa');
-  closeDeclaring(room, o);
+  for (const p of room.players) applySjCommand(room, p.id, { type: 'pass' }, o);
   assert.equal(room.trump.suit, 'NT');
+  assert.equal(room.kouSeat, room.dealerSeat);
+  timeoutKou(room, o);
+  assert.equal(room.phase, 'playing', '没人亮过主，就没有「比现在更强」可抄');
+  assert.equal(room.chaoSeat, null);
+  assert.equal(room.turnSeat, room.dealerSeat, '首出是庄家');
+  assert.equal(room.bottom.length, 8, '底牌照常扣满 8 张');
+  const dealer = room.players[room.dealerSeat];
+  assert.throws(() => applySjCommand(room, dealer.id, { type: 'chao', cardIds: [] }, o), /不是抄底阶段/);
 });
 
 test('首局庄家由亮主决定', () => {
@@ -290,9 +300,12 @@ function atChao(seed = 1, handNo = 2) {
   room.dealerSeat = 0;
   room.kouSeat = 0;
   room.chaoDirty = false;
+  // 抄底阶段只在**有人亮过主**时才存在（无人亮主的默认无主局整个跳过），
+  // 所以底座得是一个真的亮主：庄家亮了单张 ♦5，1 档
+  room.phase = 'chao';
   room.chaoSeat = 1;
   room.turnSeat = 1;
-  room.trump = { suit: 'D', level: 5, declarerId: null, strength: 0, cardIds: [] };
+  room.trump = { suit: 'D', level: 5, declarerId: room.players[0].id, strength: 1, cardIds: [] };
   for (const p of room.players) p.declaredIds = [];
   return { room, o };
 }
@@ -312,7 +325,7 @@ function buryEight(room: SjRoomState, o: ReturnType<typeof opts>, keep: string[]
 test('抄底：依次询问 → 有人抄就重新扣底再接着问 → 一轮没人抄才开打', () => {
   const { room, o } = atChao(31);
   const [p0, p1, p2, p3] = room.players;
-  forceIntoHand(room, 1, 'H5a');
+  for (const id of ['H5a', 'H5b']) forceIntoHand(room, 1, id);
   for (const id of ['S5a', 'S5b']) forceIntoHand(room, 2, id);
   for (const id of ['JBa', 'JBb']) forceIntoHand(room, 3, id);
 
@@ -321,11 +334,11 @@ test('抄底：依次询问 → 有人抄就重新扣底再接着问 → 一轮�
   assert.throws(() => applySjCommand(room, p2.id, { type: 'chao', cardIds: ['S5a', 'S5b'] }, o), /还没轮到你/);
   assert.throws(() => applySjCommand(room, p0.id, { type: 'pass_chao' }, o), /还没轮到你/);
 
-  // 1 座抄底：翻底定主是 0 档，单张级牌（1 档）就抄得动
-  applySjCommand(room, p1.id, { type: 'chao', cardIds: ['H5a'] }, o);
+  // 1 座抄底：庄家亮的是单张（1 档），一对红桃级牌（4 档）压得过去
+  applySjCommand(room, p1.id, { type: 'chao', cardIds: ['H5a', 'H5b'] }, o);
   assert.equal(room.trump.suit, 'H', '主变成抄底者亮的花色');
   assert.equal(room.trump.declarerId, p1.id, '抄底视同反主');
-  assert.deepEqual(p1.declaredIds, ['H5a'], '抄出来的牌明牌摆在座位前');
+  assert.deepEqual(p1.declaredIds.slice().sort(), ['H5a', 'H5b'], '抄出来的牌明牌摆在座位前');
   assert.equal(room.phase, 'kou');
   assert.equal(room.kouSeat, 1, '抄底者拿走底牌重扣，扣底的不是庄家');
   assert.equal(room.dealerSeat, 0, '第二局起抄底不换庄');
@@ -847,7 +860,7 @@ test('老快照的反主级别会从 4 档换算成 7 档，而且只换算一�
   assert.equal(snapshot({ suit: 'NT', strength: 3 }).trump.strength, SJ_DECL_TIER.joker_s);
   assert.equal(snapshot({ suit: 'NT', strength: 4 }).trump.strength, SJ_DECL_TIER.joker_b);
   assert.equal(snapshot({ suit: 'H', strength: 1 }).trump.strength, 1, '单张这一档没变');
-  assert.equal(snapshot({ suit: 'H', strength: 0 }).trump.strength, 0, '翻底定主这一档没变');
+  assert.equal(snapshot({ suit: 'H', strength: 0 }).trump.strength, 0, '0 档（无人亮主）没变');
   assert.equal(snapshot({ suit: 'S', strength: 2 }).kouSeat, 2, '老快照停在扣底就是庄家在扣');
 
   // 判据是 kouSeat：新快照已经是 7 档语义，绝不能再换算一次
@@ -869,9 +882,8 @@ test('事件从前后两份状态里派生出来，够客户端演一遍', () =>
 
   before = structuredClone(room);
   finishDealing(room, o);
-  closeDeclaring(room, o); // 没人亮主 → 翻底定主
-  events = deriveSjEvents(before, room, '', null);
-  assert.equal(events.filter((e) => e.k === 'sj_flip').length, 1, '翻底定主要有事件');
+  closeDeclaring(room, o); // 没人亮主 → 默认无主，不翻底、不发事件
+  assert.equal(room.trump.suit, 'NT');
 
   before = structuredClone(room);
   timeoutKou(room, o);

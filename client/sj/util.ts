@@ -5,9 +5,10 @@
  * 跟牌合法性（甩牌除外，那要别人的手牌，由服务端裁决），所以这里不重写任何规则。
  */
 import {
-  SUIT_NAME, SUIT_SYMBOL, cardFromId, cardsLabel, groupOf, levelLabel, sumPoints,
+  SUIT_NAME, SUIT_SYMBOL, cardFromId, cardOrder, cardsLabel, groupOf, levelLabel, sumPoints,
   type SjCard, type SjCtx, type SjPlainSuit, type SjTrumpSuit,
 } from '../../shared/sj/cards.ts';
+import { forcedCompletion, legalFollowsContaining } from '../../shared/sj/complete.ts';
 import type { SjPublicPlayer, SjPublicRoom, SjTrumpState } from '../../shared/sj/engine.ts';
 import { allPairs, allTractors, cardsInGroup, parseShape, type SjShape } from '../../shared/sj/units.ts';
 import {
@@ -199,6 +200,11 @@ export interface PlayCheck {
   label: string;
   /** 不合法时按钮下方那一行说明 */
   reason: string;
+  /**
+   * 合法、但**出之前该知道一句**的提醒：甩牌可能被管上罚分、这一手是"毙"。
+   * 和 `reason` 分开：那个是"不让出"，这个是"能出，但你知道自己在干什么吗"。
+   */
+  note: string;
   shape: SjShape | null;
 }
 
@@ -211,51 +217,175 @@ function labelOf(shape: SjShape): string {
 
 /** 当前选中的牌能不能出，以及按钮该写什么（DESIGN 3.4） */
 export function checkPlay(hand: SjCard[], selected: SjCard[], lead: SjShape | null, ctx: SjCtx): PlayCheck {
-  if (!selected.length) return { ok: false, label: '出牌', reason: lead ? `跟 ${lead.count} 张` : '先选牌', shape: null };
+  if (!selected.length) {
+    return { ok: false, label: '出牌', reason: lead ? `跟 ${lead.count} 张` : '先选牌', note: '', shape: null };
+  }
   const shape = parseShape(selected, ctx);
   if (!lead) {
     const check = validateLead(selected, ctx);
-    if (!check.ok) return { ok: false, label: '出牌', reason: check.reason, shape: null };
-    return { ok: true, label: labelOf(shape!), reason: '', shape };
+    if (!check.ok) return { ok: false, label: '出牌', reason: check.reason, note: '', shape: null };
+    // 甩牌成不成要看别人的手牌，客户端拦不住也不该拦 —— 但按之前得先把风险说清楚
+    const note = shape!.isThrow ? '甩牌：只要有一家管得上其中一个单位，就要罚 10 分' : '';
+    return { ok: true, label: labelOf(shape!), reason: '', note, shape };
   }
   const check = validateFollow(hand, lead, selected, ctx);
-  if (!check.ok) return { ok: false, label: `出牌 · ${selected.length} 张`, reason: check.reason, shape };
-  return { ok: true, label: shape ? labelOf(shape) : `跟牌 · ${selected.length} 张`, reason: '', shape };
+  if (!check.ok) return { ok: false, label: `出牌 · ${selected.length} 张`, reason: check.reason, note: '', shape };
+  // 缺门时整手主牌就是"毙"：这一圈的分要么被自己吃下，要么被后面的人盖毙抢走
+  const bi = lead.group !== 'T' && selected.every((c) => groupOf(c, ctx) === 'T');
+  return {
+    ok: true,
+    label: shape ? labelOf(shape) : `跟牌 · ${selected.length} 张`,
+    reason: '',
+    note: bi ? '毙：用主牌吃这一圈，后面的人还能盖毙' : '',
+    shape,
+  };
 }
 
-/* ------------------------------------------------------------ 智能点选 */
+/* ---------------------------------------------------------- 选牌（纯函数） */
 
 /**
- * 单击一张牌时应该预选的完整单位/出法。
+ * 单击一张牌之后的新选中集：**只动这一张**。
  *
- * 首出按“最长连对 > 对子 > 单张”扩展；跟牌先采用收益排序里包含该牌的合法整手，
- * 再按必须跟的拖拉机/对子结构补一个本地兜底。这里只改变选中态，绝不替玩家提交出牌。
+ * 取消永远是纯粹的取消（系统补上的牌也一张张放得下）；选中之后才问一句「规则允许它
+ * 单独出现吗」—— `forcedCompletion` 给的是所有合法出法的交集，也就是躲不开的那些牌。
+ * `complete=false`（不在出牌回合、或者在扣底）时连问都不问。
  */
-export function smartPickForCard(
-  hand: SjCard[], clicked: SjCard, lead: SjShape | null, ctx: SjCtx,
-  ranked: readonly SjCard[][] = [],
-): string[] {
-  if (lead) {
-    const rankedHit = ranked.find((cards) => cards.some((c) => c.id === clicked.id));
-    if (rankedHit) return rankedHit.map((c) => c.id);
+export function pickOne(
+  selected: Set<string>, hand: SjCard[], card: SjCard, lead: SjShape | null, ctx: SjCtx,
+  complete = true,
+): Set<string> {
+  const next = new Set(selected);
+  if (next.has(card.id)) {
+    next.delete(card.id);
+    return next;
+  }
+  next.add(card.id);
+  if (!complete || !lead) return next;
+  const must = hand.filter((c) => next.has(c.id));
+  for (const c of forcedCompletion(hand, must, lead, ctx) ?? []) next.add(c.id);
+  return next;
+}
 
-    const groupCards = cardsInGroup(hand, lead.group, ctx);
-    if (groupCards.length >= lead.count && groupCards.some((c) => c.id === clicked.id)) {
-      const req = followRequirement(groupCards, lead, ctx);
-      for (const span of req.tractors.slice().sort((a, b) => b - a)) {
-        const tractor = allTractors(hand, lead.group, ctx)
-          .filter((u) => u.span === span && u.cards.some((c) => c.id === clicked.id))
-          .sort((a, b) => b.span - a.span || a.top - b.top)[0];
-        if (tractor) return tractor.cards.map((c) => c.id);
-      }
-      if (req.pairs > 0) {
-        const pair = allPairs(hand, lead.group, ctx).find((u) => u.cards.some((c) => c.id === clicked.id));
-        if (pair) return pair.cards.map((c) => c.id);
-      }
-    }
-    return [clicked.id];
+/**
+ * 双击一张牌之后的新选中集：整个单位一起选上或一起放下。
+ *
+ * 双击的第一下已经走过 `pickOne` 把这张牌切换过一次了，所以「整组是不是已经选上」
+ * 看的是**其余那几张** —— 否则整条连对双击一下会又被选回来，放不下。
+ */
+export function pickUnit(selected: Set<string>, hand: SjCard[], card: SjCard, ctx: SjCtx): Set<string> {
+  const ids = unitPickForCard(hand, card, ctx);
+  const rest = ids.filter((id) => id !== card.id);
+  const next = new Set(selected);
+  const allOn = rest.length > 0 && rest.every((id) => next.has(id));
+  for (const id of ids) allOn ? next.delete(id) : next.add(id);
+  return next;
+}
+
+/**
+ * 被动建议（`hinted`）什么时候画：只在轮到我、而且我一张都还没选的时候。
+ *
+ * 一旦开始选牌就撤掉 —— 金色选中态和淡蓝建议描边同时挂在扇子上，
+ * 分不清哪个是自己选的；而且已选的牌和建议候选往往根本不兼容。
+ */
+export function hintedIds(
+  myTurn: boolean, selectedCount: number, hintPick: readonly SjCard[] | null,
+): Set<string> | undefined {
+  if (!myTurn || selectedCount > 0 || !hintPick?.length) return undefined;
+  return new Set(hintPick.map((c) => c.id));
+}
+
+/** 横扫的模式由**按下的那一张**决定：没选中就是选，已选中就是取消 */
+export const sweepModeOf = (selected: Set<string>, id: string): 'add' | 'remove' =>
+  (selected.has(id) ? 'remove' : 'add');
+
+/** 横扫提交：扫过的那一段整体选上或整体放下，绝不补齐（用户是一张张扫过来的） */
+export function applySweep(selected: Set<string>, ids: string[], mode: 'add' | 'remove'): Set<string> {
+  const next = new Set(selected);
+  for (const id of ids) mode === 'add' ? next.add(id) : next.delete(id);
+  return next;
+}
+
+/**
+ * 扣底封顶（SELECT-SCENARIOS K1）。
+ *
+ * 扣底要的是**正好 8 张**，多选一张毫无意义 —— 所以第 9 张干脆点不上，
+ * 而不是让它选上去、只把确认按钮变灰（那样玩家得自己数数才知道哪里不对）。
+ * 横扫也走这里：能收几张收几张，收不下的那几张原样留着，**已经选上的一张都不动**。
+ *
+ * @returns `ids` 是真正收得下的那几张；`overflow` 为真表示有牌被挡下来了，调用方该提示一句。
+ */
+export function kouAdmit(
+  selected: Set<string>,
+  ids: string[],
+  need: number,
+): { ids: string[]; overflow: boolean } {
+  const take: string[] = [];
+  let left = need - selected.size;
+  let overflow = false;
+  for (const id of ids) {
+    if (selected.has(id)) continue;    // 已经在里面的不占额度
+    if (left <= 0) { overflow = true; continue; }
+    take.push(id);
+    left -= 1;
+  }
+  return { ids: take, overflow };
+}
+
+/**
+ * 这一手**整手都被规则钉死**时的那一手，否则 null（自动预选与「唯一出法」标注都用它）。
+ *
+ * 判据是 `forcedCompletion(空集)` 补出的张数正好等于该跟的张数 —— 部分被迫不算。
+ */
+export function soleFollow(hand: SjCard[], lead: SjShape | null, ctx: SjCtx): SjCard[] | null {
+  if (!lead) return null;
+  const forced = forcedCompletion(hand, [], lead, ctx);
+  return forced && forced.length === lead.count ? forced : null;
+}
+
+/**
+ * 选的这一手不合法时，**该怪哪几张牌**（界面上给它们描一圈警示色）。
+ *
+ * 只说明原因，绝不替用户改选择：光一句「有对子必须出对子」找不到是哪几张，
+ * 25 张牌的扇子里挨个数太慢了。
+ */
+export function blameCards(
+  hand: SjCard[], selected: SjCard[], lead: SjShape | null, ctx: SjCtx,
+): Set<string> {
+  const out = new Set<string>();
+  if (!lead || !selected.length || validateFollow(hand, lead, selected, ctx).ok) return out;
+
+  const handG = cardsInGroup(hand, lead.group, ctx);
+  const sel = new Set(selected.map((c) => c.id));
+  const playG = cardsInGroup(selected, lead.group, ctx);
+  // 该门没出全（不够就得全出，够了就得全用该门填）：还没选上的该门牌都是问题
+  if (handG.length < lead.count || playG.length !== lead.count) {
+    for (const c of handG) if (!sel.has(c.id)) out.add(c.id);
+    return out;
   }
 
+  // 张数、门都对，那就是结构没跟上：把该出的连对 / 对子指出来
+  const req = followRequirement(handG, lead, ctx);
+  for (const span of req.tractors) {
+    for (const u of allTractors(hand, lead.group, ctx)) {
+      if (u.span >= span) for (const c of u.cards) out.add(c.id);
+    }
+  }
+  if (!out.size && req.pairs > 0) {
+    for (const u of allPairs(hand, lead.group, ctx)) for (const c of u.cards) out.add(c.id);
+  }
+  return out;
+}
+
+/* -------------------------------------------------------------- 双击整单位 */
+
+/**
+ * 双击一张牌要选中的**整个单位**：包含它的最长拖拉机 > 对子 > 这一张。
+ *
+ * 注意这是**双击**才有的行为，而且和跟牌规则无关 —— 它纯粹是"少点几下"的便利，
+ * 不是替玩家做判断。单击永远只动一张牌（被迫补齐除外，见 `shared/sj/complete.ts`），
+ * 双击选出来的每一张也都能再单击一张张放下。
+ */
+export function unitPickForCard(hand: SjCard[], clicked: SjCard, ctx: SjCtx): string[] {
   const group = groupOf(clicked, ctx);
   const tractor = allTractors(hand, group, ctx)
     .filter((u) => u.cards.some((c) => c.id === clicked.id))
@@ -263,6 +393,52 @@ export function smartPickForCard(
   if (tractor) return tractor.cards.map((c) => c.id);
   const pair = allPairs(hand, group, ctx).find((u) => u.cards.some((c) => c.id === clicked.id));
   return pair ? pair.cards.map((c) => c.id) : [clicked.id];
+}
+
+/* ------------------------------------------------------------ 提示 / 补齐 */
+
+/**
+ * 那颗按钮此刻是什么按钮（DESIGN 3.4）。
+ *
+ * 一颗按钮三种身份，取决于当前选中态 ——
+ * - `hint`：没选牌，给完整的建议出法；
+ * - `fill`：选了几张但还凑不成一手，把它补成合法的一手（保留已选的牌）；
+ * - `swap`：已经是合法的一手了，换下一种同样合法的打法。
+ */
+export type SjHintMode = 'hint' | 'fill' | 'swap';
+
+export function hintModeOf(selectedCount: number, ok: boolean): SjHintMode {
+  if (selectedCount === 0) return 'hint';
+  return ok ? 'swap' : 'fill';
+}
+
+export const HINT_LABEL: Record<SjHintMode, string> = { hint: '提示', fill: '补齐', swap: '换一手' };
+
+/**
+ * 「补齐」的候选：**包含当前选中牌**的合法整手，好的排前面。
+ *
+ * 先在机器人给的收益排序 `ranked` 里找超集 —— 那是带了局势判断的顺序，比任何本地
+ * 启发式都强。找不到才自己枚举（`legalFollowsContaining`），按"不带分优先、牌小优先"
+ * 排序：补齐是在玩家没主意的时候帮他凑一手合法的，默认应该是最保守的垫牌，
+ * 而不是替他把大牌扔出去。
+ */
+export function fillCandidates(
+  hand: SjCard[], selected: SjCard[], lead: SjShape | null, ctx: SjCtx,
+  ranked: readonly SjCard[][] = [],
+): SjCard[][] {
+  if (!lead) return [];
+  const need = new Set(selected.map((c) => c.id));
+  const hits = ranked.filter((cards) => {
+    if (cards.length !== lead.count) return false;
+    const ids = new Set(cards.map((c) => c.id));
+    for (const id of need) if (!ids.has(id)) return false;
+    return true;
+  });
+  if (hits.length) return hits.map((cards) => cards.slice());
+
+  return legalFollowsContaining(hand, selected, lead, ctx)
+    .sort((a, b) => sumPoints(a) - sumPoints(b)
+      || a.reduce((n, c) => n + cardOrder(c, ctx), 0) - b.reduce((n, c) => n + cardOrder(c, ctx), 0));
 }
 
 /* ------------------------------------------------------------ 甩牌失败文案 */

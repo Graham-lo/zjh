@@ -337,9 +337,9 @@ export class Hub {
 
   /**
    * 升级的定时表（DESIGN 2.5）：
-   * dealing 4.6s → declaring 3s（每次有效亮主 +2s）→ kou 45s → chao 每人 12s
-   * （有人抄成就回 kou 重扣，扣完接着问）→ 出牌 turnSeconds → hand_end 9s；
-   * 机器人（含掉线代打）思考 500–1100ms。
+   * dealing 10.6s（其间随时可亮主）→ declaring 3s / 无人亮时 8s（每次有效亮主 +2s）
+   * → kou 45s → chao 每人 12s（有人抄成就回 kou 重扣，扣完接着问）
+   * → 出牌 turnSeconds → hand_end 9s；机器人思考时长见 BRAIN-DESIGN §7。
    */
   private armSj(room: Room) {
     const s = room.state as SjRoomState;
@@ -348,6 +348,12 @@ export class Hub {
 
     if (s.phase === 'dealing') {
       const at = (s.dealStartedAt ?? now) + SJ_DEAL_MS;
+      // 电脑也是**边发边亮**的：牌一张一张进手，够档了就当场拍下去（BRAIN-DESIGN §5.1）。
+      // 只有那一刻还在发牌窗口里才排；晚于发完就交给 declaring 阶段兜底。
+      const move = eng.bot(s);
+      if (move && now + move.delay < at) {
+        return this.later(room, Math.max(0, move.delay), () => this.runSjBot(room, move));
+      }
       return this.later(room, Math.max(60, at - now), () => this.sjStep(room, finishDealing));
     }
     if (s.phase === 'declaring') {
@@ -393,6 +399,12 @@ export class Hub {
     } catch {
       // 决策和状态对不上时退回一个一定合法的动作，绝不让牌桌卡死
       try {
+        // 发牌途中亮失败（比如被别人抢先反了）就退回"等发完"，这里绝不能 pass ——
+        // 一 pass 等于替他放弃了整个亮主窗口。也不能只 arm：那会立刻算出同一步再失败一次。
+        if (s.phase === 'dealing') {
+          const at = (s.dealStartedAt ?? Date.now()) + SJ_DEAL_MS;
+          return this.later(room, Math.max(60, at - Date.now()), () => this.sjStep(room, finishDealing));
+        }
         if (s.phase === 'declaring') eng.apply(s, move.actorId, { type: 'pass' } satisfies SjCommand);
         else if (s.phase === 'chao') eng.apply(s, move.actorId, { type: 'pass_chao' } satisfies SjCommand);
         else if (eng.timeout(s)) {

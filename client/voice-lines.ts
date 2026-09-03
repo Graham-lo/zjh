@@ -57,7 +57,6 @@ export const SJ_VOICE_LINES = {
   sj_reinforce: { text: '加固', rate: 1.1 },
   sj_fanzhu: { text: '反主！', rate: 1.4, pitch: 1.3, volume: 1 },
   sj_nt: { text: '无主！', rate: 1.4, pitch: 1.35, volume: 1 },
-  sj_flip: { text: '翻底定主', rate: 1.05 },
   sj_chao: { text: '抄底！', rate: 1.45, pitch: 1.4, volume: 1 },
   sj_kou: { text: '扣底', rate: 1.05 },
   /* 出牌 */

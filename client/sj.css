@@ -397,7 +397,16 @@
 .sj-play-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: center; }
 .sj-go { padding: 14px 26px; font-size: 15px; min-width: 200px; }
 /* 不合法时下方一行说明原因（DESIGN 3.4） */
-.sj-why { flex-basis: 100%; text-align: center; font-size: 12px; color: var(--gold-2); }
+.sj-why-slot {
+  flex-basis: 100%; display: flex; align-items: center; justify-content: center;
+  /* 空着也占一行高：提示语进出不能把整排手牌顶上顶下（DESIGN 3.4） */
+  min-height: 18px;
+}
+/* line-height 写死：留白高度必须和真实行高一模一样，差 2px 也会让整排手牌抖一下 */
+.sj-why { text-align: center; font-size: 12px; line-height: 18px; color: var(--gold-2); }
+/* 「能出，但你知道自己在干什么吗」那一句：甩牌风险、毙、唯一出法。
+   和"不让出"的原因分色，免得两种意思长得一样 */
+.sj-why.note { color: rgba(180, 205, 235, 0.9); }
 .sj-play-bar.is-turn { border-color: rgba(227, 200, 143, 0.5); }
 
 .sj-rules { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: center; font-size: 12px; color: var(--dim); }
@@ -428,42 +437,88 @@
 /* 轮到我：整手牌轻轻上浮 6px */
 .sj-hand.is-turn { transform: translateY(-6px); }
 .sj-hand.is-off { opacity: 0.72; }
-.sj-hand-row { display: flex; align-items: flex-end; justify-content: center; }
+/* 指针事件全挂在行上（按 x 框选），所以这一层要吃掉滚动手势和文本选中 */
+.sj-hand-row {
+  display: flex; align-items: flex-end; justify-content: center;
+  touch-action: none; user-select: none; -webkit-user-select: none;
+}
 
 /*
   牌之间是负边距重叠的，每张露在外面的只有左边一条窄边。所以命中区（button）
   的几何**只由扇形决定，绝不因悬浮/选中而变** —— 命中区一动，指针就会在
   「抬起→离开→落下→再进入」之间抖，想点的那张牌从指针底下跑掉。
-  会动的全在里面两层：.sj-hand-card-flip 归 FLIP 重排，.sj-hand-card-lift 归抬起。
-  顶部的 padding 要盖住最大抬起量，否则选中的牌抬上去之后顶部那块点不到、取消不了。
+  会动的只有 .sj-hand-card-flip（FLIP 重排）和发牌时的 .sj-hand-card-lift。
+
+  选中态**一律不动牌**：抬起 14px 或者提 z-index 都会让左邻盖住这张牌唯一露出来的
+  那条左窄边 —— 「左右浮起来、中间那张看不见」就是这么来的。顶部原来为抬起预留的
+  padding 也一并去掉，只留 ✓ 角标要的 3px。
 */
 .sj-hand-card {
   flex: none; background: none; border: 0; cursor: pointer; border-radius: 8px;
-  padding: calc(var(--sj-lift, 14px) + 2px) 0 0;
+  padding: 3px 0 0;
   transform: translateY(var(--dy, 0px)) rotate(var(--rot, 0deg));
   /* 只在扇形本身变了（张数变化导致重新分布）时过渡，交互不碰它 */
   transition: transform 0.24s var(--spring);
 }
 .sj-hand-card-flip, .sj-hand-card-lift { display: block; }
-.sj-hand-card-lift { transition: transform 0.24s var(--spring); }
+.sj-hand-card-lift { position: relative; }
 .sj-hand-card + .sj-hand-card { margin-left: calc(var(--step, 32px) - var(--sj-card-hand-w)); }
 /* 手牌**没有悬浮态**：鼠标移过去不亮、不描边、不抬起。反馈只在点下去之后（.on）给。
    :focus-visible 是键盘可达性，不是悬浮，保留。 */
 .sj-hand-card:focus-visible { outline: none; z-index: 4; }
 .sj-hand-card:focus-visible .pc-face { box-shadow: 0 0 0 3px var(--sj-blue, #6ec1ff); }
-/* 选中抬起 14px + 金边 */
-.sj-hand-card.on { z-index: 3; }
-.sj-hand-card.on .sj-hand-card-lift { transform: translateY(calc(-1 * var(--sj-lift, 14px))); }
-.sj-hand-card.on .pc-face { box-shadow: 0 0 0 2px var(--gold), 0 16px 28px rgba(0, 0, 0, 0.65); }
-.sj-hand-card.hint .pc-face { box-shadow: 0 0 0 2px rgba(243, 224, 176, 0.55); }
-.sj-hand-card.hint.on .pc-face { box-shadow: 0 0 0 2px var(--gold), 0 16px 28px rgba(0, 0, 0, 0.65); }
 .sj-hand-card:disabled { cursor: default; }
 
-/* 发牌：逐张从桌心飞出，45ms 一张，落地即翻面（DESIGN 3.5）。
+/* ---- 选中 / 建议：只加颜色，几何与层级一概不动 ---- */
+.sj-hand-sel, .sj-hand-ring, .sj-hand-tick { position: absolute; pointer-events: none; }
+/* 暖金蒙版 + 顶边和左边各一条 3px 金线。用 inset box-shadow 不用 outline：
+   outline 画在牌外面，会被右邻整条盖掉，而内描边永远落在露出来的那条窄边上。 */
+.sj-hand-sel {
+  inset: 0; border-radius: 8px; opacity: 0;
+  background: rgba(243, 224, 176, 0.22);
+  box-shadow: inset 0 3px 0 var(--gold), inset 3px 0 0 var(--gold);
+  transition: opacity 0.16s var(--ease);
+}
+.sj-hand-card.on .sj-hand-sel { opacity: 1; }
+/* 选中瞬间的金色辉光脉冲：只动 opacity，不动 transform */
+.sj-hand-card.on .sj-hand-sel::after {
+  content: ''; position: absolute; inset: -2px; border-radius: 10px;
+  box-shadow: 0 0 16px 5px rgba(243, 224, 176, 0.7);
+  animation: sjSelPulse 220ms var(--ease) forwards;
+}
+@keyframes sjSelPulse { from { opacity: 1; } to { opacity: 0; } }
+/* 左上角 ✓：直径 = 牌宽 22%，落在 rank 索引那一角，永远在露出来的窄边里 */
+.sj-hand-tick {
+  top: 2px; left: 2px;
+  width: calc(var(--sj-card-hand-w, 62px) * 0.22); height: calc(var(--sj-card-hand-w, 62px) * 0.22);
+  border-radius: 50%; display: grid; place-items: center;
+  font-size: calc(var(--sj-card-hand-w, 62px) * 0.15); line-height: 1; font-weight: 900;
+  color: #2b2008; background: var(--gold); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+  opacity: 0; transition: opacity 0.16s var(--ease);
+}
+.sj-hand-card.on .sj-hand-tick { opacity: 1; }
+/* 被动建议：淡蓝虚线内描边，和金色选中态一眼分得开 */
+.sj-hand-ring {
+  inset: 1px; border-radius: 7px; opacity: 0;
+  border: 2px dashed rgba(110, 193, 255, 0.85);
+  transition: opacity 0.2s var(--ease);
+}
+.sj-hand-card.sj-hint .sj-hand-ring { opacity: 1; }
+/* 这一手不合法时该怪的那几张：暖红虚线，只说明原因，不替用户改选择 */
+.sj-hand-card.sj-blame .sj-hand-ring { opacity: 1; border-color: rgba(224, 106, 116, 0.9); border-style: dashed; }
+@media (prefers-reduced-motion: reduce) {
+  .sj-hand-card.on .sj-hand-sel::after { animation: none; opacity: 0; }
+  .sj-hand-sel, .sj-hand-tick, .sj-hand-ring { transition: none; }
+}
+
+/* 发牌：逐张从桌心飞出，落地即翻面（DESIGN 3.5）。
+   节奏是 `SJ_DEAL_CARD_MS`，由 SjTable 通过 `--sj-deal-step` 传进来，这里不写死 ——
+   亮主是在发牌过程中进行的，这个数字就是玩家的决策窗口，只能有一份定义。
+   拿得到发牌序时每张牌是**到点才出现**的，错位由出现时刻本身给，delay 传 0。
    扇形的 dy/rot 由按钮那一层给，所以这里的关键帧只写「相对落点」的偏移。 */
 .sj-hand-wrap.dealing .sj-hand-card-lift {
   animation: sjDealIn 0.52s var(--swing) backwards;
-  animation-delay: calc(var(--i, 0) * 45ms);
+  animation-delay: calc(var(--i, 0) * var(--sj-deal-step, 0ms));
 }
 @keyframes sjDealIn {
   0% {
@@ -668,6 +723,8 @@
   .sj-bar { padding: 14px 22px; border-radius: 22px; }
   .sj-bar-cap, .sj-bar-note { font-size: 14px; }
   .sj-bar-hint, .sj-why { font-size: 13.5px; }
+  .sj-why { line-height: 20px; }
+  .sj-why-slot { min-height: 20px; }
   .sj-go { font-size: 18px; padding: 17px 36px; min-width: 240px; }
   .sj-declare-btn { padding: 13px 20px; }
   .sj-declare-glyph { font-size: 22px; }
@@ -719,7 +776,7 @@
   .sj-play-actions { width: 100%; gap: 8px; }
   .sj-play-actions .btn { flex: 1; min-height: 46px; padding: 12px 8px; }
   .sj-go { flex: 2 !important; min-width: 0; font-size: 15px; padding: 12px; }
-  /* 两行手牌，每行的按钮都要顶部留白盖住抬起量，所以抬起量在手机上收到 10px */
+  /* 两行手牌：选中态不抬牌，行间距收到 2px 就够，顶部不再为抬起留白 */
   .sj-hand-wrap { padding: 0 4px 10px; }
   .sj-hand { gap: 2px; }
   .sj-slots { gap: 4px; padding: 5px; }

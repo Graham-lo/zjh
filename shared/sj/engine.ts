@@ -18,7 +18,7 @@ import {
   sortSjHand, sumPoints, trumpLabel,
   type SjCard, type SjCtx, type SjGroup, type SjRng, type SjTrumpSuit,
 } from './cards.ts';
-import { cardsInGroup, parseShape, type SjShape } from './units.ts';
+import { cardsInGroup, parseShape, runsOf, type SjShape } from './units.ts';
 import {
   SJ_DECL_TIER, checkOverride, declStrength, digMultiplierForLead, isMatchWon, isTrumping, levelUp,
   nextDealerSeat, outcomeFor, shapeLabel, trickPoints, trickWinner, validateFollow, validateLead,
@@ -61,7 +61,7 @@ export interface SjTrumpState {
   level: number;
   declarerId: string | null;
   /**
-   * 反主级别，七档（DESIGN 1.4）：0 翻底定主 / 1 单张级牌（任意花色，彼此相等）/
+   * 反主级别，七档（DESIGN 1.4）：0 无人亮主的默认无主 / 1 单张级牌（任意花色，彼此相等）/
    * 2–5 一对级牌（♦♣♥♠ 依次变强）/ 6 一对小王 / 7 一对大王。
    * 档位表在 `rules.ts` 的 `SJ_DECL_TIER`，这里不重复魔法数字。
    */
@@ -125,6 +125,18 @@ export interface SjRoomState {
   /** 本局点过「不亮」的人 */
   passed: string[];
   dealStartedAt: number | null;
+  /**
+   * **发牌序**：按座位索引，每个座位 25 张牌的**到手顺序**（`player.hand` 是排过序的，看不出先后）。
+   *
+   * 第 k 张（0-based）在 `dealStartedAt + (k + 1) * SJ_DEAL_CARD_MS` 那一刻到手。
+   * 亮主窗口从第一张牌起就开着（DESIGN 1.4），所以"这个人现在能看到几张牌"必须有个权威来源：
+   * 机器人在发牌途中做亮主决策时只准读自己的这条前缀（BRAIN-DESIGN §5.1），客户端的发牌动画也照它揭牌。
+   * `finishDealing` 之后不清空，整局都留着。
+   *
+   * **公开视图里只给 viewer 自己那一行**（`SjPublicRoom.dealOrder: string[]`）——
+   * 整个二维数组等于把另外三家的牌明码发出去。
+   */
+  dealOrder: string[][];
   declareEndsAt: number | null;
   turnDeadline: number | null;
   /**
@@ -140,8 +152,8 @@ export interface SjRoomState {
   bottom: SjCard[];
   bottomRevealed: boolean;
   /**
-   * 翻底定主翻出来的那张牌（DESIGN 1.4）。全场可见过，所以是公开信息；
-   * 扣底结束就清掉，免得它继续指向庄家手里的一张牌。
+   * 曾经用于「翻底定主」的那张牌。规则改成**无人亮主即默认无主**之后这里永远是 null，
+   * 字段只为读旧存档而留（`sanitizeSjState` 会补上），任何新逻辑都不该再看它。
    */
   flipped: SjCard | null;
   trickNo: number;
@@ -163,6 +175,15 @@ export interface SjRoomState {
    * 不会根据服务端暗牌偷推；客户端、真人和电脑看到的是同一份记牌信息。
    */
   voidGroups: SjGroup[][];
+  /**
+   * 公开确认的「这门已经没有对子了」，按座位保存（BRAIN-DESIGN §3）。
+   *
+   * 和 `voidGroups` 同一性质：只在**跟牌结构暴露**时记入 ——
+   * 首出是对子/拖拉机、某人这门牌够数却只跟出比要求少的对子，
+   * 那么按 `followRequirement` 的规则，他这门确实一个对子都不剩了。
+   * 桌上四个人看到的是同一份信息，不是读暗牌。
+   */
+  noPairs: SjGroup[][];
   /** 最近一次甩牌失败，客户端拿它播红戳记；下一次出牌清空 */
   lastThrowFail: SjThrowFailRecord | null;
   result?: SjHandResult;
@@ -182,7 +203,6 @@ export interface SjEngineOpts {
 export type SjEvent =
   | { k: 'sj_deal'; handNo: number; dealerSeat: number }
   | { k: 'sj_declare'; playerId: string; trump: SjTrumpSuit; strength: number; cardIds: string[]; reinforce: boolean }
-  | { k: 'sj_flip'; card: SjCard; trump: SjTrumpSuit }
   | { k: 'sj_chao'; playerId: string; trump: SjTrumpSuit; strength: number; cardIds: string[] }
   | { k: 'sj_kou_done'; playerId: string }
   | { k: 'sj_play'; playerId: string; cardIds: string[]; unit: 'single' | 'pair' | 'tractor' | 'throw'; trumped: boolean }
@@ -200,9 +220,24 @@ export const SJ_DEFAULT_SETTINGS: SjSettings = {
   turnSeconds: 30, kouSeconds: 45, chaoSeconds: 12, autoContinue: true,
 };
 
-/** 发牌动画 25 张 × 45ms + 余量（DESIGN 2.5） */
-export const SJ_DEAL_MS = 4600;
+/**
+ * 自己每两张牌之间隔多久（DESIGN 2.5）。四家轮着发，所以全局是 100ms 一张。
+ *
+ * 亮主窗口从**发牌第一张起**就开放，所以这个数字不是装饰：它就是玩家的决策时间。
+ * 45ms/张（整手 1.1 秒）等于没有窗口 —— 级牌还没看清就发完了。
+ */
+export const SJ_DEAL_CARD_MS = 400;
+/** 发牌动画总长：25 张 + 落地余量。服务端的 dealing 定时器和客户端动画共用这一个数 */
+export const SJ_DEAL_MS = 25 * SJ_DEAL_CARD_MS + 600;
+/** 发完牌时**已经有人亮主**的窗口：只是留个反主的余地，不用太长 */
 export const SJ_DECLARE_MS = 3000;
+/**
+ * 发完牌时**一个人都没亮**的窗口（DESIGN 1.4）。
+ *
+ * 这一档必须给够时间：没人亮主的结局是默认无主（不再翻底），
+ * 也就是说这 8 秒是全场最后一次「要不要抢庄」的机会，短了等于替所有人决定不亮。
+ */
+export const SJ_DECLARE_QUIET_MS = 8000;
 /** 每出现一次新的有效亮主/反主，窗口延长这么久 */
 export const SJ_DECLARE_EXTEND_MS = 2000;
 export const SJ_HAND_END_MS = 9000;
@@ -321,6 +356,7 @@ export function createSjRoom(kind: SjKind, code: string, host: SjPlayer): SjRoom
     trump: { suit: null, level: ladder[0], declarerId: null, strength: 0, cardIds: [] },
     passed: [],
     dealStartedAt: null,
+    dealOrder: Array.from({ length: SJ_SEATS }, () => []),
     declareEndsAt: null,
     turnDeadline: null,
     kouSeat: host.seat,
@@ -340,6 +376,7 @@ export function createSjRoom(kind: SjKind, code: string, host: SjPlayer): SjRoom
     capturedPointCards: [],
     playedIds: [],
     voidGroups: Array.from({ length: SJ_SEATS }, () => []),
+    noPairs: Array.from({ length: SJ_SEATS }, () => []),
     lastThrowFail: null,
   };
 }
@@ -381,6 +418,7 @@ export function dealSjHand(state: SjRoomState, opts?: SjEngineOpts) {
   state.capturedPointCards = [];
   state.playedIds = [];
   state.voidGroups = Array.from({ length: SJ_SEATS }, () => []);
+  state.noPairs = Array.from({ length: SJ_SEATS }, () => []);
   state.lastThrowFail = null;
   state.result = undefined;
 
@@ -389,18 +427,27 @@ export function dealSjHand(state: SjRoomState, opts?: SjEngineOpts) {
     p.declaredIds = [];
     p.lastAction = undefined;
   }
+  state.dealOrder = Array.from({ length: SJ_SEATS }, () => [] as string[]);
   for (let i = 0; i < 100; i++) {
-    sjPlayerAtSeat(state, (state.dealerSeat + i) % SJ_SEATS).hand.push(deck[i]);
+    const seat = (state.dealerSeat + i) % SJ_SEATS;
+    sjPlayerAtSeat(state, seat).hand.push(deck[i]);
+    state.dealOrder[seat].push(deck[i].id);
   }
+  // 手牌排序之后就看不出先后了，发牌序单独留在 dealOrder 里
   sortAllHands(state);
   sjLog(state, `第 ${state.handNo} 局开始，打 ${levelLabel(level)}`, now_(opts));
 }
 
-/** 发牌动画播完 → 开亮主窗口（DESIGN 2.5） */
+/**
+ * 发牌动画播完 → 开亮主窗口（DESIGN 2.5）。
+ *
+ * 窗口长度看发完的这一刻有没有人亮：已经有人亮了就只留 3s 给别人反主，
+ * 一个人都没亮就给 8s —— 那一档过完就是默认无主，没有第二次机会（DESIGN 1.4）。
+ */
 export function finishDealing(state: SjRoomState, opts?: SjEngineOpts) {
   if (state.phase !== 'dealing') return;
   state.phase = 'declaring';
-  state.declareEndsAt = now_(opts) + SJ_DECLARE_MS;
+  state.declareEndsAt = now_(opts) + (state.trump.suit ? SJ_DECLARE_MS : SJ_DECLARE_QUIET_MS);
 }
 
 /* --------------------------------------------------------------- 亮主 */
@@ -497,7 +544,8 @@ function doPass(state: SjRoomState, actor: SjPlayer, opts?: SjEngineOpts) {
 /**
  * 亮主窗口结束（DESIGN 1.4）。
  *
- * 无人亮主 → 翻底牌第一张定主，是王则无主。
+ * 无人亮主 → **默认无主**，不翻底牌。底牌照常交给庄家扣，
+ * 但既然没人亮过主，也就没有「比现在更强」这回事，抄底整个阶段直接跳过（DESIGN 1.4b）。
  * 首局的庄家 = 窗口结束时亮主有效的那个人；无人亮主则房主坐庄。
  * 后续局的庄家早就由 1.8 的轮转定死，亮主只决定主花色。
  */
@@ -505,11 +553,8 @@ export function closeDeclaring(state: SjRoomState, opts?: SjEngineOpts) {
   if (state.phase !== 'dealing' && state.phase !== 'declaring') return;
 
   if (!state.trump.suit) {
-    const first = state.bottom[0];
-    const suit: SjTrumpSuit = first.suit === 'J' ? 'NT' : first.suit;
-    state.trump = { ...state.trump, suit, declarerId: null, strength: 0, cardIds: [] };
-    state.flipped = first;
-    sjLog(state, `无人亮主，翻底定主：${trumpLabel(suit)}`, now_(opts));
+    state.trump = { ...state.trump, suit: 'NT', declarerId: null, strength: 0, cardIds: [] };
+    sjLog(state, '无人亮主，本局默认无主', now_(opts));
   } else if (state.handNo === 1 && state.trump.declarerId) {
     // 首局庄家由亮主决定。两队级别此刻相同，所以换庄不会改变本局级牌
     const declarer = sjPlayerById(state, state.trump.declarerId);
@@ -565,8 +610,10 @@ function doKou(state: SjRoomState, actor: SjPlayer, cardIds: string[], opts?: Sj
     state.trump = { ...state.trump, cardIds: state.trump.cardIds.filter((id) => !buried.has(id)) };
   }
 
+  // 无人亮主的默认无主局没有「比现在更强」可言，抄底阶段整个跳过，扣完直接开打（DESIGN 1.4b）
+  if (state.trump.declarerId === null) enterPlaying(state, opts);
   // 庄家第一次扣完 → 开第一轮询问；抄底者扣完 → 接着问本轮剩下的人（DESIGN 1.4b）
-  if (state.chaoDirty) advanceChao(state, actor.seat, opts);
+  else if (state.chaoDirty) advanceChao(state, actor.seat, opts);
   else startChaoRound(state, opts);
 }
 
@@ -677,7 +724,7 @@ function enterPlaying(state: SjRoomState, opts?: SjEngineOpts) {
   // 再往后 trump.cardIds 就会指向某个人手里的暗牌，留着等于持续泄密。
   for (const p of state.players) p.declaredIds = [];
   state.trump = { ...state.trump, cardIds: [] };
-  state.flipped = null;
+  state.flipped = null; // 只为旧存档兜底：新流程里它从头到尾都是 null
   sortAllHands(state);
   sjLog(state, `${sjPlayerAtSeat(state, state.dealerSeat).name} 首出`, now_(opts));
 }
@@ -714,9 +761,20 @@ function doPlay(state: SjRoomState, actor: SjPlayer, cardIds: string[], opts?: S
     const check = validateFollow(actor.hand, lead, cards, ctx);
     if (!check.ok) throw new GameError(check.reason);
     // 只有实际垫了别组牌，桌上所有人才确定他已把首出花色跟光；这是公开记牌，不是读暗牌。
-    if (cardsInGroup(cards, lead.group, ctx).length < lead.count) {
+    const inGroup = cardsInGroup(cards, lead.group, ctx);
+    if (inGroup.length < lead.count) {
       const voids = state.voidGroups[actor.seat] ?? (state.voidGroups[actor.seat] = []);
       if (!voids.includes(lead.group)) voids.push(lead.group);
+    } else {
+      // 首出要对子、他却跟出了散张 → 这门他一个对子都没有了（公开可推，同样不是读暗牌）
+      const demand = lead.pairs + lead.tractors.reduce((a, b) => a + b, 0);
+      if (demand > 0) {
+        const got = runsOf(inGroup, ctx).reduce((a, r) => a + r.len, 0);
+        if (got < demand) {
+          const np = state.noPairs[actor.seat] ?? (state.noPairs[actor.seat] = []);
+          if (!np.includes(lead.group)) np.push(lead.group);
+        }
+      }
     }
   }
 
@@ -1057,11 +1115,13 @@ export function transferSjHost(state: SjRoomState, departingId?: string, opts?: 
 /* --------------------------------------------------------------- 视图 */
 
 export type SjPublicPlayer = Omit<SjPlayer, 'tokenHash' | 'hand'> & { hand: SjCard[]; handCount: number };
-export type SjPublicRoom = Omit<SjRoomState, 'players' | 'bottom'> & {
+export type SjPublicRoom = Omit<SjRoomState, 'players' | 'bottom' | 'dealOrder'> & {
   players: SjPublicPlayer[];
   bottom: SjCard[];
   bottomCount: number;
   viewerId: string;
+  /** **只有 viewer 自己那一行**发牌序；别人的发牌序等于别人的手牌，绝不下发 */
+  dealOrder: string[];
 };
 
 /**
@@ -1069,15 +1129,17 @@ export type SjPublicRoom = Omit<SjRoomState, 'players' | 'bottom'> & {
  *
  * 别人的手牌只给张数；底牌只在扣底阶段给**正在扣底的那个人**、`bottomRevealed` 之后给所有人。
  * 抄底询问阶段谁都看不到底牌 —— 那时候它是扣着的，看得到就等于让人照着底牌决定抄不抄。
- * 已经打出的牌、亮主/抄底的明牌、翻底那张、分牌堆是公开信息 —— 前三者本来就摆在桌面上，
+ * 已经打出的牌、亮主/抄底的明牌、分牌堆是公开信息 —— 前三者本来就摆在桌面上，
  * 而且 id 自带牌面，客户端不需要额外的下发通道。
  */
 export function sanitizeSjRoom(state: SjRoomState, viewerId: string): SjPublicRoom {
   const isKouSeat = state.players.find((p) => p.id === viewerId)?.seat === state.kouSeat;
   const showBottom = state.bottomRevealed || (state.phase === 'kou' && isKouSeat);
+  const viewerSeat = state.players.find((p) => p.id === viewerId)?.seat;
   return {
     ...state,
     viewerId,
+    dealOrder: (viewerSeat != null ? state.dealOrder?.[viewerSeat] : undefined)?.slice() ?? [],
     bottom: showBottom ? state.bottom.map((c) => ({ ...c })) : [],
     bottomCount: state.bottom.length,
     result: state.result
@@ -1124,10 +1186,11 @@ export function migrateSjRoom(state: SjRoomState): SjRoomState {
       old === 4 ? SJ_DECL_TIER.joker_b
         : old === 3 ? SJ_DECL_TIER.joker_s
           : old === 2 && suit && suit !== 'NT' ? SJ_DECL_TIER[suit]
-            : old; // 0（翻底定主）和 1（单张）两档在新表里没变
+            : old; // 0（默认无主）和 1（单张）两档在新表里没变
   }
   state.passed ??= [];
   state.dealStartedAt ??= null;
+  state.dealOrder ??= Array.from({ length: SJ_SEATS }, () => []);
   state.declareEndsAt ??= null;
   state.turnDeadline ??= null;
   // 老快照没有抄底这回事：正在扣底的一定是庄家，也不可能停在询问里
@@ -1147,6 +1210,12 @@ export function migrateSjRoom(state: SjRoomState): SjRoomState {
   state.penaltyPoints ??= 0;
   state.capturedPointCards ??= [];
   state.playedIds ??= [];
+  if (!Array.isArray(state.noPairs)) {
+    state.noPairs = Array.from({ length: SJ_SEATS }, () => []);
+  } else {
+    state.noPairs = Array.from({ length: SJ_SEATS }, (_, seat) =>
+      Array.isArray(state.noPairs[seat]) ? [...new Set(state.noPairs[seat])] : []);
+  }
   if (!Array.isArray(state.voidGroups)) {
     state.voidGroups = Array.from({ length: SJ_SEATS }, () => []);
   } else {
@@ -1190,9 +1259,6 @@ export function deriveSjEvents(
       k: 'sj_declare', playerId: actorId, trump: after.trump.suit, strength: after.trump.strength,
       cardIds: [...after.trump.cardIds], reinforce: before.trump.declarerId === actorId,
     });
-  }
-  if (!before.flipped && after.flipped && after.trump.suit) {
-    events.push({ k: 'sj_flip', card: after.flipped, trump: after.trump.suit });
   }
   if (cmd?.type === 'chao' && after.trump.suit && before.trump.declarerId !== after.trump.declarerId) {
     events.push({

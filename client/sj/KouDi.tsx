@@ -1,18 +1,26 @@
 import type { SjCard } from '../../shared/sj/cards.ts';
-import type { SjPublicRoom, SjRoomState } from '../../shared/sj/engine.ts';
+import type { SjPublicRoom } from '../../shared/sj/engine.ts';
 import { botKou } from '../../shared/sj/bot.ts';
 import { PlayingCard } from '../components/Card.tsx';
 import { useCountdown } from '../components/TurnRing.tsx';
 
-const NEED = 8;
+/**
+ * 扣底要的张数。**导出**给 SjTable —— 封顶（第 9 张点不上）要在选牌那一侧拦，
+ * 但「8」这个数只能有一个出处，就是这里（SELECT-SCENARIOS K1）。
+ */
+export const KOU_NEED = 8;
+const NEED = KOU_NEED;
 
 /**
  * 扣底（DESIGN 3.4）。
  *
  * 扣底的人这时候手里是 33 张（8 张底牌已经并进来了），要从中挑 8 张扣回去。
  * **不一定是庄家** —— 抄底成功的人也要重新扣一次（DESIGN 1.4b），文案跟着换。
- * 选牌本身走底部那把手牌扇，这里只负责 8 个槽位、`帮我扣` 和 `确认扣底`。
- * `帮我扣` 直接调机器人那套策略 —— 它只读自己的手牌和主花色，客户端算得出来。
+ * 选牌本身走底部那把手牌扇 —— 单击、双击、按住横扫全是同一套 `Hand` 逻辑，
+ * 扣底阶段一样能用；这里只负责 8 个槽位、`帮我扣` 和 `确认扣底`。
+ * 选满 8 张之后第 9 张点不上（封顶在 `SjTable` 的 `pickCard` / `sweep` 里，用的就是 `KOU_NEED`）。
+ * `帮我扣` 直接调机器人那套策略，并且把整个 `room` 递进去 —— 记牌器读的全是公开信息，
+ * 客户端算得出来，所以真人拿到的建议和电脑代扣一模一样（`tests/sj-bot.test.ts` 有一致性用例）。
  */
 export function KouDi({
   room,
@@ -47,9 +55,12 @@ export function KouDi({
       <button
         className="btn ghost"
         onClick={() => {
-          // botKou 只读 dealer.hand 与 trump，公开视图就够，不需要别人的手牌
-          const fake = { trump: room.trump } as unknown as SjRoomState;
-          onFill(botKou(fake, { hand } as never));
+          // 整个房间都递给大脑：记牌器读的全是公开信息（谁亮过什么、各门场外还剩几张、
+          // 底里那 8 张 —— 扣底阶段只有我自己看得见），别人的 `hand` 在公开视图里是空数组，
+          // 大脑本来就不该读。这样「帮我扣」和电脑代扣走的是同一条路，
+          // B6「扣光上一个亮主者那门」和 C6「闲家抄成底埋 K/10」对真人一样生效。
+          const me = room.players.find((p) => p.id === room.viewerId);
+          onFill(botKou(room, { seat: me?.seat ?? room.kouSeat, hand, declaredIds: me?.declaredIds }));
         }}
       >
         帮我扣
