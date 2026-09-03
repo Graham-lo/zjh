@@ -298,11 +298,13 @@ test('表态阶段超时按不接处理，牌局仍然会结束', () => {
 test('老快照缺字段时会被补齐，不会出现 undefined 轮', () => {
   const room = makeRoom(2);
   // 模拟一个在 allInFromRound 上线之前存下来的房间
+  room.settings.startingChips = 50_000;
   delete (room.settings as Partial<typeof room.settings>).allInFromRound;
   delete (room.settings as Partial<typeof room.settings>).maxRounds;
   migrateRoom(room);
   assert.equal(room.settings.allInFromRound, 3);
   assert.equal(room.settings.maxRounds, 8);
+  assert.equal(room.settings.startingChips, 500_000, '旧房间恢复后也使用新的 50 万重置额度');
   assert.equal(typeof room.settings.allInFromRound, 'number');
 });
 
@@ -666,7 +668,7 @@ test('补分要记进 granted，否则净战绩会被冲掉', () => {
   p.chips = 1000;
   const before = p.granted;
   applyCommand(room, p.id, { type: 'top_up' });
-  assert.equal(p.chips, room.settings.startingChips);
+  assert.equal(p.chips, 500_000, '手动补充统一重置到 50 万');
   assert.equal(p.granted - before, room.settings.startingChips - 1000, '补了多少就记多少');
 });
 

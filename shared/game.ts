@@ -151,7 +151,7 @@ export interface PendingAllIn {
 
 export const DEFAULT_SETTINGS: GameSettings = {
   maxPlayers: 6,
-  startingChips: 50_000,
+  startingChips: 500_000,
   ante: 100,
   // 第一个是开局的底注档，其余是可选的加注档
   betOptions: [100, 1000, 3000, 5000],
@@ -482,6 +482,8 @@ export function migrateRoom(state: RoomState): RoomState {
   // 老快照是多游戏框架之前存的，没有 kind —— 那时候只有炸金花一种房间（DESIGN 2.6）
   state.kind ??= 'zjh';
   state.settings = { ...DEFAULT_SETTINGS, ...(state.settings ?? {}) };
+  // 初始/重置筹码是全服经济规则，不是房主可调整的房规；旧房间恢复后也必须升级到当前额度。
+  state.settings.startingChips = DEFAULT_SETTINGS.startingChips;
   state.log ??= [];
   state.roundNo ??= 0;
   state.seen ??= {};
