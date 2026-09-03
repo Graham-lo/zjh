@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   allInBase, allInCost, applyCommand, botDecision, canAllInNow, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
-  compareHands, createHumanPlayer, createInitialRoom, currentPlayer, evaluateHand,
+  compareHands, createHumanPlayer, createInitialRoom, currentPlayer, dealCategoryForRoll, dealWeightedHands, evaluateHand,
   handPercentile, migrateRoom, sanitizeRoom, startRound, timeoutCurrentPlayer, transferHost,
   type Card, type RoomState,
 } from '../shared/game.ts';
@@ -49,6 +49,47 @@ test('牌力分位单调：豹子 > 同花 > 对子 > 单张', () => {
   assert.equal(evaluateHand([c(4, 'S'), c(3, 'S'), c(2, 'S')]).name, '顺金');
   assert.equal(evaluateHand([c(9, 'S'), c(5, 'H'), c(2, 'D')]).name, '散牌');
   assert.ok(p([c(14, 'S'), c(14, 'H'), c(14, 'D')]) <= 1 && p([c(5, 'S'), c(3, 'H'), c(2, 'D')]) >= 0);
+});
+
+test('娱乐增强发牌：四类大牌占 92%，散牌与对子留在 8% 长尾', () => {
+  const counts = new Map<number, number>();
+  for (let roll = 0; roll < 1000; roll++) {
+    const category = dealCategoryForRoll(roll);
+    counts.set(category, (counts.get(category) ?? 0) + 1);
+  }
+  assert.deepEqual(Object.fromEntries(counts), { 1: 50, 2: 30, 3: 290, 4: 380, 5: 120, 6: 130 });
+});
+
+test('娱乐增强发牌：六人连续发牌始终合法且整桌没有重复牌', () => {
+  let state = 0x12345678;
+  const pick = (max: number) => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state % max;
+  };
+  for (let round = 0; round < 100; round++) {
+    const hands = dealWeightedHands(6, pick);
+    assert.ok(hands.every((hand) => evaluateHand(hand).category >= 1));
+    const cards = hands.flat().map((card) => `${card.suit}${card.rank}`);
+    assert.equal(new Set(cards).size, 18, `第 ${round + 1} 轮出现重复牌`);
+  }
+});
+
+test('娱乐增强发牌：散牌和对子仍能从长尾发出', () => {
+  const pickerFor = (roll: number) => (max: number) => max === 1000 ? roll : 0;
+  for (const [roll, category] of [[920, 1], [970, 2]] as const) {
+    const hands = dealWeightedHands(2, pickerFor(roll));
+    assert.ok(hands.every((hand) => evaluateHand(hand).category === category));
+  }
+});
+
+test('娱乐增强发牌：同牌型的抽取确实偏向高点数', () => {
+  const pickerFor = (roll: number) => (max: number) => max === 1000 ? roll : 0;
+  for (const [roll, category] of [[920, 1], [970, 2], [380, 3], [0, 4], [800, 5], [670, 6]] as const) {
+    const hand = dealWeightedHands(1, pickerFor(roll))[0];
+    const value = evaluateHand(hand);
+    assert.equal(value.category, category);
+    assert.ok(value.tiebreak[0] >= 13, `牌型 ${category} 应从高点数组合开始抽`);
+  }
 });
 
 /* ------------------------------------------------------------- 开局 */

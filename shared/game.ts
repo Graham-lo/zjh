@@ -264,19 +264,123 @@ export function compareHands(a: Card[], b: Card[], special235 = true): number {
   return lexCompare(ea.tiebreak, eb.tiebreak);
 }
 
+/* --------------------------------------------------------- 娱乐增强发牌 */
+
+/**
+ * 每手牌的目标牌型（千分比）。四类大牌占 92%；散牌和对子保留在 8% 的长尾，
+ * 避免完全失去牌型落差。顺金与豹子合计 25%，让强牌碰撞明显增多。
+ */
+export const ZJH_HAND_DISTRIBUTION_PER_MILLE = {
+  flush: 380,
+  straight: 290,
+  trips: 130,
+  straightFlush: 120,
+  highCard: 50,
+  pair: 30,
+} as const;
+
+type DealCategory = 1 | 2 | 3 | 4 | 5 | 6;
+type IndexPicker = (maxExclusive: number) => number;
+interface CatalogHand { cards: Card[]; keys: [string, string, string] }
+
+const cardKey = (card: Card) => `${card.suit}${card.rank}`;
+let cachedHandCatalog: Record<DealCategory, CatalogHand[]> | null = null;
+
+/** 52 选 3 只有 22,100 种，首次使用时算一次，之后每局只筛剩余牌，避免阻塞 Node 主循环。 */
+function handCatalog(): Record<DealCategory, CatalogHand[]> {
+  if (cachedHandCatalog) return cachedHandCatalog;
+  const deck = createDeck();
+  const catalog = { 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] } as Record<DealCategory, CatalogHand[]>;
+  for (let a = 0; a < deck.length - 2; a++) {
+    for (let b = a + 1; b < deck.length - 1; b++) {
+      for (let c = b + 1; c < deck.length; c++) {
+        const cards = [deck[a], deck[b], deck[c]];
+        const category = evaluateHand(cards).category as DealCategory;
+        catalog[category].push({
+          cards,
+          keys: [cardKey(cards[0]), cardKey(cards[1]), cardKey(cards[2])],
+        });
+      }
+    }
+  }
+  for (const category of [1, 2, 3, 4, 5, 6] as const) {
+    catalog[category].sort((a, b) => compareHands(b.cards, a.cards, false));
+  }
+  cachedHandCatalog = catalog;
+  return catalog;
+}
+
+/** 公开成纯函数，让概率边界能被测试锁定。 */
+export function dealCategoryForRoll(roll: number): DealCategory {
+  if (!Number.isInteger(roll) || roll < 0 || roll >= 1000) throw new GameError('发牌随机数越界');
+  let edge = ZJH_HAND_DISTRIBUTION_PER_MILLE.flush;
+  if (roll < edge) return 4;
+  edge += ZJH_HAND_DISTRIBUTION_PER_MILLE.straight;
+  if (roll < edge) return 3;
+  edge += ZJH_HAND_DISTRIBUTION_PER_MILLE.trips;
+  if (roll < edge) return 6;
+  edge += ZJH_HAND_DISTRIBUTION_PER_MILLE.straightFlush;
+  if (roll < edge) return 5;
+  edge += ZJH_HAND_DISTRIBUTION_PER_MILLE.highCard;
+  if (roll < edge) return 1;
+  return 2;
+}
+
+/** 从剩余牌里拿走一手指定牌型；候选按牌力降序，只在较大的 60% 中抽并再次偏向大牌。 */
+function takeWeightedHand(deck: Card[], category: DealCategory, pick: IndexPicker): Card[] | null {
+  const available = new Set(deck.map(cardKey));
+  const candidates = handCatalog()[category].filter((hand) => hand.keys.every((key) => available.has(key)));
+  if (!candidates.length) return null;
+  const upper = Math.max(1, Math.ceil(candidates.length * 0.6));
+  // 两次随机取较小下标：不把结果钉死成最大牌，但高牌明显比低牌常见。
+  const chosen = candidates[Math.min(pick(upper), pick(upper))];
+  const chosenKeys = new Set(chosen.keys);
+  for (let i = deck.length - 1; i >= 0; i--) if (chosenKeys.has(cardKey(deck[i]))) deck.splice(i, 1);
+  return chosen.cards.map((card) => ({ ...card }));
+}
+
+/**
+ * 给整桌按目标分布发牌。每个座位先独立抽牌型，再随机处理座位顺序，真人、机器人、
+ * 庄家和座位号完全同权。极端冲突下若目标牌型已组不出来，才依次尝试其他牌型。
+ */
+export function dealWeightedHands(handCount: number, pick: IndexPicker = randomIndex): Card[][] {
+  if (!Number.isInteger(handCount) || handCount < 1 || handCount > 6) throw new GameError('发牌人数不合法');
+  const plans = Array.from({ length: handCount }, () => dealCategoryForRoll(pick(1000)));
+  const order = Array.from({ length: handCount }, (_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = pick(i + 1);
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+
+  const deck = createDeck();
+  const hands: Card[][] = Array.from({ length: handCount }, () => []);
+  for (const index of order) {
+    const plan = plans[index];
+    const fallbacks = [plan, 4, 3, 6, 5, 2, 1].filter((v, i, a) => a.indexOf(v) === i) as DealCategory[];
+    let hand: Card[] | null = null;
+    for (const category of fallbacks) {
+      hand = takeWeightedHand(deck, category, pick);
+      if (hand) break;
+    }
+    if (!hand) throw new GameError('剩余牌无法组成合法手牌');
+    hands[index] = hand;
+  }
+  return hands;
+}
+
 /**
  * 估算一手牌能打败随机一手牌的比例（0–1）。
  *
- * 用 52 选 3 的真实牌型频率做分段，再按同类型内的大小在段内线性插值。
- * 机器人靠它算胜率，客户端靠它显示"牌力"。
+ * 用娱乐增强后的牌型频率做分段，再按同类型内的大小在段内线性插值。
+ * 机器人靠它算胜率，客户端靠它显示"牌力"；散牌与对子只占低频长尾。
  */
 const CATEGORY_BANDS: Record<number, [number, number]> = {
-  1: [0.0, 0.7439], // 单张
-  2: [0.7439, 0.9133], // 对子
-  3: [0.9133, 0.9459], // 顺子
-  4: [0.9459, 0.9955], // 同花
-  5: [0.9955, 0.9977], // 同花顺
-  6: [0.9977, 1.0], // 豹子
+  1: [0.0, 0.05], // 散牌 5%
+  2: [0.05, 0.08], // 对子 3%
+  3: [0.08, 0.37], // 顺子 29%
+  4: [0.37, 0.75], // 金花 38%
+  5: [0.75, 0.87], // 顺金 12%
+  6: [0.87, 1.0], // 豹子 13%
 };
 
 export function handPercentile(hand: Card[]): number {
@@ -692,8 +796,7 @@ export function startRound(state: RoomState, actorId: string | null) {
     }
   }
 
-  const deck = shuffleDeck(createDeck());
-  let cursor = 0;
+  const hands = dealWeightedHands(entrants.length);
   state.handNo += 1;
   state.phase = 'playing';
   state.pot = 0;
@@ -713,9 +816,9 @@ export function startRound(state: RoomState, actorId: string | null) {
     p.lastAction = undefined;
     p.status = 'waiting';
   }
-  for (const p of entrants) {
+  for (const [i, p] of entrants.entries()) {
     p.status = 'active';
-    p.hand = [deck[cursor++], deck[cursor++], deck[cursor++]];
+    p.hand = hands[i];
     p.chips -= state.settings.ante;
     p.bet = state.settings.ante;
     state.pot += state.settings.ante;
