@@ -5,8 +5,9 @@ import { ActionBar, EmoteBar } from './components/ActionBar.tsx';
 import { Dock } from './components/Dock.tsx';
 import { ChipStack, CompareDuel, GoldRain, ShoveFx, type DuelSide } from './components/Fx.tsx';
 import { IconCopy, IconExit, IconSoundOff, IconSoundOn, IconVoice, Laurel } from './components/Icons.tsx';
+import { ProfileDialog } from './components/ProfileDialog.tsx';
 import { EmptySeat, Seat } from './components/Seat.tsx';
-import { useHurryTick } from './components/TurnRing.tsx';
+import { useCountdown, useHurryTick } from './components/TurnRing.tsx';
 import type { NetStatus } from './net.ts';
 import { HAND_VOICE, sound, voice } from './sound.ts';
 
@@ -42,6 +43,18 @@ function useCountUp(target: number, ms = 480) {
     };
   }, [target, ms]);
   return value;
+}
+
+/**
+ * 底池的滚动数字。
+ *
+ * **必须是叶子组件。** useCountUp 每帧 setState，挂在牌桌根组件上时，
+ * 每一次下注都会让整张桌子（六个座位、所有牌、行动栏、记录面板）以 60fps
+ * 重渲染半秒钟 —— 牌局中途那种一顿一顿的感觉就是这么来的。
+ * 放在这里，每帧重渲染的只有这一个 <span>。
+ */
+function RollingNumber({ value }: { value: number }) {
+  return <>{fmt(useCountUp(value))}</>;
 }
 
 /** 会滚动的数字。结算时一个个跳出来，比直接拍上去有戏得多。 */
@@ -127,6 +140,7 @@ export function Table({
   batch,
   onToast,
   account,
+  onIdent,
 }: {
   room: PublicRoom;
   cmd(c: GameCommand): void;
@@ -135,9 +149,11 @@ export function Table({
   batch: { seq: number; events: GameEvent[] };
   onToast(msg: string): void;
   account: AccountInfo | null;
+  onIdent?(next: { name: string; avatar: string }): void;
 }) {
   const me = room.players.find((p) => p.id === room.viewerId);
   const [dockOpen, setDockOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [chips, setChips] = useState<FlyChip[]>([]);
   const [flash, setFlash] = useState<'win' | 'lose' | null>(null);
   const [rain, setRain] = useState(0);
@@ -163,6 +179,8 @@ export function Table({
   /* 赢家的庆祝先记下来，等亮相那一拍到了再起爆 */
   const [pendingWin, setPendingWin] = useState<{ id: number; playerId: string; amount: number } | null>(null);
   const [panelUp, setPanelUp] = useState(false);
+  // 结算面板会在服务端计时到点后自己散掉，把这个秒数显示出来
+  const backIn = useCountdown(room.phase === 'round_end' ? (room.nextAt ?? null) : null);
 
   const M = room.settings.maxPlayers;
   const mySeat = me?.seat ?? 0;
@@ -182,7 +200,7 @@ export function Table({
       posById: new Map(ordered.map((p, k) => [p.id, seatPos(k, total)])),
     };
   }, [room.players, room.phase, mySeat, M]);
-  const pot = useCountUp(room.phase === 'round_end' ? (room.result?.potWon ?? 0) : room.pot);
+  const potTarget = room.phase === 'round_end' ? (room.result?.potWon ?? 0) : room.pot;
 
   const result = room.result;
   const showdownHands = result?.hands ?? {};
@@ -439,6 +457,18 @@ export function Table({
             房间 {room.code.slice(0, 3)} {room.code.slice(3)}
             <IconCopy size={13} />
           </button>
+          {/* 点自己的脸就能改名换头像 —— 首页选完样子进了房间就再也改不了，
+              想换个名字只能退房重进，桌上其他人还得干等。引擎的 rename 一直都在，
+              缺的只是这个入口。 */}
+          <button
+            className="me-pill"
+            onClick={() => setProfileOpen(true)}
+            title="改名 · 换头像"
+            aria-label="改名换头像"
+          >
+            <span className="me-av">{me.avatar}</span>
+            <span className="me-name">{me.name}</span>
+          </button>
         </div>
         <div className="topbar-right">
           {(() => {
@@ -518,10 +548,12 @@ export function Table({
 
           <div className={`pot${potBump ? ' bumped' : ''}`}>
             <span>{room.phase === 'round_end' ? '本 局 彩 池' : '底 池'}</span>
-            <strong>{fmt(pot)}</strong>
+            <strong><RollingNumber value={potTarget} /></strong>
             <small>
               底注 {fmt(room.betUnit)}
-              {room.phase === 'playing' ? ` · 第 ${room.roundNo}/${room.settings.maxRounds} 轮` : ''}
+              {room.phase === 'playing'
+                ? ` · 第 ${room.roundNo}${room.settings.maxRounds > 0 ? `/${room.settings.maxRounds}` : ''} 轮`
+                : ''}
             </small>
           </div>
 
@@ -582,6 +614,16 @@ export function Table({
       <EmoteBar cmd={cmd} />
 
       <Dock room={room} open={dockOpen} onToggle={setDockOpen} />
+
+      {profileOpen && (
+        <ProfileDialog
+          name={me.name}
+          avatar={me.avatar}
+          onSave={(next) => cmd({ type: 'rename', name: next.name, avatar: next.avatar })}
+          onIdent={onIdent}
+          onClose={() => setProfileOpen(false)}
+        />
+      )}
 
       {/* 面板要等牌桌把开牌演完再升起来：直接盖上去，摊牌那几秒全场都白演了 */}
       {room.phase === 'round_end' && result && panelUp && (
@@ -655,8 +697,11 @@ export function Table({
               </div>
             )}
 
+            {/* 「稍后」是最让人干等的两个字。服务端已经在计时了，这里就把秒数念出来，
+                不是房主的人也能看见这一屏什么时候自己会散掉。 */}
             <p className="result-next">
-              {room.settings.autoContinue ? '稍后自动开始下一局' : '等待房主开启下一局'}
+              {backIn > 0 ? `${backIn} 秒后自动返回准备` : '正在返回准备…'}
+              {room.settings.autoContinue ? '，然后自动开下一局' : '，之后等房主开局'}
             </p>
             <div className="result-actions">
               {room.hostId === me.id && (
@@ -664,6 +709,12 @@ export function Table({
                   立刻返回准备
                 </button>
               )}
+              {/* 谁都该能把这一屏收起来去看牌桌 —— 原来除了房主，
+                  所有人在这里唯一能点的按钮是「退出房间」，等于逼着人离桌。
+                  收起来只是不看结算，牌桌该怎么走还是怎么走。 */}
+              <button className="btn ghost" onClick={() => setPanelUp(false)}>
+                先看牌桌
+              </button>
               {/* 结算遮罩会挡住顶栏，这里也得能直接走人 */}
               <button className="btn ghost" onClick={() => window.confirm('确定退出房间？') && cmd({ type: 'leave' })}>
                 退出房间

@@ -24,6 +24,9 @@ export function ActionBar({
   const isHost = room.hostId === me.id;
   const myTurn = room.phase === 'playing' && room.turnSeat === me.seat && me.status === 'active';
   const left = useCountdown(myTurn ? room.turnDeadline : null);
+  // 自动开局的倒计时。服务端把「什么时候会自动发生」写在 nextAt 里，
+  // 界面照着念，而不是让人对着一句「稍后」干等。
+  const autoIn = useCountdown(room.phase === 'lobby' ? (room.nextAt ?? null) : null);
 
   // 这些数字和服务端用的是同一份函数，不会出现"按钮显示能跟、点了说钱不够"
   const cost = calcCall(room, me);
@@ -94,7 +97,8 @@ export function ActionBar({
             {seated}/{room.settings.maxPlayers} 人
           </strong>
           <span>
-            已准备 {readyCount} · 底注 {fmt(room.settings.ante)} · {room.settings.maxRounds} 轮封顶
+            已准备 {readyCount} · 底注 {fmt(room.settings.ante)} ·{' '}
+            {room.settings.maxRounds > 0 ? `${room.settings.maxRounds} 轮封顶` : '不封顶，打到分胜负'}
           </span>
         </div>
         <div className="bar-actions">
@@ -131,7 +135,11 @@ export function ActionBar({
             </button>
           )}
         </div>
-        {canAutoStart(room) && <p className="bar-hint">所有人都准备好了，马上自动开局</p>}
+        {canAutoStart(room) && (
+          <p className="bar-hint">
+            所有人都准备好了，{autoIn > 0 ? `${autoIn} 秒后自动开局` : '马上自动开局'}
+          </p>
+        )}
       </div>
     );
   }
@@ -168,7 +176,8 @@ export function ActionBar({
         )}
         <span className="bar-meta">
           {handType && <b className={`hand-type r-${handRarity(handType)}`} title="你的牌型">{handType}</b>}
-          第 {room.handNo} 局 · 第 {room.roundNo}/{room.settings.maxRounds} 轮 · 底注 {fmt(room.betUnit)}
+          第 {room.handNo} 局 · 第 {room.roundNo}
+          {room.settings.maxRounds > 0 ? `/${room.settings.maxRounds}` : ''} 轮 · 底注 {fmt(room.betUnit)}
           {compareOpen ? ' · 可比牌' : ' · 首轮中'}
           {/* 梭哈还没开放时把门槛写出来，省得有人一直找那个按钮 */}
           {!shoveOpen && ` · 第 ${allInFrom} 轮起可梭哈`}
@@ -198,8 +207,20 @@ export function ActionBar({
             接受梭哈 {fmt(acceptPrice)}
             {!me.looked && <small className="hint-half"> 闷牌半价</small>}
           </button>
-          <button className="btn fold" disabled={!myTurn} onClick={() => cmd({ type: 'fold' })}>
-            弃牌
+          {/* 弃牌不占行动权：别人梭哈、还没轮到我表态的时候，我照样可以直接走人。
+              这里原来跟着 myTurn 一起禁用，等于把「随时可以放弃」这条规则在界面上
+              锁掉了 —— 引擎其实一直允许（doFold 只看你还在不在这一局里）。
+              不是自己回合时和主行动排一样点两次，防手滑。 */}
+          <button
+            className={`btn fold${armFold ? ' armed' : ''}`}
+            onClick={() => {
+              if (myTurn) return cmd({ type: 'fold' });
+              if (!armFold) return setArmFold(true);
+              setArmFold(false);
+              cmd({ type: 'fold' });
+            }}
+          >
+            {armFold ? '再点一次确认' : '弃牌'}
           </button>
         </div>
       )}

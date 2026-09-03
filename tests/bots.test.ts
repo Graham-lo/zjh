@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyCommand, botDecision, createHumanPlayer, createInitialRoom, currentPlayer,
+  applyCommand, botDecision, createHumanPlayer, createInitialRoom, currentPlayer, evaluateHand,
   type GameCommand, type RoomState,
 } from '../shared/game.ts';
 
@@ -75,4 +75,63 @@ test('机器人不会把自己打到 0 分还留在场上', () => {
       if (p.status === 'active') assert.ok(p.chips > 0, `${p.name} 卡在 0 分还在场上`);
     }
   }
+});
+
+/* ------------------------------------------------------- 打法质量的回归测试 */
+
+/** 六台机器人自己打，收集每一步的决策，用来检验"像不像人在打牌"。 */
+function autoTable(hands: number) {
+  const shape = {
+    actions: 0, folds: 0, blindFolds: 0,
+    monsters: 0, earlyMonsterCompares: 0,
+    survivorsSum: 0, handsPlayed: 0,
+  };
+  for (let h = 0; h < hands; h++) {
+    const room = table(1, 5);
+    room.players[0].isBot = true; // 让真人的座位也交给机器人，凑满一桌
+    applyCommand(room, room.hostId, { type: 'start' });
+    const seenMonster = new Set<string>();
+    let field = 0;
+    let guard = 0;
+    while (room.phase === 'playing' && guard++ < 400) {
+      const cur = currentPlayer(room);
+      if (!cur) break;
+      field = room.players.filter((p) => p.status === 'active').length;
+      const looked = cur.looked;
+      const round = room.roundNo;
+      const monster = cur.hand.length ? evaluateHand(cur.hand).category >= 5 : false;
+      if (monster && !seenMonster.has(cur.id)) { seenMonster.add(cur.id); shape.monsters++; }
+      const cmd = botDecision(room, cur);
+      shape.actions++;
+      if (cmd.type === 'fold') { shape.folds++; if (!looked) shape.blindFolds++; }
+      // 人多的时候，比牌刚一解锁就拿豹子开牌是最不像人的一步。
+      if (cmd.type === 'compare' && monster && round <= 2 && field >= 3) shape.earlyMonsterCompares++;
+      try { applyCommand(room, cur.id, cmd); } catch { applyCommand(room, cur.id, { type: 'fold' }); }
+    }
+    shape.survivorsSum += field;
+    shape.handsPlayed++;
+  }
+  return shape;
+}
+
+test('闷牌的机器人不会因为先验算错而集体弃牌', () => {
+  const shape = autoTable(200);
+  const blindShare = shape.blindFolds / Math.max(1, shape.folds);
+  // 旧模型把闷牌当成"我确定拿了一手中间牌"，再做 0.5^5 = 3% 的指数，
+  // 低于任何底池赔率 —— 于是三成弃牌都是闷着就走，牌局根本打不起来。
+  assert.ok(blindShare < 0.12, `闷着就弃占了弃牌的 ${(blindShare * 100).toFixed(1)}%`);
+});
+
+test('一桌机器人不会互相弃到只剩一个人，牌是要打到摊牌的', () => {
+  const shape = autoTable(200);
+  const survivors = shape.survivorsSum / shape.handsPlayed;
+  assert.ok(survivors >= 1.8, `平均收官人数只有 ${survivors.toFixed(2)}，等于没人真的比过牌`);
+});
+
+test('人多的时候，拿到豹子/顺金不会在比牌一解锁就开牌', () => {
+  const shape = autoTable(200);
+  const rate = shape.earlyMonsterCompares / Math.max(1, shape.monsters);
+  // 比牌是把强牌立刻变现，只赢到眼下这点底池还公开了自己的牌力。
+  // 人会先养池；机器人也必须先养池。
+  assert.ok(rate < 0.05, `${(rate * 100).toFixed(1)}% 的大牌在前两轮就多人局比牌`);
 });

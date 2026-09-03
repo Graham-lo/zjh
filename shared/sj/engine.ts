@@ -948,9 +948,7 @@ export function applySjCommand(
       return;
     }
     case 'rename': {
-      if (state.phase !== 'lobby' && state.phase !== 'hand_end' && state.phase !== 'match_end') {
-        throw new GameError('牌局进行中不能改名');
-      }
+      // 和炸金花一样：改名换头像不挑时候（见 shared/game.ts 里同一条）
       const name = cleanName(command.name);
       if (state.players.some((p) => p.id !== actor.id && p.name === name)) throw new GameError('这个昵称已经有人用了');
       const before = actor.name;

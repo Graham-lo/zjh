@@ -52,6 +52,8 @@ export interface ClientEvents {
   status?(status: Status): void;
   error?(msg: string, fatal: boolean): void;
   latency?(ms: number): void;
+  /** 服务端换了新版本（上线重启后重连时发现）。终端客户端没法自己热更新，只能提醒重开 */
+  outdated?(): void;
 }
 
 export class RoomClient {
@@ -62,6 +64,8 @@ export class RoomClient {
   account: AccountInfo | null = null;
   status: Status = 'connecting';
   latency = 0;
+  /** 第一次握手拿到的服务端前端指纹，用来发现自己是不是旧版本 */
+  private build = '';
 
   private ws: WebSocket | null = null;
   private events: ClientEvents;
@@ -149,6 +153,13 @@ export class RoomClient {
       case 'welcome':
         this.auth = { code: msg.code, playerId: msg.playerId, token: msg.token };
         if (msg.account) this.account = msg.account;
+        if (msg.build) {
+          if (!this.build) this.build = msg.build;
+          else if (msg.build !== this.build) {
+            this.build = msg.build;
+            this.events.outdated?.();
+          }
+        }
         // 命令行 / MCP 只做炸金花：升级是四人两队 + 25 张手牌的图形化玩法，
         // 终端里排不下也点不动。碰到升级房间明确退出，而不是拿炸金花的字段去读它。
         if (msg.room.kind !== 'zjh') return this.rejectKind();

@@ -142,7 +142,7 @@ export function Seat({
           {isHost && <span className="tag host">房主</span>}
           {player.isBot && (
             <span className="tag bot" title="基础风格；机器人会根据临场局面切换打法">
-              电脑{player.botStyle ? `·${player.botStyle}` : ''}
+              电脑
             </span>
           )}
           {player.isAgent && <span className="tag agent">AI</span>}

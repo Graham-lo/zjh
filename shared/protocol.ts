@@ -75,7 +75,11 @@ export type ZjhEvent =
 export type GameEvent = ZjhEvent | SjEvent;
 
 export type ServerMsg =
-  | { t: 'welcome'; code: string; playerId: string; token: string; room: AnyPublicRoom; account?: AccountInfo }
+  /**
+   * `build` 是服务端当前那份前端产物的指纹。客户端记住第一次握手拿到的值，
+   * 之后任何一次重连（上线重启必然触发一次）拿到不一样的值，就说明自己这个页面旧了。
+   */
+  | { t: 'welcome'; code: string; playerId: string; token: string; room: AnyPublicRoom; account?: AccountInfo; build?: string }
   | { t: 'room'; room: AnyPublicRoom; events: GameEvent[] }
   | { t: 'error'; msg: string; fatal?: boolean }
   | { t: 'pong'; at: number; now: number };

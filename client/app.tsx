@@ -70,6 +70,11 @@ export default function App() {
   const [batch, setBatch] = useState<{ seq: number; events: GameEvent[] }>({ seq: 0, events: [] });
   const [account, setAccount] = useState<AccountInfo | null>(null);
 
+  // 页面启动时握手拿到的前端指纹。之后任何一次重连拿到不一样的值，
+  // 就说明服务端已经换了新版本、而这个页面还跑着旧的那一份。
+  const buildRef = useRef('');
+  const [staleBuild, setStaleBuild] = useState(false);
+
   const netRef = useRef<Net | null>(null);
   const seqRef = useRef(0);
   const toastTimer = useRef(0);
@@ -95,7 +100,11 @@ export default function App() {
   useEffect(() => {
     const net = new Net({
       onStatus: setStatus,
-      onWelcome: (auth, r) => {
+      onWelcome: (auth, r, build) => {
+        if (build) {
+          if (!buildRef.current) buildRef.current = build;
+          else if (build !== buildRef.current) setStaleBuild(true);
+        }
         try {
           localStorage.setItem(authKey(auth.code), JSON.stringify({ playerId: auth.playerId, token: auth.token }));
         } catch {
@@ -150,6 +159,29 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * 无感更新：上线新版本之后，页面自己在不打断牌局的时机重新加载。
+   *
+   * 上线一次要重启服务，所有人的连接都会断一下再自动接回来 —— 那一次重连就是
+   * 发现「我旧了」的时机。房间状态在服务端的 SQLite 里，本地存着这张桌子的房卡，
+   * 刷新之后直接回到原座位，所以对人来说只是画面闪一下。
+   *
+   * 唯一要躲开的是「正在打的这一手」：牌局中途刷新会丢掉发牌、比牌那些正在播的动画，
+   * 轮到自己时更是会白白吃掉几秒。所以真正在打牌的时候先记着，等这一手歇下来再刷。
+   */
+  const midHand = room
+    ? room.kind === 'zjh'
+      ? room.phase === 'playing'
+      : room.phase !== 'lobby' && room.phase !== 'hand_end' && room.phase !== 'match_end'
+    : false;
+  useEffect(() => {
+    if (!staleBuild || midHand) return;
+    notify('已更新到新版本，正在刷新…');
+    const t = window.setTimeout(() => location.reload(), 900);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [staleBuild, midHand]);
+
   const cmd = (c: AnyGameCommand) => {
     const net = netRef.current;
     if (!net || !room) return;
@@ -188,9 +220,9 @@ export default function App() {
     <>
       {room ? (
         room.kind === 'zjh' ? (
-          <Table room={room} cmd={cmd} status={status} latency={latency} batch={batch} onToast={notify} account={account} />
+          <Table room={room} cmd={cmd} status={status} latency={latency} batch={batch} onToast={notify} account={account} onIdent={setIdent} />
         ) : (
-          <SjTable room={room} cmd={cmd} status={status} latency={latency} batch={batch} onToast={notify} account={account} />
+          <SjTable room={room} cmd={cmd} status={status} latency={latency} batch={batch} onToast={notify} account={account} onIdent={setIdent} />
         )
       ) : (
         <Landing

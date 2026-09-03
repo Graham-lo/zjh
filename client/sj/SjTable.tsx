@@ -11,6 +11,7 @@ import type { AccountInfo, AnyGameCommand, GameEvent } from '../../shared/protoc
 import { PlayingCard } from '../components/Card.tsx';
 import { Dock } from '../components/Dock.tsx';
 import { GoldRain } from '../components/Fx.tsx';
+import { ProfileDialog } from '../components/ProfileDialog.tsx';
 import { IconCopy, IconExit, IconSoundOff, IconSoundOn, IconVoice, Laurel } from '../components/Icons.tsx';
 import { TurnRing, useCountdown, useHurryTick } from '../components/TurnRing.tsx';
 import type { NetStatus } from '../net.ts';
@@ -192,6 +193,7 @@ export function SjTable({
   batch,
   onToast,
   account,
+  onIdent,
 }: {
   room: SjPublicRoom;
   cmd(c: AnyGameCommand): void;
@@ -200,11 +202,13 @@ export function SjTable({
   batch: { seq: number; events: GameEvent[] };
   onToast(msg: string): void;
   account: AccountInfo | null;
+  onIdent?(next: { name: string; avatar: string }): void;
 }) {
   const me = room.players.find((p) => p.id === room.viewerId);
   const mySeat = me?.seat ?? 0;
   const send = (c: SjCommand) => cmd(c);
 
+  const [profileOpen, setProfileOpen] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [hintIdx, setHintIdx] = useState(0);
   const [peek, setPeek] = useState(false);
@@ -682,6 +686,16 @@ export function SjTable({
             房间 {room.code.slice(0, 3)} {room.code.slice(3)}
             <IconCopy size={13} />
           </button>
+          {/* 和炸金花同一个入口：点自己的脸改名换头像 */}
+          <button
+            className="me-pill"
+            onClick={() => setProfileOpen(true)}
+            title="改名 · 换头像"
+            aria-label="改名换头像"
+          >
+            <span className="me-av">{me.avatar}</span>
+            <span className="me-name">{me.name}</span>
+          </button>
         </div>
         <div className="topbar-right">
           {account && (
@@ -983,6 +997,16 @@ export function SjTable({
       </section>
 
       <Dock room={room as never} open={dockOpen} onToggle={setDockOpen} />
+
+      {profileOpen && (
+        <ProfileDialog
+          name={me.name}
+          avatar={me.avatar}
+          onSave={(next) => cmd({ type: 'rename', name: next.name, avatar: next.avatar })}
+          onIdent={onIdent}
+          onClose={() => setProfileOpen(false)}
+        />
+      )}
 
       <div className="emote-bar sj-emotes">
         {EMOTES.map((e) => (

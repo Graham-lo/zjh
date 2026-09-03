@@ -6,6 +6,7 @@ import {
   handPercentile, migrateRoom, sanitizeRoom, startRound, timeoutCurrentPlayer, transferHost,
   type Card, type RoomState,
 } from '../shared/game.ts';
+import { engine } from '../shared/games.ts';
 
 const c = (rank: number, suit: Card['suit']): Card => ({ rank, suit });
 
@@ -82,14 +83,27 @@ test('娱乐增强发牌：散牌和对子仍能从长尾发出', () => {
   }
 });
 
-test('娱乐增强发牌：同牌型的抽取确实偏向高点数', () => {
-  const pickerFor = (roll: number) => (max: number) => max === 1000 ? roll : 0;
-  for (const [roll, category] of [[920, 1], [970, 2], [380, 3], [0, 4], [800, 5], [670, 6]] as const) {
-    const hand = dealWeightedHands(1, pickerFor(roll))[0];
-    const value = evaluateHand(hand);
-    assert.equal(value.category, category);
-    assert.ok(value.tiebreak[0] >= 13, `牌型 ${category} 应从高点数组合开始抽`);
+test('娱乐增强发牌：同牌型内部是均匀的，小豹子小顺金照样发得出来', () => {
+  // 只放大牌型频率，不在牌型内部再偏向大牌 —— 否则每个人的金花都是 A 高，
+  // 同桌撞上同一牌型时大小永远贴在一起，比牌在开牌前就没有悬念了。
+  let state = 0x2468ace0;
+  const pick = (max: number) => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state % max;
+  };
+  const tops = new Map<number, Set<number>>();
+  for (let i = 0; i < 4000; i++) {
+    for (const hand of dealWeightedHands(4, pick)) {
+      const value = evaluateHand(hand);
+      const seen = tops.get(value.category) ?? new Set<number>();
+      seen.add(value.tiebreak[0]);
+      tops.set(value.category, seen);
+    }
   }
+  // 豹子从 2 到 A 都要出现过，顺金也要能低到 5 高（即 345 同花）以下
+  assert.ok(tops.get(6)!.has(2) && tops.get(6)!.has(14), '豹子应该覆盖到 222 和 AAA');
+  assert.ok(Math.min(...tops.get(5)!) <= 5, '顺金不该永远是大牌');
+  assert.ok(Math.min(...tops.get(4)!) <= 8, '金花不该永远是 A/K 高');
 });
 
 /* ------------------------------------------------------------- 开局 */
@@ -154,6 +168,33 @@ test('比牌花两倍跟注额，单挑时立即开放', () => {
   assert.equal(price, room.settings.betOptions[0] * 2);
   assert.equal(room.phase, 'round_end');
   assert.equal(room.result?.winnerId, target.id);
+});
+
+test('牌型和大小完全一样时，主动发起比牌的人输', () => {
+  // 现实牌桌的规矩：叫比牌的人要承担平局的代价，否则谁都可以零风险地试探。
+  const room = makeRoom(2);
+  startRound(room, room.hostId);
+  const actor = currentPlayer(room)!;
+  const target = room.players.find((p) => p.id !== actor.id)!;
+  actor.hand = [c(12, 'S'), c(9, 'S'), c(4, 'S')];
+  target.hand = [c(12, 'H'), c(9, 'H'), c(4, 'H')]; // 同为 Q 高金花，逐张相等
+  assert.equal(compareHands(actor.hand, target.hand), 0);
+  applyCommand(room, actor.id, { type: 'compare', targetId: target.id });
+  assert.equal(room.result?.winnerId, target.id, '平局应判发起方负');
+  assert.equal(actor.status, 'folded');
+});
+
+test('封顶开牌时同样是后手胜，跟比牌口径一致', () => {
+  const room = makeRoom(2);
+  startRound(room, room.hostId);
+  room.roundNo = room.settings.allInFromRound;
+  const actor = currentPlayer(room)!;
+  const target = room.players.find((p) => p.id !== actor.id)!;
+  actor.hand = [c(12, 'S'), c(9, 'S'), c(4, 'S')];
+  target.hand = [c(12, 'H'), c(9, 'H'), c(4, 'H')];
+  applyCommand(room, actor.id, { type: 'all_in' });
+  applyCommand(room, target.id, { type: 'call' });
+  assert.equal(room.result?.winnerId, target.id, '梭哈发起方在完全同牌时也应判负');
 });
 
 test('短码梭哈时金额就是他自己的身家，接的人按同一金额入池', () => {
@@ -310,7 +351,7 @@ test('老快照缺字段时会被补齐，不会出现 undefined 轮', () => {
   delete (room.settings as Partial<typeof room.settings>).maxRounds;
   migrateRoom(room);
   assert.equal(room.settings.allInFromRound, 3);
-  assert.equal(room.settings.maxRounds, 8);
+  assert.equal(room.settings.maxRounds, 0, '封顶轮数是玩法规则，旧房间恢复后统一到当前默认（不封顶）');
   assert.equal(room.settings.startingChips, 500_000, '旧房间恢复后也使用新的 50 万重置额度');
   assert.equal(room.settings.ante, 1_000, '旧房间下一局也使用新的底注');
   assert.deepEqual(room.settings.betOptions, [1_000, 20_000, 50_000, 100_000], '旧房间同步新的加注档位');
@@ -565,8 +606,9 @@ test('看牌不占用行动权，什么时候都能看自己的牌', () => {
 
 /* --------------------------------------------------------- 结束保证 */
 
-test('打满封顶轮数一定会强制开牌结束本局', () => {
+test('房间设了封顶轮数时，打满一定会强制开牌结束本局', () => {
   const room = makeRoom(3);
+  room.settings.maxRounds = 8;
   room.settings.escalateFrom = 0; // 关掉自动升档，逼出纯"一直跟注"的最坏情况
   startRound(room, room.hostId);
   let steps = 0;
@@ -577,6 +619,27 @@ test('打满封顶轮数一定会强制开牌结束本局', () => {
   }
   assert.equal(room.phase, 'round_end');
   assert.ok(room.roundNo <= room.settings.maxRounds + 1);
+});
+
+test('不封顶时靠加注压力收敛：一直平跟也一定会打完，而且不是被数轮数掀掉的', () => {
+  const room = makeRoom(3);
+  assert.equal(room.settings.maxRounds, 0, '默认就该是不封顶');
+  room.settings.escalateFrom = 0; // 连自动升档也关掉 —— 最坏情况
+  startRound(room, room.hostId);
+  let steps = 0;
+  while (room.phase === 'playing') {
+    const cur = currentPlayer(room)!;
+    // 跟不起的时候只剩梭哈，这正是"钱把胜负逼出来"的那一步
+    try {
+      applyCommand(room, cur.id, { type: 'call' });
+    } catch {
+      applyCommand(room, cur.id, { type: 'all_in' });
+    }
+    assert.ok(++steps < 400, '不封顶也必须收敛 —— 底注要一直加压到有人掏不起');
+  }
+  assert.equal(room.phase, 'round_end');
+  assert.ok(room.roundNo > 8, `本局只打了 ${room.roundNo} 轮，说明还有别的地方在提前掀桌子`);
+  assert.ok(!room.result!.reason.includes('封顶'), `不该出现封顶收场：${room.result!.reason}`);
 });
 
 /* ----------------------------------------------------------- 房主 */
@@ -773,11 +836,16 @@ test('中途被比牌比下去的人，牌局继续也要在结算时亮牌', ()
   );
 
   applyCommand(room, c1.id, { type: 'fold' }); // 主动弃牌的那一家
-  // 剩下的人一路跟到封顶开牌，本局由别的路径结束
+  // 剩下的人一路跟到有人掏不起为止，本局由别的路径结束
   let steps = 0;
   while (room.phase === 'playing') {
-    applyCommand(room, currentPlayer(room)!.id, { type: 'call' });
-    assert.ok(++steps < 200, '一直跟注也必须收敛');
+    const cur = currentPlayer(room)!;
+    try {
+      applyCommand(room, cur.id, { type: 'call' });
+    } catch {
+      applyCommand(room, cur.id, { type: 'all_in' });
+    }
+    assert.ok(++steps < 400, '一直跟注也必须收敛');
   }
 
   const revealed = room.result!.revealed;
@@ -833,11 +901,14 @@ test('机器人有稳定且不同的性格，不会每一步随机换人格', ()
   assert.deepEqual(botPersonality({ id: 'same', name: '阿凯' }), aggressive);
 });
 
-test('一桌会随机抽到多个不重复的机器人基础风格', () => {
+test('一桌会抽到多个不重复的机器人，且风格各不相同', () => {
   const room = makeRoom(1, 5);
-  const styles = room.players.filter((p) => p.isBot).map((p) => p.botStyle);
-  assert.equal(styles.length, 5);
-  assert.equal(new Set(styles).size, 5);
+  const bots = room.players.filter((p) => p.isBot);
+  assert.equal(bots.length, 5);
+  assert.equal(new Set(bots.map((p) => p.name)).size, 5);
+  // 性格必须真的不一样，但**不能**出现在牌桌上：打法要靠观察摸出来
+  assert.equal(new Set(bots.map((p) => JSON.stringify(botPersonality(p)))).size, 5);
+  assert.ok(bots.every((p) => !('botStyle' in p)), '不该把风格标签下发给客户端');
 });
 
 test('机器人防偷看：对手暗牌与闷牌时自己的牌都不会影响决策', () => {
@@ -1001,4 +1072,94 @@ test('比牌解锁条件与客户端算的一致', () => {
   assert.equal(canCompareNow(room), false);
   const view = sanitizeRoom(room, room.players[0].id);
   assert.equal(canCompareNow(view), canCompareNow(room));
+});
+
+/* ------------------------------------------------- 真人进房顶替电脑 */
+
+test('房间坐满但坐的是电脑时，真人进来顶掉一台电脑而不是被挡在门外', () => {
+  const room = makeRoom(1, 5);
+  assert.equal(room.players.length, 6, '前提：六个座位已经坐满');
+  assert.equal(room.players.filter((p) => p.isBot).length, 5);
+
+  const adapter = engine('zjh');
+  const id = adapter.join(room, {
+    name: '朋友', avatar: '🐼', tokenHash: 't-friend', accountId: 'acc-friend',
+    chips: 500_000, granted: 0, wins: 0, agent: false,
+  });
+
+  assert.equal(room.players.length, 6, '顶替不是加座，人数不变');
+  assert.equal(room.players.filter((p) => p.isBot).length, 4, '走掉一台电脑');
+  const joined = room.players.find((p) => p.id === id);
+  assert.ok(joined && !joined.isBot, '新来的真人确实坐下了');
+  assert.ok(joined.seat >= 0 && joined.seat < room.settings.maxPlayers, '坐在合法座位上');
+  assert.equal(new Set(room.players.map((p) => p.seat)).size, 6, '没有两个人坐同一个座位');
+});
+
+test('六个座位全是真人时才说房间已满', () => {
+  const room = makeRoom(6, 0);
+  assert.equal(room.players.length, 6);
+  const adapter = engine('zjh');
+  assert.throws(
+    () => adapter.join(room, {
+      name: '第七个', avatar: '🐼', tokenHash: 't7', accountId: 'acc7',
+      chips: 500_000, granted: 0, wins: 0, agent: false,
+    }),
+    /房间已满/,
+  );
+});
+
+test('牌局进行中也能顶替：优先赶已经不在这手牌里的电脑', () => {
+  const room = makeRoom(1, 5);
+  startRound(room, room.hostId);
+  // 让一台电脑先弃牌出局，它才是该被赶走的那个
+  const acting = currentPlayer(room);
+  const spare = room.players.find((p) => p.isBot && p.id !== acting?.id)!;
+  spare.status = 'folded';
+
+  const adapter = engine('zjh');
+  adapter.join(room, {
+    name: '朋友', avatar: '🐼', tokenHash: 't-friend', accountId: 'acc-friend',
+    chips: 500_000, granted: 0, wins: 0, agent: false,
+  });
+
+  assert.ok(!room.players.some((p) => p.id === spare.id), '被赶走的是那台已经弃牌的电脑');
+  assert.equal(room.players.length, 6);
+  // 还在打的这手牌没被搞坏
+  if (room.phase === 'playing') {
+    assert.ok(currentPlayer(room), '轮到谁行动仍然指向桌上的人');
+  }
+});
+
+test('同一个账户重复进房不会白白赶走一台电脑', () => {
+  const room = makeRoom(1, 5);
+  const adapter = engine('zjh');
+  const seed = {
+    name: '朋友', avatar: '🐼', tokenHash: 't-friend', accountId: 'acc-friend',
+    chips: 500_000, granted: 0, wins: 0, agent: false,
+  };
+  adapter.join(room, seed);
+  const botsAfterFirst = room.players.filter((p) => p.isBot).length;
+  assert.throws(() => adapter.join(room, seed), /已经在这个房间/);
+  assert.equal(room.players.filter((p) => p.isBot).length, botsAfterFirst, '没有再赶走第二台');
+});
+
+test('改名换头像不挑时候：牌局进行中照样能改', () => {
+  // 名字和头像是「我想让别人怎么称呼我」，不是牌桌状态。随手起的默认昵称打了两把
+  // 想换掉，不该被迫等一整局打完（产品决定：不做阶段限制）。
+  const room = makeRoom(1, 2);
+  startRound(room, room.hostId);
+  assert.equal(room.phase, 'playing');
+
+  applyCommand(room, room.hostId, { type: 'rename', name: '牌局中改的名', avatar: '🐯' });
+  const host = room.players.find((p) => p.id === room.hostId)!;
+  assert.equal(host.name, '牌局中改的名');
+  assert.equal(host.avatar, '🐯');
+
+  // 同桌重名仍然拦着 —— 那是真会让人看错谁在跟谁比牌的
+  const other = room.players.find((p) => p.id !== room.hostId)!;
+  other.name = '同桌那个人';
+  assert.throws(
+    () => applyCommand(room, room.hostId, { type: 'rename', name: '同桌那个人', avatar: '🐯' }),
+    /已经有人用了/,
+  );
 });

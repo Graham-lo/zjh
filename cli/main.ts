@@ -112,15 +112,49 @@ function loadIdent(): { name: string; avatar: string } {
     return v;
   }
 }
+/** 在房间里改完名字也写回本机，下次开 cli 直接就是新名字，不用每次带 --name */
+function saveIdent(v: { name: string; avatar: string }) {
+  try {
+    mkdirSync(STORE, { recursive: true });
+    writeFileSync(identFile, JSON.stringify(v));
+  } catch {
+    /* 存不下就只对这一次会话生效，不值得打断牌局 */
+  }
+}
 const ident = loadIdent();
 const name = flag('name') ?? ident.name;
 const avatar = flag('avatar') ?? ident.avatar;
 
 /* --------------------------------------------------------------- 画面 */
 
-type Mode = 'play' | 'cmd' | 'compare' | 'emote';
+type Mode = 'play' | 'cmd' | 'compare' | 'emote' | 'profile';
 let mode: Mode = 'play';
 let buffer = '';
+/** 改名换头像时的草稿：名字借用 buffer，头像单独存一个下标 */
+let avatarIdx = 0;
+/**
+ * 危险动作的「再按一次」暂存。
+ *
+ * 梭哈和退出都是一按下去就没法反悔的事，而它们在键盘上又正好挨着常用键
+ * （a 梭哈紧贴 s 看牌，q 退出就压在 a 上面）。第一次按只是把动作举起来，
+ * 第二次按同一个键才真的落下；按别的键或者过几秒钟自动放下。
+ */
+let armed: '' | 'all_in' | 'quit' = '';
+let armedTimer: ReturnType<typeof setTimeout> | null = null;
+function arm(what: 'all_in' | 'quit', hint: string): void {
+  armed = what;
+  if (armedTimer) clearTimeout(armedTimer);
+  armedTimer = setTimeout(() => {
+    armed = '';
+    draw();
+  }, 4000);
+  say(hint, 4000);
+}
+function disarm() {
+  armed = '';
+  if (armedTimer) clearTimeout(armedTimer);
+  armedTimer = null;
+}
 let notice = '';
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -227,6 +261,10 @@ const client = new RoomClient(target, {
     wasOffline = s !== 'online';
     draw();
   },
+  // 服务端上线了新版本。网页端会自己挑个不打断牌局的时机刷新，
+  // 终端里的进程做不到 —— 硬重启会把这一手牌的画面全部抹掉，所以只提示，
+  // 什么时候重开由人自己决定。牌局在服务端，重开之后照样回到原座位。
+  outdated: () => say(`${C.gold}服务端已更新到新版本${C.reset}${C.dim}　这一局打完退出重开 cli 就能用上新功能，座位不会丢${C.reset}`, 12000),
   error: (msg, fatal) => {
     say(`${C.red}${msg}${C.reset}`);
     if (fatal) {
@@ -263,6 +301,13 @@ function draw() {
     );
   } else if (mode === 'emote') {
     lines.push('', `${C.gold}发个表情${C.reset} ${EMOTES.map((e, i) => `[${i + 1}]${e}`).join(' ')}   [esc]取消`);
+  } else if (mode === 'profile') {
+    const picks = AVATARS.map((a, i) => (i === avatarIdx ? `${C.gold}[${a}]${C.reset}` : `${C.dim} ${a} ${C.reset}`)).join('');
+    lines.push(
+      '',
+      `${C.gold}改名 · 换头像${C.reset}  ${picks}  ${C.dim}[tab/←→]换头像${C.reset}`,
+      `${C.gold}昵称${C.reset} ${buffer}${C.dim}_${C.reset}   ${C.dim}[enter]保存  [esc]取消${C.reset}`,
+    );
   }
   // notice 可能是多行的帮助文本，拆成行交给差分重绘
   if (notice) lines.push('', ...notice.split('\n'));
@@ -358,10 +403,17 @@ function toggleAuto() {
 }
 
 const HELP = [
-  `${C.bold}按键${C.reset}`,
-  `  ${C.gold}k${C.reset} 看牌    ${C.gold}c${C.reset} 跟注/接受梭哈    ${C.gold}f${C.reset} 弃牌（随时可弃）    ${C.gold}a${C.reset} 梭哈    ${C.gold}v${C.reset} 比牌    ${C.gold}1-4${C.reset} 加注档位`,
-  `  ${C.gold}r${C.reset} 准备    ${C.gold}s${C.reset} 开始    ${C.gold}b${C.reset} 加电脑    ${C.gold}n${C.reset} 下一局    ${C.gold}m${C.reset} 补分    ${C.gold}i${C.reset} 邀请链接`,
-  `  ${C.gold}e${C.reset} 表情    ${C.gold}:${C.reset} 命令    ${C.gold}?${C.reset} 帮助    ${C.gold}q${C.reset} 退出${C.dim}（牌局中退出＝自动弃牌离场）${C.reset}`,
+  `${C.bold}一个键就够${C.reset}`,
+  `  ${C.gold}空格${C.reset} / ${C.gold}回车${C.reset} 当前场合的主操作${C.dim}（准备阶段＝准备/开始，牌局中＝跟注/接受梭哈，结算＝下一局）${C.reset}`,
+  `${C.bold}左手（单手也能打完整局）${C.reset}`,
+  `  ${C.gold}a${C.reset} 梭哈${C.dim}（连按两次）${C.reset}   ${C.gold}s${C.reset} 看牌   ${C.gold}d${C.reset} 跟注/接受   ${C.gold}f${C.reset} 弃牌${C.dim}（随时可弃）${C.reset}   ${C.gold}v${C.reset} 比牌   ${C.gold}g${C.reset} 自动跟注   ${C.gold}1-4${C.reset} 加注档位`,
+  `${C.bold}右手（同一套动作的镜像，位置一一对应）${C.reset}`,
+  `  ${C.gold};${C.reset} 梭哈${C.dim}（连按两次）${C.reset}   ${C.gold}k${C.reset} 看牌   ${C.gold}j${C.reset} 跟注/接受   ${C.gold}l${C.reset} 弃牌   ${C.gold}7-0${C.reset} 加注档位`,
+  `${C.bold}有人梭哈时${C.reset}`,
+  `  ${C.gold}y${C.reset} 接受    ${C.gold}n${C.reset} 弃牌出局    ${C.gold}s${C.reset}/${C.gold}k${C.reset} 先看牌${C.dim}（看完接的价翻倍，闷着接是半价）${C.reset}`,
+  `${C.bold}牌局之外${C.reset}`,
+  `  ${C.gold}r${C.reset} 准备    ${C.gold}b${C.reset} 加电脑    ${C.gold}n${C.reset} 下一局    ${C.gold}m${C.reset} 补分    ${C.gold}o${C.reset} 房规    ${C.gold}i${C.reset} 邀请链接`,
+  `  ${C.gold}p${C.reset} 改名换头像${C.dim}（什么时候都能改）${C.reset}    ${C.gold}e${C.reset} 表情    ${C.gold}:${C.reset} 命令    ${C.gold}?${C.reset} 帮助    ${C.gold}q${C.reset} 退出${C.dim}（连按两次；牌局中退出＝自动弃牌离场）${C.reset}`,
   `  ${C.gold}g${C.reset} 自动跟注（挂机）：轮到自己就跟，跟不起自动梭哈，没分了弃牌；${C.dim}有人梭哈会自动关掉交还给你${C.reset}`,
   `${C.bold}命令${C.reset}`,
   `  ${C.gold}:name 昵称${C.reset}   ${C.gold}:avatar 🐯${C.reset}   ${C.gold}:kick 座位号${C.reset}   ${C.gold}:log${C.reset}   ${C.gold}:invite${C.reset}`,
@@ -376,15 +428,42 @@ function quit() {
   }, 250);
 }
 
+/**
+ * 键位布局。改版的出发点是「手不用在键盘上跑来跑去」：
+ *
+ * - **最常按的那一下给最大的键。** 一局牌里绝大多数决定其实是「跟」和「继续」，
+ *   所以空格/回车固定是当前场合的主操作 —— 准备阶段是准备/开局，牌局中是跟注
+ *   （有人梭哈时就是接），结算是下一局。不认字也知道往下按空格。
+ * - **左右手各有一套完整键位，位置一一对应。** 左手落在 asdf 上（a 梭哈 s 看牌
+ *   d 跟注 f 弃牌），右手落在 ;lkj 上（; 梭哈 k 看牌 j 跟注 l 弃牌）——
+ *   同一根手指在两只手上做同一件事。一只手端着杯子也能把一局打完。
+ * - **加注档位同样成对**：左手 1-4，右手 7-0（7 是第一档，0 是第四档）。
+ * - **不可挽回的动作要连按两次。** 梭哈（a / ;）和退出（q）都是一下就没法反悔的，
+ *   而 q 正好压在 a 上面、a 又紧挨着 s —— 手滑一次代价太大，所以第一次按只是举起来。
+ * - **旧键位全部保留**：k 看牌、c 跟注、f 弃牌、a 梭哈、v 比牌，习惯了的人不用重学。
+ */
 function handleKey(key: string) {
   const r = client.room;
   if (!r) return;
   const acts = legalActions(r);
   const can = (a: string) => acts.some((x) => x.action === a);
+  // 举起来的动作只认举起它的那个键，按到别的键就等于改主意了
+  const wasArmed = armed;
+  const confirmKeys = wasArmed === 'quit' ? ['q'] : ['a', ';'];
+  if (wasArmed && !confirmKeys.includes(key)) disarm();
 
   switch (key) {
     case 'q':
-      return quit();
+      if (wasArmed === 'quit') {
+        disarm();
+        return quit();
+      }
+      return arm(
+        'quit',
+        r.phase === 'playing' && me().status === 'active'
+          ? `${C.red}再按一次 q 退出${C.reset}${C.dim}　牌局中退出＝自动弃牌离场${C.reset}`
+          : `${C.gold}再按一次 q 退出${C.reset}`,
+      );
     case ':':
       mode = 'cmd';
       buffer = '';
@@ -392,16 +471,34 @@ function handleKey(key: string) {
     case 'e':
       mode = 'emote';
       return draw();
+    case 'p': {
+      // 改名换头像不挑时候：名字是自己怎么被称呼，不是牌桌状态
+      mode = 'profile';
+      buffer = me().name;
+      avatarIdx = Math.max(0, AVATARS.indexOf(me().avatar));
+      return draw();
+    }
     case 'i':
       return say(`${C.gold}邀请链接${C.reset} ${target.origin}/?room=${r.code}`, 8000);
     case '?':
-      return say(HELP, 10000);
+      return say(HELP, 14000);
     case 'g':
       // 提示行只在 playing 里显示，但按键任何阶段都认：牌局间隙先挂上，开局就自己打
       return toggleAuto();
   }
 
+  // 空格和回车是同一个键：当前这一屏最该按的那一下
+  const primary = key === ' ' || key === '\r' || key === '\n';
+
   if (r.phase === 'lobby') {
+    const host = r.hostId === me().id;
+    if (primary) {
+      // 房主人齐了就开局，其余情况一律是「准备 / 取消准备」
+      if (host && r.players.filter((p) => p.isBot || p.ready).length === r.players.length && r.players.length >= 2) {
+        return send({ type: 'start' });
+      }
+      return send({ type: 'ready', ready: !me().ready });
+    }
     if (key === 'r') return send({ type: 'ready', ready: !me().ready });
     if (key === 's') return send({ type: 'start' });
     if (key === 'b') return send({ type: 'add_bot' });
@@ -414,30 +511,50 @@ function handleKey(key: string) {
     return;
   }
   if (r.phase === 'round_end') {
-    if (key === 'n') return send({ type: 'new_round' });
+    if (key === 'n' || primary) return send({ type: 'new_round' });
     if (key === 'm') return send({ type: 'top_up' });
     return;
   }
 
-  if (key === 'k' && can('look')) return send({ type: 'look' });
-  if (key === 'f' && can('fold')) return send({ type: 'fold' });
-  if (key === 'c') {
+  // 梭哈表态用一对专用键：y=接、n=弃。跟注/弃牌那一套键照旧可用，但在「跟注」和
+  // 「接受梭哈」之间复用同一个键，正是这一刻最容易按错的地方。
+  if (r.allIn) {
+    if (key === 'y') {
+      if (can('accept')) return send({ type: 'call' });
+      return say(`${C.dim}你已经表过态了${C.reset}`);
+    }
+    if (key === 'n') {
+      if (can('fold')) return send({ type: 'fold' });
+      return say(`${C.dim}你已经不在这局里了${C.reset}`);
+    }
+  }
+  if ((key === 'k' || key === 's') && can('look')) return send({ type: 'look' });
+  if ((key === 'f' || key === 'l') && can('fold')) return send({ type: 'fold' });
+  if (key === 'c' || key === 'd' || key === 'j' || primary) {
     if (can('accept') || can('call')) return send({ type: 'call' });
+    if (primary) return; // 空格是万能键，按在没得跟的时候安静就好，不用报错
     return say(`${C.dim}现在跟不了${C.reset}`);
   }
-  if (key === 'a') {
-    if (can('all_in')) return send({ type: 'all_in' });
-    return say(`${C.dim}现在不能梭哈${C.reset}`);
+  if (key === 'a' || key === ';') {
+    if (!can('all_in')) return say(`${C.dim}现在不能梭哈${C.reset}`);
+    if (wasArmed === 'all_in') {
+      disarm();
+      return send({ type: 'all_in' });
+    }
+    const cost = acts.find((x) => x.action === 'all_in')?.cost ?? 0;
+    return arm('all_in', `${C.bold}${C.gold}再按一次梭哈 ${fmt(cost)}${C.reset}`);
   }
   if (key === 'v') {
     if (!can('compare')) return say(`${C.dim}现在不能比牌${C.reset}`);
     mode = 'compare';
     return draw();
   }
-  if (/^[1-9]$/.test(key)) {
-    const tier = raiseTiers()[Number(key) - 1];
-    if (tier) return send({ type: 'raise', unit: tier.unit! });
-  }
+  // 加注档位：左手 1-4，右手 7-0（右手那一排在键盘上是反着数的，7 才是第一档）
+  const tiers = raiseTiers();
+  const left = /^[1-9]$/.test(key) ? tiers[Number(key) - 1] : undefined;
+  const right = '7890'.includes(key) ? tiers['7890'.indexOf(key)] : undefined;
+  const tier = left ?? right;
+  if (tier) return send({ type: 'raise', unit: tier.unit! });
 }
 
 function runCommand(input: string) {
@@ -446,11 +563,15 @@ function runCommand(input: string) {
   const rest = parts.slice(1);
   const arg = rest.join(' ');
   switch (head) {
-    case 'name':
+    case 'name': {
       if (!arg) return say('用法 :name 新昵称');
-      return send({ type: 'rename', name: arg, avatar: me().avatar });
+      const nick = arg.slice(0, 10);
+      saveIdent({ name: nick, avatar: me().avatar });
+      return send({ type: 'rename', name: nick, avatar: me().avatar });
+    }
     case 'avatar':
       if (!AVATARS.includes(arg)) return say(`可选头像：${AVATARS.join(' ')}`);
+      saveIdent({ name: me().name, avatar: arg });
       return send({ type: 'rename', name: me().name, avatar: arg });
     case 'kick': {
       const t = room().players.find((p) => p.seat === Number(arg));
@@ -505,6 +626,17 @@ function onData(chunk: Buffer) {
     buffer = '';
     return draw();
   }
+  if (mode === 'profile') {
+    // tab 和左右方向键都能换头像 —— 方向键在有些终端里是三个字节的转义序列
+    if (s === '\t' || s === '\u001B[C') {
+      avatarIdx = (avatarIdx + 1) % AVATARS.length;
+      return draw();
+    }
+    if (s === '\u001B[D') {
+      avatarIdx = (avatarIdx - 1 + AVATARS.length) % AVATARS.length;
+      return draw();
+    }
+  }
   if (mode === 'compare' || mode === 'emote') {
     const i = Number(s) - 1;
     if (mode === 'compare') {
@@ -523,6 +655,11 @@ function onData(chunk: Buffer) {
     mode = 'play';
     buffer = '';
     if (was === 'cmd' && text.trim()) runCommand(text);
+    if (was === 'profile') {
+      const nick = text.trim().slice(0, 10) || me().name;
+      send({ type: 'rename', name: nick, avatar: AVATARS[avatarIdx] });
+      saveIdent({ name: nick, avatar: AVATARS[avatarIdx] });
+    }
     return draw();
   }
   if (s === KEY.backspace || s === '\b') {

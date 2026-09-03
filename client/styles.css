@@ -334,6 +334,16 @@ button { touch-action: manipulation; }
 }
 .room-pill:hover { background: rgba(227, 200, 143, 0.14); border-color: rgba(227, 200, 143, 0.55); }
 .room-pill svg { color: #9aa89f; }
+/* 自己的头像＋名字，点开就能改。做成和房号一样的胶囊，视觉上是一组「我是谁、在哪桌」 */
+.me-pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04);
+  color: var(--text); border-radius: 999px; padding: 4px 12px 4px 6px; font-size: 12.5px;
+  cursor: pointer; transition: background 0.14s, border-color 0.14s;
+}
+.me-pill:hover { background: rgba(255, 255, 255, 0.09); border-color: var(--line-2); }
+.me-av { font-size: 17px; line-height: 1; }
+.me-name { max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .net-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
 .net-pill i { width: 7px; height: 7px; border-radius: 50%; background: #8fd9ac; box-shadow: 0 0 8px #8fd9ac; }
 .net-connecting i { background: var(--gold); box-shadow: 0 0 8px var(--gold); }
@@ -470,15 +480,14 @@ button { touch-action: manipulation; }
 }
 .pot small { font-size: 11px; color: var(--dim); }
 /* 梭哈之后的余韵：底池换成火焰橙呼吸光，一直烧到本局结束 */
-.allin-live .pot {
-  border-color: rgba(255, 190, 110, 0.5);
-  animation: potFire 1.9s ease-in-out infinite;
+.allin-live .pot { border-color: rgba(255, 190, 110, 0.5); }
+.allin-live .pot::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  pointer-events: none; z-index: -1; will-change: opacity;
+  box-shadow: 0 0 58px rgba(255, 150, 60, 0.55);
+  animation: glowBreath 1.9s ease-in-out infinite;
 }
 .allin-live .pot strong { background: linear-gradient(180deg, #ffe6c0, #f3a95e 60%, #cf7d38); -webkit-background-clip: text; background-clip: text; }
-@keyframes potFire {
-  0%, 100% { box-shadow: 0 20px 44px -14px rgba(0, 0, 0, 0.85), 0 0 26px rgba(255, 150, 60, 0.25); }
-  50% { box-shadow: 0 20px 44px -14px rgba(0, 0, 0, 0.85), 0 0 58px rgba(255, 150, 60, 0.55); }
-}
 
 /* ------------------------------------------------------------- 座位 */
 
@@ -502,20 +511,24 @@ button { touch-action: manipulation; }
 /* 没牌可看的时候（等下局 / 已弃牌）不要留一个空的大坑 */
 .seat-hand:has(.hand-note), .seat.is-me .seat-hand:has(.hand-note) { min-height: 0; }
 .seat.is-me:has(.hand-note) { min-width: 0; }
-.seat.is-turn { border-color: var(--gold); animation: seatBreath 2.6s ease-in-out infinite; z-index: 3; }
-/* 轮到谁不是死死地亮着，是有呼吸的 */
-@keyframes seatBreath {
-  0%, 100% {
-    transform: translate(-50%, -50%) scale(1.04);
-    box-shadow: 0 0 0 1px rgba(227, 200, 143, 0.35), 0 0 30px rgba(227, 200, 143, 0.22),
-      0 16px 32px -12px rgba(0, 0, 0, 0.8);
-  }
-  50% {
-    transform: translate(-50%, -50%) scale(1.075);
-    box-shadow: 0 0 0 1px rgba(227, 200, 143, 0.6), 0 0 52px rgba(227, 200, 143, 0.4),
-      0 18px 36px -12px rgba(0, 0, 0, 0.8);
-  }
+.seat.is-turn {
+  border-color: var(--gold); z-index: 3;
+  animation: seatBreath 2.6s ease-in-out infinite;
+  box-shadow: 0 0 0 1px rgba(227, 200, 143, 0.45), 0 17px 34px -12px rgba(0, 0, 0, 0.8);
 }
+/* 轮到谁不是死死地亮着，是有呼吸的。缩放留在座位上（transform 是合成属性，
+   便宜），发光那一层见下面的 .seat.is-turn::before。 */
+@keyframes seatBreath {
+  0%, 100% { transform: translate(-50%, -50%) scale(1.04); }
+  50% { transform: translate(-50%, -50%) scale(1.075); }
+}
+.seat.is-turn::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  pointer-events: none; z-index: -1; will-change: opacity;
+  box-shadow: 0 0 52px rgba(227, 200, 143, 0.4);
+  animation: glowBreath 2.6s ease-in-out infinite;
+}
+@keyframes glowBreath { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
 .seat.is-folded { opacity: 0.45; }
 .seat.is-winner { animation: winnerPop 1.6s var(--spring) both; z-index: 8; }
 @keyframes winnerPop {
@@ -895,12 +908,19 @@ button { touch-action: manipulation; }
   box-shadow: 0 30px 60px -18px rgba(0, 0, 0, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 /* 最后 8 秒行动台边缘红光脉动，和头像上的倒计时环同一个节律 */
-.bar.is-urgent { animation: barUrgent 1.15s ease-in-out infinite; border-color: rgba(224, 138, 138, 0.45); }
+.bar.is-urgent { border-color: rgba(224, 138, 138, 0.45); }
+.bar.is-urgent::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  pointer-events: none; z-index: -1; will-change: opacity;
+  box-shadow: 0 0 34px rgba(224, 138, 138, 0.45);
+  animation: barUrgent 1.15s ease-in-out infinite;
+}
+/* 心跳节奏保留，改成只动 opacity */
 @keyframes barUrgent {
-  0%, 100% { box-shadow: 0 30px 60px -18px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(224, 138, 138, 0.2); }
-  14% { box-shadow: 0 30px 60px -18px rgba(0, 0, 0, 0.9), 0 0 34px rgba(224, 138, 138, 0.45); }
-  40% { box-shadow: 0 30px 60px -18px rgba(0, 0, 0, 0.9), 0 0 12px rgba(224, 138, 138, 0.2); }
-  56% { box-shadow: 0 30px 60px -18px rgba(0, 0, 0, 0.9), 0 0 30px rgba(224, 138, 138, 0.4); }
+  0%, 100% { opacity: 0.15; }
+  14% { opacity: 1; }
+  40% { opacity: 0.35; }
+  56% { opacity: 0.9; }
 }
 .bar.is-shove { border-color: rgba(255, 190, 110, 0.3); }
 .bar-status { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 11px; }
@@ -1213,6 +1233,26 @@ button { touch-action: manipulation; }
 .log-row p { margin: 0; color: #adb9b3; }
 
 /* ------------------------------------------------------------- 结算层 */
+
+/* ---- 通用弹窗：目前只有「改名 · 换头像」用，做成通用是为了下一个也能直接套 ---- */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 78; display: grid; place-items: center;
+  background: rgba(2, 5, 3, 0.6); backdrop-filter: blur(6px);
+  animation: fadeIn 0.2s ease-out; padding: 20px;
+}
+.modal {
+  width: min(420px, 100%); padding: 26px 28px 22px;
+  background: linear-gradient(180deg, rgba(26, 40, 31, 0.97), rgba(9, 16, 12, 0.98));
+  border: 1px solid var(--gold-line); border-radius: 22px;
+  box-shadow: 0 50px 100px rgba(0, 0, 0, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  animation: rise 0.32s var(--ease);
+  max-height: 90dvh; overflow-y: auto;
+}
+.modal h3 { margin: 0; font-family: var(--font-serif); font-size: 20px; letter-spacing: 0.06em; }
+.modal-note { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+.modal-note.warn { color: var(--danger); }
+.modal .avatar-grid { margin-top: 16px; }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 22px; }
 
 .result-scrim {
   position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
@@ -1839,15 +1879,10 @@ button { touch-action: manipulation; }
     z-index: 5;
   }
   .seat.is-me.is-turn { animation: meBreath 2.6s ease-in-out infinite; }
+  /* 同上：只留缩放，发光交给 .seat.is-turn::before */
   @keyframes meBreath {
-    0%, 100% {
-      transform: translate(-50%, 14px) scale(1);
-      box-shadow: 0 0 0 1px rgba(227, 200, 143, 0.35), 0 0 30px rgba(227, 200, 143, 0.22);
-    }
-    50% {
-      transform: translate(-50%, 14px) scale(1.015);
-      box-shadow: 0 0 0 1px rgba(227, 200, 143, 0.6), 0 0 52px rgba(227, 200, 143, 0.4);
-    }
+    0%, 100% { transform: translate(-50%, 14px) scale(1); }
+    50% { transform: translate(-50%, 14px) scale(1.015); }
   }
   .seat.is-me.is-winner { animation: meWinnerPop 1.6s var(--spring) both; }
   @keyframes meWinnerPop {

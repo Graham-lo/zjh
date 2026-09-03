@@ -8,6 +8,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { GameError } from '../shared/game.ts';
 import { isGameKind, type GameKind } from '../shared/games.ts';
 import type { ClientMsg } from '../shared/protocol.ts';
+import { fingerprint, setBuildId } from './build.ts';
 import { Hub, type Conn } from './rooms.ts';
 import { Store } from './store.ts';
 
@@ -110,6 +111,8 @@ function loadAssets(dir: string): Map<string, Asset> {
 }
 
 const assets = loadAssets(CLIENT_DIR);
+// 前端指纹：把每个产物的 ETag 拼起来再哈希一次。前端一变它就变，只重启服务则不变。
+setBuildId(fingerprint([...assets].map(([url, a]) => `${url}:${a.etag}`)));
 if (assets.size === 0) {
   console.warn(`[http] ${CLIENT_DIR} 里没有前端产物 —— 开发模式下这是正常的（页面由 Vite 提供）`);
 }
@@ -275,6 +278,9 @@ server.listen(PORT, HOST, () => {
 
 function shutdown() {
   console.log('\n[zjh] 正在关闭…');
+  // 快照是防抖写的，正常关机时可能还有几秒钟的操作压在定时器里没落盘。
+  // 上线重启是家常便饭，绝不能每次都把最后那几步吞掉 —— 先逼着全部写完再走。
+  hub.flush();
   wss.close();
   server.close(() => {
     store.close();

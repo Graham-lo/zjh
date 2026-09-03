@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import {
-  canAutoStart, CHIP_GRANT_VERSION, currentPlayer, DEFAULT_SETTINGS, GameError, randomId, resetToLobby, startRound,
+  AUTO_START_MS, canAutoStart, CHIP_GRANT_VERSION, currentPlayer, DEFAULT_SETTINGS, GameError, randomId, resetToLobby,
+  ROUND_END_MS, startRound,
   ZJH_ECONOMY_VERSION,
   type RoomState,
 } from '../shared/game.ts';
@@ -13,14 +14,13 @@ import {
   type SjCommand, type SjRoomState,
 } from '../shared/sj/engine.ts';
 import type { AccountInfo, AnyGameCommand, GameEvent, ServerMsg } from '../shared/protocol.ts';
+import { getBuildId } from './build.ts';
 import { Store, type Account } from './store.ts';
 
 const ROOM_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 快照保留 3 天
 const IDLE_DROP_MS = 30 * 60 * 1000; // 无人连接 30 分钟后从内存卸载
 // 结算展示时长。前 ~3.2s 是牌桌上的开牌亮相（翻牌 → 牌型徽章 → 赢家金环金币），
 // 之后才升起结算面板 —— 两拍都要看得完，所以这里给的是两段之和。
-const ROUND_END_MS = 10500;
-const AUTO_START_MS = 2500; // 自动续局前的缓冲
 const HOST_GRACE_MS = 20_000; // 房主掉线多久后移交
 const MAX_ROOMS = 400;
 
@@ -233,6 +233,24 @@ export class Hub {
     if (room.hostTimer) clearTimeout(room.hostTimer);
     if (room.saveTimer) clearTimeout(room.saveTimer);
     room.timer = room.hostTimer = room.saveTimer = null;
+  }
+
+  /**
+   * 把所有还压在防抖定时器里的快照立刻写完。上线重启前必须调用一次，
+   * 否则最后那几步操作会随进程一起消失，玩家回来看到的是几秒钟之前的牌桌。
+   */
+  flush() {
+    for (const room of this.rooms.values()) {
+      if (!room.saveTimer) continue;
+      clearTimeout(room.saveTimer);
+      room.saveTimer = null;
+      try {
+        this.store.save(room.state);
+        this.syncAccounts(room);
+      } catch (e) {
+        console.error('[hub] 关机前的快照写入失败', e);
+      }
+    }
   }
 
   private save(room: Room) {
@@ -507,7 +525,7 @@ export class Hub {
     this.rooms.set(code, room);
     this.attach(conn, room, playerId);
     this.send(conn, {
-      t: 'welcome', code, playerId, token,
+      t: 'welcome', code, playerId, token, build: getBuildId(),
       room: eng.sanitize(state, playerId),
       account: this.accountInfo(account, accTok),
     });
@@ -528,7 +546,7 @@ export class Hub {
 
     this.attach(conn, room, playerId);
     this.send(conn, {
-      t: 'welcome', code, playerId, token,
+      t: 'welcome', code, playerId, token, build: getBuildId(),
       room: eng.sanitize(s, playerId),
       account: this.accountInfo(account, accTok),
     });
@@ -548,7 +566,7 @@ export class Hub {
     const host = room.state.players.find((p) => p.id === room.state.hostId);
     if (!host || host.isBot) room.state.hostId = playerId;
     this.attach(conn, room, playerId);
-    this.send(conn, { t: 'welcome', code, playerId, token, room: eng.sanitize(room.state, playerId) });
+    this.send(conn, { t: 'welcome', code, playerId, token, build: getBuildId(), room: eng.sanitize(room.state, playerId) });
     if (room.hostTimer) {
       clearTimeout(room.hostTimer);
       room.hostTimer = null;

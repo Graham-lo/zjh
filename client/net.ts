@@ -12,7 +12,8 @@ export interface NetHandlers {
   onStatus(status: NetStatus): void;
   /** 服务端回执的账户凭证，存下来下次带上，就还是同一个自己 */
   onAccount(account: AccountInfo): void;
-  onWelcome(auth: Auth, room: AnyPublicRoom): void;
+  /** `build` 是服务端那份前端的指纹，用来判断自己这个页面是不是旧版本 */
+  onWelcome(auth: Auth, room: AnyPublicRoom, build: string): void;
   onRoom(room: AnyPublicRoom, events: GameEvent[]): void;
   onError(msg: string, fatal: boolean): void;
   onLatency(ms: number): void;
@@ -94,7 +95,7 @@ export class Net {
         case 'welcome':
           this.resume = { code: msg.code, playerId: msg.playerId, token: msg.token };
           if (msg.account) this.h.onAccount(msg.account);
-          return this.h.onWelcome(this.resume, msg.room);
+          return this.h.onWelcome(this.resume, msg.room, msg.build ?? '');
         case 'room':
           return this.h.onRoom(msg.room, msg.events);
         case 'error':

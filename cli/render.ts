@@ -488,8 +488,8 @@ export function renderRoom(input: RenderInput): string[] {
   const meta =
     room.phase === 'playing'
       ? `底池 ${C.gold}${C.bold}${fmt(room.pot)}${C.reset} ${potFlame(room.pot, room.settings.ante)}` +
-        `  底注 ${fmt(room.betUnit)}   第 ${room.handNo} 局 · 第 ${room.roundNo}/${room.settings.maxRounds} 轮`
-      : `${room.players.length}/${room.settings.maxPlayers} 人   底注 ${fmt(room.settings.ante)}   ${room.settings.maxRounds} 轮封顶   行动限时 ${room.settings.turnSeconds}s`;
+        `  底注 ${fmt(room.betUnit)}   第 ${room.handNo} 局 · 第 ${room.roundNo}${room.settings.maxRounds > 0 ? `/${room.settings.maxRounds}` : ''} 轮`
+      : `${room.players.length}/${room.settings.maxPlayers} 人   底注 ${fmt(room.settings.ante)}   ${room.settings.maxRounds > 0 ? `${room.settings.maxRounds} 轮封顶` : '不封顶'}   行动限时 ${room.settings.turnSeconds}s`;
   line(`${C.bold}${phase}${C.reset}   ${meta}`);
 
   // 梭哈横幅落在牌桌正上方，压着整张桌子
@@ -527,9 +527,14 @@ export function renderRoom(input: RenderInput): string[] {
   rule();
 
   if (room.allIn) {
+    const nameOf = (id: string) => room.players.find((p) => p.id === id)?.name ?? '？';
+    // 谁接了、还等谁，写清楚名字。只报两个数字的话，等在那里的人根本不知道在等谁。
+    const accepted = room.allIn.accepted.filter((id) => id !== room.allIn!.initiatorId).map(nameOf);
+    const pending = room.allIn.pending.map(nameOf);
     line(
       `${C.bold}${C.gold}⚡ ${room.allIn.initiatorName} 梭哈 ${fmt(room.allIn.amount)}${C.reset}` +
-        `   已接 ${room.allIn.accepted.length} 家，还有 ${room.allIn.pending.length} 家未表态`,
+        (accepted.length ? `   ${C.gold}已接${C.reset} ${accepted.join('、')}` : '') +
+        (pending.length ? `   ${C.dim}等${C.reset} ${pending.join('、')}` : `   ${C.dim}全部表态完毕${C.reset}`),
     );
     line();
   }
@@ -611,7 +616,7 @@ export function renderRoom(input: RenderInput): string[] {
         line();
       }
     } else {
-      line(`  ${C.dim}按 ${C.gold}k${C.reset}${C.dim} 看牌（看牌后下注翻倍）${C.reset}`);
+      line(`  ${C.dim}按 ${C.gold}s${C.reset}${C.dim} 看牌（看牌后下注翻倍）${C.reset}`);
     }
     line();
   }
@@ -652,14 +657,17 @@ function hintLine(room: PublicRoom, auto: boolean): string {
   const k = (key: string, label: string) => `${C.gold}[${key}]${C.reset}${label}`;
   if (room.phase === 'lobby') {
     const host = room.hostId === me.id;
+    const allReady = room.players.length >= 2 && room.players.every((p) => p.isBot || p.ready);
     return [
-      k('r', me.ready ? '取消准备' : '准备'),
-      host ? k('s', '开始') : '',
+      // 空格永远排第一：这一屏最该按的那一下，不用在一排字母里找
+      `${C.bold}${k('空格', host && allReady ? '开始' : me.ready ? '取消准备' : '准备')}${C.reset}`,
       host ? k('b', '加电脑') : '',
       host ? k('o', '房规') : '',
+      k('p', '改名'),
       k('m', '补分'),
       k('i', '邀请'),
       k(':', '命令'),
+      k('?', '帮助'),
       k('q', '退出'),
     ]
       .filter(Boolean)
@@ -668,20 +676,28 @@ function hintLine(room: PublicRoom, auto: boolean): string {
   if (room.phase === 'round_end') {
     const host = room.hostId === me.id;
     return [
-      host ? k('n', '下一局') : `${C.dim}等待下一局${C.reset}`,
+      host ? `${C.bold}${k('空格', '下一局')}${C.reset}` : `${C.dim}等待下一局${C.reset}`,
+      k('p', '改名'),
       k('e', '表情'),
       k(':', '命令'),
+      k('?', '帮助'),
       k('q', '退出'),
     ].join('  ');
   }
   const acts = legalActions(room);
+  // 梭哈表态是一道二选一的门，不该和跟注/加注/表情/帮助并排挤在一行里等人自己找。
+  // 轮到自己时整条提示行换成两个大选项，已经表过态就换成「在等谁」的状态行。
+  if (room.allIn) return allInPrompt(room, acts, k);
   const parts: string[] = [];
+  // 提示行上只写一套键位（左手那套），右手的镜像键留给 ? 帮助 —— 一行里塞两套
+  // 反而没人看得清哪个是哪个。空格单拎出来加粗，它是这一屏最该按的那一下。
   for (const a of acts) {
-    if (a.action === 'look') parts.push(k('k', '看牌'));
+    if (a.action === 'call') parts.push(`${C.bold}${k('空格', `跟注 ${fmt(a.cost!)}`)}${C.reset}`);
+  }
+  for (const a of acts) {
+    if (a.action === 'look') parts.push(k('s', '看牌'));
     if (a.action === 'fold') parts.push(k('f', '弃牌'));
-    if (a.action === 'call') parts.push(k('c', `跟注 ${fmt(a.cost!)}`));
-    if (a.action === 'accept') parts.push(k('c', `接受梭哈 ${fmt(a.cost!)}`));
-    if (a.action === 'all_in') parts.push(k('a', `梭哈 ${fmt(a.cost!)}`));
+    if (a.action === 'all_in') parts.push(k('a', `梭哈 ${fmt(a.cost!)}${C.dim}（连按两次）${C.reset}`));
   }
   const raises = acts.filter((a) => a.action === 'raise');
   if (raises.length) parts.push(k(`1-${raises.length}`, `加注 ${raises.map((r) => fmt(r.unit!)).join('/')}`));
@@ -690,4 +706,37 @@ function hintLine(room: PublicRoom, auto: boolean): string {
   parts.push(auto ? `${C.bold}${C.gold}[g]● 自动跟注中${C.reset}` : k('g', '自动跟注'));
   parts.push(k('e', '表情'), k(':', '命令'), k('?', '帮助'));
   return parts.join('  ');
+}
+
+/**
+ * 梭哈表态行。三种状态各自只显示一件事：
+ * 轮到我 → 两个热键选项；已表态 → 在等谁；不在局 → 一句旁观说明。
+ * y/n 是这一刻的专用键（c/f 照旧能用），不必在「跟注」和「接受」之间猜同一个 c 是哪个意思。
+ */
+function allInPrompt(
+  room: PublicRoom,
+  acts: ReturnType<typeof legalActions>,
+  k: (key: string, label: string) => string,
+): string {
+  const me = room.players.find((p) => p.id === room.viewerId);
+  const pendingCount = room.allIn?.pending.length ?? 0;
+  const waiting = pendingCount ? `${C.dim}等 ${pendingCount} 家表态${C.reset}` : `${C.dim}即将开牌${C.reset}`;
+  if (!me || me.status !== 'active') return `${C.dim}本局已出局，旁观开牌${C.reset}   ${k(':', '命令')}  ${k('q', '退出')}`;
+
+  const accept = acts.find((a) => a.action === 'accept');
+  if (!accept) {
+    const mine = me.id === room.allIn?.initiatorId
+      ? `${C.gold}你发起的梭哈${C.reset}`
+      : `${C.gold}已接下${C.reset}`;
+    return `${mine}   ${waiting}   ${k('e', '表情')}  ${k('?', '帮助')}`;
+  }
+  const parts = [
+    `${C.bold}${C.gold}⚡ 表态${C.reset}`,
+    `${C.bold}${k('y', `接受 ${fmt(accept.cost!)}`)}${C.reset}`,
+    `${C.bold}${k('n', '弃牌出局')}${C.reset}`,
+  ];
+  // 闷着接是半价，先看牌就翻倍 —— 这个取舍必须摆在决定的旁边，不能藏进帮助里
+  if (acts.some((a) => a.action === 'look')) parts.push(k('s', `先看牌${C.dim}（价翻倍）${C.reset}`));
+  parts.push(`${C.dim}${waiting}${C.reset}`);
+  return parts.join('   ');
 }

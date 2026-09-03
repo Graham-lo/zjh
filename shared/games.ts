@@ -12,7 +12,8 @@
  */
 
 import {
-  applyCommand, botDecision, claimHostIfVacant, cleanAvatar, cleanName, COMMAND_TYPES,
+  applyCommand, botAction, claimHostIfVacant, cleanAvatar, cleanName, COMMAND_TYPES,
+  evictBotForHuman,
   createHumanPlayer, createInitialRoom, currentPlayer, GameError, migrateRoom, sanitizeRoom,
   timeoutCurrentPlayer, transferHost,
   type GameCommand, type RoomState,
@@ -22,7 +23,7 @@ import {
   applySjCommand, createSjPlayer, createSjRoom, deriveSjEvents, migrateSjRoom, sanitizeSjRoom,
   SJ_COMMAND_TYPES, SJ_DEAL_CARD_MS, SJ_SEATS, sjCurrentPlayer, sjLog, timeoutChao, timeoutKou,
   timeoutTurn, transferSjHost,
-  type SjCommand, type SjEngineOpts, type SjRoomState,
+  type SjCommand, type SjEngineOpts, type SjPhase, type SjRoomState,
 } from './sj/engine.ts';
 import { botChao, botDeclare, botKou, botPlay, botThinkMs, planSjDealingDeclare } from './sj/bot.ts';
 
@@ -130,9 +131,12 @@ const asZ = (s: AnyRoomState) => s as RoomState;
 const asS = (s: AnyRoomState) => s as SjRoomState;
 
 /** 机器人"思考"时长。看牌是个小动作，给短一点，避免节奏拖沓。 */
-function zjhBotDelay(cmd: GameCommand): number {
-  const base = cmd.type === 'look' ? 320 : 620;
-  return base + Math.floor(Math.random() * (cmd.type === 'look' ? 260 : 900));
+/**
+ * 思考时长现在由引擎给：它知道这一步有多难、这台电脑是什么性格、有没有在上头。
+ * 这里只加一点点抖动，免得同一个局面每次都是分毫不差的同一个数。
+ */
+function zjhBotDelay(thinkMs: number): number {
+  return Math.max(220, Math.round(thinkMs * (0.9 + Math.random() * 0.2)));
 }
 
 /**
@@ -198,13 +202,20 @@ function zjhEngine(): GameEngine {
     },
     join(state, seed) {
       const s = asZ(state);
-      if (s.players.length >= s.settings.maxPlayers) throw new GameError('房间已满');
-      // 同一个账户不该在一张桌子上占两个座位
+      // 同一个账户不该在一张桌子上占两个座位（这一条要排在让座前面，
+      // 否则重复点链接会白白赶走一台电脑）
       if (s.players.some((p) => p.accountId === seed.accountId)) {
         throw new GameError('你已经在这个房间里了，直接用原来的窗口继续', 409);
       }
+      // 坐满了先看看是不是坐满了「人」：有电脑就让电脑腾位置，
+      // 六个座位全是真人才谈得上房间已满。
+      let vacated: number | null = null;
+      if (s.players.length >= s.settings.maxPlayers) {
+        vacated = evictBotForHuman(s);
+        if (vacated === null) throw new GameError('房间已满');
+      }
       const used = new Set(s.players.map((p) => p.seat));
-      let seat = 0;
+      let seat = vacated ?? 0;
       while (used.has(seat)) seat++;
       let finalName = cleanName(seed.name);
       if (s.players.some((p) => p.name === finalName)) finalName = `${finalName}·${seat + 1}`;
@@ -232,12 +243,14 @@ function zjhEngine(): GameEngine {
       const cur = currentPlayer(s);
       if (!cur?.isBot) return null;
       let cmd: GameCommand;
+      let thinkMs: number;
       try {
-        cmd = botDecision(s, cur);
+        ({ cmd, thinkMs } = botAction(s, cur));
       } catch {
         cmd = { type: 'fold' };
+        thinkMs = 500;
       }
-      return { actorId: cur.id, cmd, delay: zjhBotDelay(cmd) };
+      return { actorId: cur.id, cmd, delay: zjhBotDelay(thinkMs) };
     },
     timeout: (state) => timeoutCurrentPlayer(asZ(state)),
     transferHost: (state, departingId) => transferHost(asZ(state), departingId),
@@ -281,12 +294,27 @@ function sjEngine(kind: SjKind): GameEngine {
     },
     join(state, seed) {
       const s = asS(state);
-      if (s.players.length >= SJ_SEATS) throw new GameError('房间已满');
       if (s.players.some((p) => p.accountId === seed.accountId)) {
         throw new GameError('你已经在这个房间里了，直接用原来的窗口继续', 409);
       }
+      /**
+       * 和炸金花一样：坐满了先看看坐满的是不是真人，有电脑就让电脑腾位置。
+       *
+       * 但升级只有四个座位、还分对家，牌一发下去把一家换成新人这局就没法打了，
+       * 所以牌局进行中只说实话 ——「本局结束后才有位置」，而不是含糊的「房间已满」。
+       */
+      let vacated: number | null = null;
+      if (s.players.length >= SJ_SEATS) {
+        const bot = s.players.filter((p) => p.isBot).sort((a, b) => a.seat - b.seat)[0];
+        if (!bot) throw new GameError('房间已满');
+        const between: SjPhase[] = ['lobby', 'hand_end', 'match_end'];
+        if (!between.includes(s.phase)) throw new GameError('本局进行中，等这一局打完就有位置');
+        vacated = bot.seat;
+        s.players = s.players.filter((p) => p.id !== bot.id);
+        sjLog(s, `${bot.name} 离开房间，把位置让给新玩家`);
+      }
       const used = new Set(s.players.map((p) => p.seat));
-      let seat = 0;
+      let seat = vacated ?? 0;
       while (used.has(seat)) seat++;
       let finalName = cleanName(seed.name);
       if (s.players.some((p) => p.name === finalName)) finalName = `${finalName}·${seat + 1}`;
