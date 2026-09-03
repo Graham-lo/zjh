@@ -37,7 +37,8 @@ test('反主级别是 7 档全序：单张 < ♦对 < ♣对 < ♥对 < ♠对 <
   assert.equal(SJ_DECL_TIER.D, 2, '方块最小');
   assert.equal(SJ_DECL_TIER.S, 5, '黑桃是花色里最大的一门');
   assert.equal(SJ_DECL_TIER.joker_b, 7, '对大王封顶');
-  // 翻底定主是 0，比任何一种亮法都弱 —— 所以单张级牌也能反掉它
+  // 0 档是「无人亮主的默认无主」，比任何一种亮法都弱。
+  // 那种局根本不问抄底，所以这一条现在只是给档位表兜底：0 不该意外地压过谁
   assert.ok(checkOverride({ trump: 'H', strength: 1 }, trumpAt('H', 0), 'me', 'chao').ok);
 });
 
@@ -313,10 +314,11 @@ test('一圈的分数是四家出牌里所有分牌之和', () => {
 
 /* ------------------------------------------------------------------- 抠底 */
 
-test('抠底倍数是 2^n，上限 ×64', () => {
+test('抠底倍数是 2^(1+对数)，上限 ×64', () => {
   assert.equal(digMultiplier(1), 2, '单张 ×2');
   assert.equal(digMultiplier(2), 4, '对子 ×4');
-  assert.equal(digMultiplier(4), 16, '两连对 ×16');
+  assert.equal(digMultiplier(3), 8, '两连对 ×8');
+  assert.equal(digMultiplier(4), 16, '三连对 ×16');
   assert.equal(digMultiplier(6), 64);
   assert.equal(digMultiplier(8), 64, '再多也封在 ×64');
   assert.equal(digMultiplier(25), 64);
@@ -325,7 +327,7 @@ test('抠底倍数是 2^n，上限 ×64', () => {
 test('QQ 甩牌抠底按最大牌型定番，不按甩牌总张数', () => {
   assert.equal(digMultiplierForLead(h('HAa HKa HQa'), CTX_S5), 2, '多张散牌仍是单抠');
   assert.equal(digMultiplierForLead(h('HAa HKa HKb H2a'), CTX_S5), 4, '含对子按双抠');
-  assert.equal(digMultiplierForLead(h('H9a H9b HTa HTb HKa'), CTX_S5), 16, '两连对按四张翻 16 倍');
+  assert.equal(digMultiplierForLead(h('H9a H9b HTa HTb HKa'), CTX_S5), 8, '两连对是 ×8（2^(1+2)），不是按张数的 ×16');
 });
 
 /* ------------------------------------------------------------------- 升级表 */

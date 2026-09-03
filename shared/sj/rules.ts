@@ -397,23 +397,25 @@ export function isTrumping(lead: SjShape, cards: SjCard[], ctx: SjCtx): boolean 
 
 /**
  * 基础抠底指数换算：`2^n`，上限 ×64。
- * 实际牌型应经 `digMultiplierForLead` 判定，不能直接传整把甩牌的张数。
+ *
+ * 参数是**首出牌型的对数 + 1**（单张 n=1、对子 n=2、两连对 n=3……），
+ * 不是牌的张数。实际牌型一律经 `digMultiplierForLead` 判定。
  */
-export function digMultiplier(cardCount: number): number {
-  return Math.min(64, 2 ** Math.max(1, cardCount));
+export function digMultiplier(exponent: number): number {
+  return Math.min(64, 2 ** Math.max(1, exponent));
 }
 
 /**
- * QQ 升级的抠底番数看首出牌型，而不是把一把甩牌的总张数直接塞进 2^n：
- * 纯散牌甩仍是单抠 ×2；含对子是双抠 ×4；含拖拉机按最长拖拉机的张数翻番。
+ * 抠底番数看**首出牌型**，而不是把一把甩牌的总张数塞进 2^n：
+ * 单张 ×2、对子 ×4、两连对拖拉机 ×8、三连对 ×16……即 `2^(1 + 最长拖拉机的对数)`，上限 ×64。
+ * 纯散牌甩仍是单抠 ×2；含对子按双抠；含拖拉机按**最长那条拖拉机的对数**。
+ * 盖毙不改变倍数 —— 倍数只由首出决定。
  */
 export function digMultiplierForLead(cards: SjCard[], ctx: SjCtx): number {
   const shape = parseShape(cards, ctx);
   if (!shape) return 2;
-  const longest = shape.tractors[0] ?? 0;
-  if (longest > 0) return digMultiplier(longest * 2);
-  if (shape.pairs > 0) return 4;
-  return 2;
+  const longestPairs = shape.tractors[0] ?? (shape.pairs > 0 ? 1 : 0);
+  return digMultiplier(1 + longestPairs);
 }
 
 /* --------------------------------------------------------------- 升级表 */

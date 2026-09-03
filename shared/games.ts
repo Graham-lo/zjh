@@ -20,11 +20,11 @@ import {
 import type { AnyGameCommand, AnyPublicRoom, GameEvent } from './protocol.ts';
 import {
   applySjCommand, createSjPlayer, createSjRoom, deriveSjEvents, migrateSjRoom, sanitizeSjRoom,
-  SJ_COMMAND_TYPES, SJ_SEATS, sjCurrentPlayer, sjLog, timeoutChao, timeoutKou, timeoutTurn,
-  transferSjHost,
+  SJ_COMMAND_TYPES, SJ_DEAL_CARD_MS, SJ_SEATS, sjCurrentPlayer, sjLog, timeoutChao, timeoutKou,
+  timeoutTurn, transferSjHost,
   type SjCommand, type SjEngineOpts, type SjRoomState,
 } from './sj/engine.ts';
-import { botChao, botDeclare, botKou, botPlay } from './sj/bot.ts';
+import { botChao, botDeclare, botKou, botPlay, botThinkMs, planSjDealingDeclare } from './sj/bot.ts';
 
 export type SjKind = 'sj_510k' | 'sj_2a';
 export type GameKind = 'zjh' | SjKind;
@@ -246,12 +246,22 @@ function zjhEngine(): GameEngine {
 
 /* --------------------------------------------------------------- 升级适配器 */
 
-const SJ_BOT_MIN_MS = 500;
-const SJ_BOT_MAX_MS = 1100;
+/** 看到牌到反应过来要亮，200–600ms（BRAIN-DESIGN §7） */
+const SJ_REACT_MIN_MS = 200;
+const SJ_REACT_MAX_MS = 400;
 
-/** 机器人思考 500–1100ms（DESIGN 2.5） */
-function sjBotDelay(): number {
-  return SJ_BOT_MIN_MS + Math.floor(Math.random() * (SJ_BOT_MAX_MS - SJ_BOT_MIN_MS));
+/** 表态类动作（亮主 / 不亮 / 抄底）的思考时长 */
+function sjSayDelay(s: SjRoomState, rng?: () => number): number {
+  const r = rng ? rng() : Math.random();
+  const cap = Math.max(600, s.settings.turnSeconds * 1000 / 2 - 200);
+  return Math.min(cap, Math.round(600 + r * 900));
+}
+
+/** 扣底要挑 8 张，慢一点才像在想（BRAIN-DESIGN §7：3–6s） */
+function sjKouDelay(s: SjRoomState, rng?: () => number): number {
+  const r = rng ? rng() : Math.random();
+  const cap = Math.max(600, s.settings.turnSeconds * 1000 / 2 - 200);
+  return Math.min(cap, Math.round(3000 + r * 3000));
 }
 
 /** 该由电脑替他行动的人：真的电脑，或者掉线的真人（DESIGN 1.9，不等待） */
@@ -297,10 +307,32 @@ function sjEngine(kind: SjKind): GameEngine {
       deriveSjEvents(asS(before), asS(after), actorId, cmd as SjCommand | null),
     bot(state, opts) {
       const s = asS(state);
+      if (s.phase === 'dealing') {
+        // 真人是**边发边亮**的：牌一张一张进手，某一张让手里够档了就拍下去。
+        // 所以电脑也只看已经到手的前缀来决定，并把 delay 排到"那张牌到手 + 反应时间"
+        // （BRAIN-DESIGN §5.1）。谁的那一刻最早谁先亮，和真人抢亮是一回事。
+        if (s.dealStartedAt == null) return null;
+        let best: BotMove | null = null;
+        let bestAt = Infinity;
+        for (const p of s.players) {
+          if (!sjNeedsBot(p)) continue;
+          if (s.trump.declarerId === p.id) continue;
+          const plan = planSjDealingDeclare(s, p);
+          if (!plan) continue;
+          const r = opts?.rng ? opts.rng() : Math.random();
+          const at = s.dealStartedAt + (plan.index + 1) * SJ_DEAL_CARD_MS
+            + SJ_REACT_MIN_MS + Math.round(r * SJ_REACT_MAX_MS);
+          if (at < bestAt) {
+            bestAt = at;
+            best = { actorId: p.id, cmd: { type: 'declare', cardIds: plan.cardIds }, delay: 0 };
+          }
+        }
+        // 已经过点了就立刻出手（例如刚重连回来），但不早于牌到手的那一刻
+        if (best) best.delay = Math.max(0, bestAt - (opts?.now ?? Date.now()));
+        return best;
+      }
       if (s.phase === 'declaring') {
-        // 亮主窗口里每个还没表态的电脑各自决定一次：亮得起就亮，否则「不亮」。
-        // 只在 declaring 里动 —— dealing 阶段客户端还在播发牌动画，
-        // 这时候抢着亮主，牌都还没飞到手上（DESIGN 1.4 / 3.5）。
+        // 发完牌还有个安静窗口：这时"等着反 / 等着抄"的人得自己兜底亮了（§5.1）。
         for (const p of s.players) {
           if (!sjNeedsBot(p)) continue;
           if (s.trump.declarerId === p.id || s.passed.includes(p.id)) continue;
@@ -308,7 +340,7 @@ function sjEngine(kind: SjKind): GameEngine {
           return {
             actorId: p.id,
             cmd: cardIds ? { type: 'declare', cardIds } : { type: 'pass' },
-            delay: sjBotDelay(),
+            delay: sjSayDelay(s, opts?.rng),
           };
         }
         return null;
@@ -317,7 +349,7 @@ function sjEngine(kind: SjKind): GameEngine {
         // 抄底之后扣底的不一定是庄家（DESIGN 1.4b），一律看 kouSeat
         const burier = s.players.find((p) => p.seat === s.kouSeat);
         if (!burier || !sjNeedsBot(burier)) return null;
-        return { actorId: burier.id, cmd: { type: 'kou', cardIds: botKou(s, burier, opts?.rng) }, delay: sjBotDelay() };
+        return { actorId: burier.id, cmd: { type: 'kou', cardIds: botKou(s, burier, opts?.rng) }, delay: sjKouDelay(s, opts?.rng) };
       }
       if (s.phase === 'chao') {
         // 被问到的人是电脑或掉线的真人就替他答；抄不起就「不抄」，别让一轮询问卡住
@@ -327,13 +359,13 @@ function sjEngine(kind: SjKind): GameEngine {
         return {
           actorId: asked.id,
           cmd: cardIds ? { type: 'chao', cardIds } : { type: 'pass_chao' },
-          delay: sjBotDelay(),
+          delay: sjSayDelay(s, opts?.rng),
         };
       }
       if (s.phase === 'playing') {
         const cur = sjCurrentPlayer(s);
         if (!cur || !sjNeedsBot(cur)) return null;
-        return { actorId: cur.id, cmd: { type: 'play', cardIds: botPlay(s, cur, opts?.rng) }, delay: sjBotDelay() };
+        return { actorId: cur.id, cmd: { type: 'play', cardIds: botPlay(s, cur, opts?.rng) }, delay: botThinkMs(s, cur, opts?.rng) };
       }
       return null;
     },
