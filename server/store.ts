@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { AnyRoomState } from '../shared/games.ts';
+import { CHIP_GRANT_VERSION, DEFAULT_SETTINGS } from '../shared/game.ts';
 
 /** 一个跨房间、跨会话的玩家账户 */
 export interface Account {
@@ -15,6 +16,8 @@ export interface Account {
   /** 升级的局数与胜局。和炸金花的 hands/wins 分开记，两种游戏的"一局"不是一回事 */
   sjHands: number;
   sjWins: number;
+  /** 全服筹码基线的一次性迁移版本。 */
+  chipGrantVersion: number;
 }
 
 /**
@@ -49,17 +52,39 @@ export class Store {
         granted INTEGER NOT NULL,
         hands INTEGER NOT NULL DEFAULT 0,
         wins INTEGER NOT NULL DEFAULT 0,
+        chip_grant_version INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL
       );
     `);
     // 加列是幂等的：老库里没有就补上，已经有了 SQLite 会报错，吞掉即可（DESIGN 2.1）
-    for (const col of ['sj_hands', 'sj_wins']) {
+    for (const col of ['sj_hands', 'sj_wins', 'chip_grant_version']) {
       try {
         this.db.exec(`ALTER TABLE accounts ADD COLUMN ${col} INTEGER NOT NULL DEFAULT 0`);
       } catch {
         /* 这一列已经存在 */
       }
     }
+    // 旧账户一次性跟上当前筹码基线。chips/granted 同额增加，净战绩不变；
+    // 版本号保证以后重启不会重复发放，高于基线的账户也不会被扣减。
+    const migrated = this.db
+      .prepare(`
+        UPDATE accounts
+        SET granted = granted + CASE WHEN chips < ? THEN ? - chips ELSE 0 END,
+            chips = CASE WHEN chips < ? THEN ? ELSE chips END,
+            chip_grant_version = ?,
+            updated_at = ?
+        WHERE chip_grant_version < ?
+      `)
+      .run(
+        DEFAULT_SETTINGS.startingChips,
+        DEFAULT_SETTINGS.startingChips,
+        DEFAULT_SETTINGS.startingChips,
+        DEFAULT_SETTINGS.startingChips,
+        CHIP_GRANT_VERSION,
+        Date.now(),
+        CHIP_GRANT_VERSION,
+      );
+    if (migrated.changes) console.log(`[store] 已升级 ${migrated.changes} 个旧账户的筹码基线`);
     this.upsert = this.db.prepare(
       'INSERT INTO rooms(code, state, updated_at) VALUES(?, ?, ?) ON CONFLICT(code) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at',
     );
@@ -98,9 +123,9 @@ export class Store {
   createAccount(a: Account) {
     this.db
       .prepare(
-        'INSERT INTO accounts(id, token_hash, name, avatar, chips, granted, hands, wins, sj_hands, sj_wins, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+        'INSERT INTO accounts(id, token_hash, name, avatar, chips, granted, hands, wins, sj_hands, sj_wins, chip_grant_version, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
       )
-      .run(a.id, a.tokenHash, a.name, a.avatar, a.chips, a.granted, a.hands, a.wins, a.sjHands, a.sjWins, Date.now());
+      .run(a.id, a.tokenHash, a.name, a.avatar, a.chips, a.granted, a.hands, a.wins, a.sjHands, a.sjWins, a.chipGrantVersion, Date.now());
   }
 
   getAccount(id: string): Account | null {
@@ -119,6 +144,7 @@ export class Store {
       wins: Number(row.wins),
       sjHands: Number(row.sj_hands ?? 0),
       sjWins: Number(row.sj_wins ?? 0),
+      chipGrantVersion: Number(row.chip_grant_version ?? 0),
     };
   }
 
@@ -126,9 +152,9 @@ export class Store {
   saveAccount(a: Account) {
     this.db
       .prepare(
-        'UPDATE accounts SET name = ?, avatar = ?, chips = ?, granted = ?, hands = ?, wins = ?, sj_hands = ?, sj_wins = ?, updated_at = ? WHERE id = ?',
+        'UPDATE accounts SET name = ?, avatar = ?, chips = ?, granted = ?, hands = ?, wins = ?, sj_hands = ?, sj_wins = ?, chip_grant_version = ?, updated_at = ? WHERE id = ?',
       )
-      .run(a.name, a.avatar, a.chips, a.granted, a.hands, a.wins, a.sjHands, a.sjWins, Date.now(), a.id);
+      .run(a.name, a.avatar, a.chips, a.granted, a.hands, a.wins, a.sjHands, a.sjWins, a.chipGrantVersion, Date.now(), a.id);
   }
 
   close() {

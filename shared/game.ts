@@ -117,6 +117,8 @@ export interface RoomState {
   actionSeq: number;
   log: LogEntry[];
   createdAt: number;
+  /** 全服筹码基线的一次性迁移版本，防止每次重启重复补发。 */
+  chipGrantVersion: number;
   /**
    * 定向可见：seen[观看者id] = 他有权看到底牌的玩家 id 列表。
    * 比牌是两个人之间的事 —— 双方互相看到对方的牌，没参与的人什么都看不到，
@@ -162,6 +164,9 @@ export const DEFAULT_SETTINGS: GameSettings = {
   autoContinue: true,
   allInFromRound: 3,
 };
+
+/** 版本每提升一次，旧房间/旧账户会在保持净战绩不变的前提下补到当前筹码基线。 */
+export const CHIP_GRANT_VERSION = 1;
 
 export const AVATARS = ['🐯', '🦊', '🐼', '🐵', '🐸', '🦁', '🐺', '🐷', '🐨', '🦉', '🐲', '🦄'];
 export const EMOTES = ['👍', '😂', '😱', '🤔', '🔥', '💰', '🙏', '😭'];
@@ -467,6 +472,7 @@ export function createInitialRoom(code: string, host: PlayerState): RoomState {
     actionSeq: 0,
     log: [],
     createdAt: Date.now(),
+    chipGrantVersion: CHIP_GRANT_VERSION,
   };
 }
 
@@ -499,6 +505,14 @@ export function migrateRoom(state: RoomState): RoomState {
     p.granted ??= 0;
     p.bared ??= false;
     p.online ??= false;
+  }
+  if ((state.chipGrantVersion ?? 0) < CHIP_GRANT_VERSION) {
+    for (const p of state.players ?? []) {
+      const add = Math.max(0, DEFAULT_SETTINGS.startingChips - p.chips);
+      p.chips += add;
+      p.granted += add;
+    }
+    state.chipGrantVersion = CHIP_GRANT_VERSION;
   }
   // base 是「闷牌半价」上线后才有的字段。老快照里存的 amount 就是当时人人同价的那个数，
   // 拿它当基准恢复出来，正在表态的那一局还能按老规则打完，不会中途报价崩掉。

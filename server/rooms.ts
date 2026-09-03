@@ -1,6 +1,6 @@
 import type { WebSocket } from 'ws';
 import {
-  canAutoStart, currentPlayer, DEFAULT_SETTINGS, GameError, randomId, resetToLobby, startRound,
+  canAutoStart, CHIP_GRANT_VERSION, currentPlayer, DEFAULT_SETTINGS, GameError, randomId, resetToLobby, startRound,
   type RoomState,
 } from '../shared/game.ts';
 import {
@@ -75,7 +75,10 @@ export class Hub {
   constructor(store: Store) {
     this.store = store;
     let restored = 0;
+    let chipMigrated = 0;
     for (const raw of store.loadAll(ROOM_TTL_MS)) {
+      const needsChipMigration = !isSjRoom(raw)
+        && ((raw as RoomState).chipGrantVersion ?? 0) < CHIP_GRANT_VERSION;
       // 老快照可能缺新加的字段，先补齐再用；没有 kind 的一律是炸金花（DESIGN 2.6）
       const state = engineFor(raw).migrate(raw);
       // 重启后没有任何人是连着的；牌局停在原地等人回来。
@@ -87,13 +90,29 @@ export class Hub {
         // 重启前如果已经打完一局，账户那一笔早就写过了，别再记一次
         creditedHand: isSjRoom(state) ? (state.result?.handNo ?? 0) : 0,
       });
+      // 迁移后立即落盘，旧房间无需等待玩家重新进入或下一次操作。
+      if (needsChipMigration) {
+        store.save(state);
+        chipMigrated++;
+      }
       restored++;
     }
     if (restored) console.log(`[hub] 从快照恢复了 ${restored} 个房间`);
+    if (chipMigrated) console.log(`[hub] 已升级 ${chipMigrated} 个旧炸金花房间的筹码基线`);
     setInterval(() => this.sweep(), 60_000).unref();
   }
 
   /* --------------------------------------------------------------- 账户 */
+
+  /** 旧账户只补一次到当前基线，chips/granted 同增，净战绩不变。 */
+  private migrateAccountChips(account: Account): boolean {
+    if ((account.chipGrantVersion ?? 0) >= CHIP_GRANT_VERSION) return false;
+    const add = Math.max(0, DEFAULT_SETTINGS.startingChips - account.chips);
+    account.chips += add;
+    account.granted += add;
+    account.chipGrantVersion = CHIP_GRANT_VERSION;
+    return true;
+  }
 
   /**
    * 认领或新建账户。带着有效凭证来就沿用同一个账户 ——
@@ -105,6 +124,7 @@ export class Hub {
       if (acc && (await hashToken(token)) === acc.tokenHash) {
         if (name) acc.name = name;
         if (avatar) acc.avatar = avatar;
+        if (this.migrateAccountChips(acc)) this.store.saveAccount(acc);
         return { account: acc, token };
       }
     }
@@ -120,6 +140,7 @@ export class Hub {
       wins: 0,
       sjHands: 0,
       sjWins: 0,
+      chipGrantVersion: CHIP_GRANT_VERSION,
     };
     this.store.createAccount(account);
     return { account, token: fresh };
@@ -143,6 +164,7 @@ export class Hub {
         if (!acc) continue;
         acc.name = p.name;
         acc.avatar = p.avatar;
+        this.migrateAccountChips(acc);
         this.store.saveAccount(acc);
       }
       return;
@@ -156,6 +178,7 @@ export class Hub {
       acc.name = p.name;
       acc.avatar = p.avatar;
       acc.wins = p.wins;
+      acc.chipGrantVersion = CHIP_GRANT_VERSION;
       this.store.saveAccount(acc);
     }
   }
@@ -180,6 +203,7 @@ export class Hub {
       if (!acc) continue;
       acc.sjHands += 1;
       if (teamOf(p.seat) === winnerTeam) acc.sjWins += 1;
+      this.migrateAccountChips(acc);
       this.store.saveAccount(acc);
     }
   }

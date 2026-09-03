@@ -299,12 +299,20 @@ test('老快照缺字段时会被补齐，不会出现 undefined 轮', () => {
   const room = makeRoom(2);
   // 模拟一个在 allInFromRound 上线之前存下来的房间
   room.settings.startingChips = 50_000;
+  room.players[0].chips = 12_345;
+  room.players[0].granted = 50_000;
+  delete (room as Partial<typeof room>).chipGrantVersion;
   delete (room.settings as Partial<typeof room.settings>).allInFromRound;
   delete (room.settings as Partial<typeof room.settings>).maxRounds;
   migrateRoom(room);
   assert.equal(room.settings.allInFromRound, 3);
   assert.equal(room.settings.maxRounds, 8);
   assert.equal(room.settings.startingChips, 500_000, '旧房间恢复后也使用新的 50 万重置额度');
+  assert.equal(room.players[0].chips, 500_000, '旧房间中的低余额玩家立即补到 50 万');
+  assert.equal(room.players[0].granted, 537_655, '补发额同步计入 granted，净战绩不变');
+  const migrated = [room.players[0].chips, room.players[0].granted];
+  migrateRoom(room);
+  assert.deepEqual([room.players[0].chips, room.players[0].granted], migrated, '迁移只能执行一次');
   assert.equal(typeof room.settings.allInFromRound, 'number');
 });
 
