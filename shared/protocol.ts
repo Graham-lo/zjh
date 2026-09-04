@@ -64,7 +64,7 @@ export type ZjhEvent =
   | { k: 'fold'; playerId: string }
   | { k: 'showdown'; winnerId: string }
   | { k: 'win'; playerId: string; amount: number }
-  | { k: 'emote'; playerId: string; id: string }
+  | { k: 'emote'; playerId: string; id: string; target?: string }
   | { k: 'turn'; playerId: string }
   | { k: 'presence'; playerId: string; online: boolean };
 

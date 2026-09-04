@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  allInBase, allInCost, applyCommand, botDecision, botPersonality, canAllInNow, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
+  BOT_NAMES, CATEGORY_BANDS, ZJH_DEAL_PROFILES, ZJH_HAND_DISTRIBUTION_PER_MILLE, categoryBands,
+  allInBase, allInCost, applyCommand, botDecision, canAllInNow, canAutoStart, canCompareNow, claimHostIfVacant, compareCost,
   compareHands, createHumanPlayer, createInitialRoom, currentPlayer, dealCategoryForRoll, dealWeightedHands, evaluateHand,
-  handPercentile, migrateRoom, sanitizeRoom, startRound, timeoutCurrentPlayer, transferHost,
-  type Card, type RoomState,
+  handPercentile, memoryKey, migrateRoom, sanitizeRoom, startRound, tableRead, timeoutCurrentPlayer, transferHost,
+  type Card, type DealMode, type RoomState, type TableRead,
 } from '../shared/game.ts';
+import { COMMON_PERSONA, PERSONAS, personaFor } from '../shared/zjh/bot/personas/index.ts';
 import { engine } from '../shared/games.ts';
 
 const c = (rank: number, suit: Card['suit']): Card => ({ rank, suit });
@@ -52,16 +54,94 @@ test('牌力分位单调：豹子 > 同花 > 对子 > 单张', () => {
   assert.ok(p([c(14, 'S'), c(14, 'H'), c(14, 'D')]) <= 1 && p([c(5, 'S'), c(3, 'H'), c(2, 'D')]) >= 0);
 });
 
-test('娱乐增强发牌：四类大牌占 92%，散牌与对子留在 8% 长尾', () => {
+test('标准档发牌：四类大牌占 26%，散牌与对子按真实比例做底', () => {
   const counts = new Map<number, number>();
   for (let roll = 0; roll < 1000; roll++) {
     const category = dealCategoryForRoll(roll);
     counts.set(category, (counts.get(category) ?? 0) + 1);
   }
-  assert.deepEqual(Object.fromEntries(counts), { 1: 50, 2: 30, 3: 290, 4: 380, 5: 120, 6: 130 });
+  assert.deepEqual(Object.fromEntries(counts), { 1: 600, 2: 140, 3: 100, 4: 120, 5: 18, 6: 22 });
+  // 真实牌型频率是 744:169:33:50:2.2:2.4。大牌仍被放大（26% ≫ 8.8%），
+  // 但散牌:对子保持真实的 744:169 —— 低端的牌感不该被娱乐化改掉。
+  assert.ok(Math.abs(600 / 740 - 744 / 913) < 0.01, '散牌:对子应贴着真实的 744:169');
 });
 
-test('娱乐增强发牌：六人连续发牌始终合法且整桌没有重复牌', () => {
+test('牌力带就是发牌分布的累计，两张表不许各写各的', () => {
+  const perMille = ZJH_HAND_DISTRIBUTION_PER_MILLE;
+  const order = [perMille.highCard, perMille.pair, perMille.straight, perMille.flush,
+    perMille.straightFlush, perMille.trips];
+  assert.equal(order.reduce((a, b) => a + b, 0), 1000, '千分比要正好加满 1000');
+  let cum = 0;
+  for (let i = 0; i < order.length; i++) {
+    const [lo, hi] = CATEGORY_BANDS[i + 1];
+    assert.equal(lo, cum / 1000, `牌型 ${i + 1} 的带下沿应等于前面牌型的累计概率`);
+    cum += order[i];
+    assert.ok(Math.abs(hi - cum / 1000) < 1e-12, `牌型 ${i + 1} 的带上沿应等于到它为止的累计概率`);
+  }
+  assert.equal(CATEGORY_BANDS[6][1], 1);
+  assert.deepEqual(CATEGORY_BANDS, {
+    1: [0, 0.6], 2: [0.6, 0.74], 3: [0.74, 0.84], 4: [0.84, 0.96], 5: [0.96, 0.978], 6: [0.978, 1],
+  });
+});
+
+test('娱乐增强档发牌：四类大牌占 54%，散牌降到 35%', () => {
+  const counts = new Map<number, number>();
+  for (let roll = 0; roll < 1000; roll++) {
+    const category = dealCategoryForRoll(roll, 'party');
+    counts.set(category, (counts.get(category) ?? 0) + 1);
+  }
+  assert.deepEqual(Object.fromEntries(counts), { 1: 350, 2: 110, 3: 200, 4: 240, 5: 45, 6: 55 });
+  // 顺子以上 = 200 + 240 + 45 + 55 = 540‰。这一档要的是碰撞，不是牌理：
+  // 真实牌局里四类大牌只有 8.8%，标准档 26%，这里 54%。
+  assert.equal(200 + 240 + 45 + 55, 540, '娱乐增强档的大牌占比就是 54%');
+  // 标准档一个字都不许被它带跑
+  assert.deepEqual(ZJH_DEAL_PROFILES.standard, ZJH_HAND_DISTRIBUTION_PER_MILLE);
+  assert.deepEqual(
+    Object.fromEntries([...new Array(1000).keys()].reduce((m, roll) => {
+      const cat = dealCategoryForRoll(roll);
+      return m.set(cat, (m.get(cat) ?? 0) + 1);
+    }, new Map<number, number>())),
+    { 1: 600, 2: 140, 3: 100, 4: 120, 5: 18, 6: 22 },
+  );
+});
+
+test('两档的牌力带各自等于自己那份分布的累计，谁也不许借用谁的表', () => {
+  for (const mode of ['standard', 'party'] as DealMode[]) {
+    const d = ZJH_DEAL_PROFILES[mode];
+    const order = [d.highCard, d.pair, d.straight, d.flush, d.straightFlush, d.trips];
+    assert.equal(order.reduce((a, b) => a + b, 0), 1000, `${mode} 的千分比要加满 1000`);
+    const bands = categoryBands(mode);
+    let cum = 0;
+    for (let i = 0; i < order.length; i++) {
+      const [lo, hi] = bands[i + 1];
+      assert.equal(lo, cum / 1000, `${mode} 牌型 ${i + 1} 的带下沿`);
+      cum += order[i];
+      assert.ok(Math.abs(hi - cum / 1000) < 1e-12, `${mode} 牌型 ${i + 1} 的带上沿`);
+    }
+    assert.equal(bands[6][1], 1, `${mode} 最强的一手必须钉在 1`);
+  }
+  assert.deepEqual(categoryBands('party'), {
+    1: [0, 0.35], 2: [0.35, 0.46], 3: [0.46, 0.66], 4: [0.66, 0.9], 5: [0.9, 0.945], 6: [0.945, 1],
+  });
+  assert.deepEqual(categoryBands('standard'), CATEGORY_BANDS, 'CATEGORY_BANDS 就是标准档那一份');
+  // 同一手金花，在两档里排的名次不是一回事 —— 所以分位必须跟着房间的档位走
+  const flush: Card[] = [c(9, 'S'), c(5, 'S'), c(2, 'S')];
+  assert.ok(handPercentile(flush, 'standard') > handPercentile(flush, 'party'),
+    '娱乐增强档里金花更常见，同一手金花排得更靠后');
+});
+
+test('老快照没有 dealMode 时补成标准档', () => {
+  const room = makeRoom(2);
+  delete (room.settings as Partial<typeof room.settings>).dealMode;
+  migrateRoom(room);
+  assert.equal(room.settings.dealMode, 'standard');
+  // 脏值同样退回标准档：发牌不能因为一个坏字段就崩
+  (room.settings as { dealMode: string }).dealMode = 'wild';
+  migrateRoom(room);
+  assert.equal(room.settings.dealMode, 'standard');
+});
+
+test('标准档发牌：六人连续发牌始终合法且整桌没有重复牌', () => {
   let state = 0x12345678;
   const pick = (max: number) => {
     state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
@@ -75,15 +155,15 @@ test('娱乐增强发牌：六人连续发牌始终合法且整桌没有重复�
   }
 });
 
-test('娱乐增强发牌：散牌和对子仍能从长尾发出', () => {
+test('标准档发牌：散牌和对子是桌面底色，掷到就必须发得出来', () => {
   const pickerFor = (roll: number) => (max: number) => max === 1000 ? roll : 0;
-  for (const [roll, category] of [[920, 1], [970, 2]] as const) {
+  for (const [roll, category] of [[500, 1], [900, 2]] as const) {
     const hands = dealWeightedHands(2, pickerFor(roll));
     assert.ok(hands.every((hand) => evaluateHand(hand).category === category));
   }
 });
 
-test('娱乐增强发牌：同牌型内部是均匀的，小豹子小顺金照样发得出来', () => {
+test('标准档发牌：同牌型内部是均匀的，小豹子小顺金照样发得出来', () => {
   // 只放大牌型频率，不在牌型内部再偏向大牌 —— 否则每个人的金花都是 A 高，
   // 同桌撞上同一牌型时大小永远贴在一起，比牌在开牌前就没有悬念了。
   let state = 0x2468ace0;
@@ -197,7 +277,13 @@ test('封顶开牌时同样是后手胜，跟比牌口径一致', () => {
   assert.equal(room.result?.winnerId, target.id, '梭哈发起方在完全同牌时也应判负');
 });
 
-test('短码梭哈时金额就是他自己的身家，接的人按同一金额入池', () => {
+/*
+ * 2026-09-05：这条以前叫「短码梭哈时金额就是他自己的身家」。梭哈改成全押、
+ * 并且**永远不比跟注便宜**之后，跟不起的人根本没有梭哈 —— 他要打的那一口
+ * 是「全押跟」。原来断言的现象（他掏 50、别人按 50 入池、三家开牌）本来就是
+ * 边池 + 全押跟的行为，所以这条改成用 call 走同一条路，断言一个不少。
+ */
+test('跟不起的短码只能全押跟：引擎拒绝他梭哈，但那一口钱照样打得出去', () => {
   const room = makeRoom(3);
   startRound(room, room.hostId);
   const actor = currentPlayer(room)!;
@@ -205,59 +291,104 @@ test('短码梭哈时金额就是他自己的身家，接的人按同一金额�
   actor.hand = [c(9, 'S'), c(7, 'H'), c(4, 'D')];
   others[0].hand = [c(14, 'S'), c(14, 'H'), c(14, 'D')];
   others[1].hand = [c(13, 'S'), c(13, 'H'), c(12, 'D')];
-  actor.chips = 50; // 跟不起，被动梭哈，第一轮也允许
+  actor.chips = 50; // 跟注要 1000，跟不起
+  for (const o of others) o.chips = 1_000; // 另外两家跟完也正好推光，方便直接走到开牌
   const pot = room.pot;
 
-  applyCommand(room, actor.id, { type: 'all_in' });
-  assert.equal(room.allIn?.amount, 50, '金额取场上最短的一家，也就是他自己');
-  assert.equal(actor.chips, 0);
+  assert.throws(
+    () => applyCommand(room, actor.id, { type: 'all_in' }),
+    /筹码不够跟注，只能全押跟、全押比牌或弃牌/,
+    '梭哈不该比跟注便宜，所以短码没有梭哈',
+  );
 
-  for (const id of room.allIn!.pending.slice()) applyCommand(room, id, { type: 'call' });
+  applyCommand(room, actor.id, { type: 'call' });
+  assert.equal(actor.chips, 0, '全押跟：夹到全部筹码');
+  assert.equal(actor.allIn, true);
+  assert.equal(room.allIn, undefined, '全押跟不进表态，牌局照常往下走');
 
+  // 剩下两家继续打，等到只剩一个人还出得起钱，引擎直接开牌 —— 三家都在，按分层结算
+  while (room.phase === 'playing') {
+    const p = currentPlayer(room)!;
+    applyCommand(room, p.id, { type: 'call' });
+  }
   assert.equal(room.phase, 'round_end');
-  assert.equal(room.result?.winnerId, others[0].id);
-  assert.equal(room.result?.potWon, pot + 50 * 3, '三家各出 50');
-  assert.equal(room.result?.revealed.length, 3);
+  assert.equal(room.result?.winnerId, others[0].id, '豹子拿主池');
+  assert.equal(room.result?.potWon, pot, '主池 = 三家都够得着的那一层（各 1000 底注）');
+  assert.equal(room.result?.revealed.length, 3, '三家都摊牌，短码没有因为钱少被踢出去');
+  // 超出短码那一层的钱进边池，短码分不到；这正是「全押跟」该有的样子
+  assert.equal(others[1].chips, 1_050, '边池归还在局、且掏了那一层的人');
+  assert.equal(
+    room.players.reduce((n, p) => n + p.chips, 0),
+    pot + 50 + 1_000 * 2,
+    '筹码守恒：底池加各家实付，一分不多一分不少',
+  );
 });
 
-test('梭哈金额由场上最短的一家决定，接的人都掏得起', () => {
+/*
+ * 2026-09-05：以前叫「梭哈金额由场上最短的一家决定」。那正是被废掉的房规 ——
+ * 场上有个 1500 的短码，家底 49.9 万的人梭哈也只押 1500，比跟注还便宜。
+ * 现在梭哈就是**自己的全部身家**，短码接不动就全押接、走边池。
+ */
+test('梭哈金额就是发起人的全部身家，接不动的人全押接', () => {
   const room = makeRoom(3);
   startRound(room, room.hostId);
   room.roundNo = room.settings.allInFromRound;
   const actor = currentPlayer(room)!;
   const others = room.players.filter((p) => p.id !== actor.id);
-  // 人为造出一个短码：金额应该跟着他走，而不是跟着梭哈的人
-  others[0].chips = 1500;
-  assert.equal(allInCost(room, actor), 1500, '人人闷牌时，每家都是这个数');
+  // 场上有个短码：他压不低梭哈价，只能把自己的那一层全押进来
+  const short = others[0];
+  short.chips = 1500;
+  // 固定牌面：makeRoom/startRound 随机发牌，短码若摊牌赢下自己那层边池就会拿回筹码，
+  // 让下面 `short.chips === 0` 这条断言变成看牌运（约 7/12 概率翻红）；这里把发起人锁死成
+  // 豹子 A（三张 A、三种花色），其余两家发明显更小且互不相同的散牌，发起人必赢，
+  // 断言才对任何一次随机发牌都成立。
+  actor.hand = [c(14, 'S'), c(14, 'H'), c(14, 'D')];
+  short.hand = [c(9, 'S'), c(7, 'H'), c(2, 'D')];
+  others[1].hand = [c(8, 'C'), c(6, 'D'), c(3, 'H')];
+  assert.equal(allInCost(room, actor), actor.chips, '梭哈价 = 发起人的全部筹码');
 
   const potBefore = room.pot;
+  const shove = actor.chips;
   const stacksBefore = new Map(room.players.map((p) => [p.id, p.chips]));
+  const betsBefore = new Map(room.players.map((p) => [p.id, p.bet]));
 
   applyCommand(room, actor.id, { type: 'all_in' });
+  assert.equal(room.allIn!.amount, shove, '押上去的就是发起人的全部身家');
   for (const id of room.allIn!.pending.slice()) applyCommand(room, id, { type: 'call' });
 
   assert.equal(room.phase, 'round_end');
-  assert.equal(room.result?.potWon, potBefore + 1500 * 3);
-  const potWon = room.result!.potWon;
+  // 各家实付不再是同一个数：厚家掏全额，短码夹到自己那点身家（`pay` 已夹）
   for (const p of room.players) {
-    const paid = stacksBefore.get(p.id)! - 1500;
-    const want: number = p.id === room.result!.winnerId ? paid + potWon : paid;
-    assert.equal(p.chips, want, `${p.name} 的积分不对`);
+    const paid = p.bet - betsBefore.get(p.id)!;
+    assert.equal(paid, Math.min(stacksBefore.get(p.id)!, shove), `${p.name} 的实付不对`);
     assert.ok(p.chips >= 0, '不该有人被打成负数');
   }
+  assert.equal(short.bet - betsBefore.get(short.id)!, 1500, '短码只押得起 1500，压不低梭哈价');
+  assert.equal(short.chips, 0, '短码全押接');
+  // 钱按边池分层退回去，总量守恒
+  const before = [...stacksBefore.values()].reduce((n, v) => n + v, 0) + potBefore;
+  assert.equal(room.players.reduce((n, p) => n + p.chips, 0), before, '筹码守恒');
 });
 
-test('跟不起的时候任何轮次都能梭哈脱身', () => {
+/*
+ * 2026-09-05：以前叫「跟不起的时候任何轮次都能梭哈脱身」。「被动梭哈」这条口子
+ * 已经封了 —— 它正是「梭哈比跟注便宜」的入口。跟不起的人的脱身方式是全押跟，
+ * 这条改成断言那条新出路，顺带钉死引擎会拒掉他的梭哈。
+ */
+test('跟不起的人没有梭哈：脱身方式是全押跟，不是把全桌拖进表态', () => {
   const room = makeRoom(3);
   startRound(room, room.hostId);
-  assert.equal(room.roundNo, 1, '第一轮，主动梭哈本来是禁止的');
+  assert.equal(room.roundNo, 1, '第一轮');
   const actor = currentPlayer(room)!;
-  actor.chips = 50; // 跟注要 100，跟不起
-  applyCommand(room, actor.id, { type: 'all_in' });
-  assert.ok(room.allIn, '被动梭哈也要走表态');
-  for (const id of room.allIn!.pending.slice()) applyCommand(room, id, { type: 'fold' });
-  assert.equal(room.phase, 'round_end');
-  assert.equal(room.result?.winnerId, actor.id);
+  actor.chips = 50; // 跟注要 1000，跟不起
+  assert.throws(
+    () => applyCommand(room, actor.id, { type: 'all_in' }),
+    /筹码不够跟注，只能全押跟、全押比牌或弃牌/,
+  );
+  applyCommand(room, actor.id, { type: 'call' });
+  assert.equal(actor.chips, 0, '全押跟');
+  assert.equal(room.allIn, undefined, '没有表态这回事');
+  assert.equal(room.phase, 'playing', '他推光了，剩下的人继续打');
 });
 
 test('梭哈要别人接受才比牌：接的人开牌，不接的人出局', () => {
@@ -364,6 +495,45 @@ test('老快照缺字段时会被补齐，不会出现 undefined 轮', () => {
   assert.equal(typeof room.settings.allInFromRound, 'number');
 });
 
+test('旧快照的 reads 会一次性并进按账户索引的长期档案', () => {
+  const room = makeRoom(2);
+  room.players[0].accountId = 'acc-1';
+  const legacy: TableRead = {
+    hands: 12, played: 6, aggressive: 4, passive: 2,
+    pressureFaced: 5, foldsToPressure: 1, showdowns: 3, showdownStrength: 1.8, bluffsCaught: 1,
+  };
+  (room as Partial<RoomState>).reads = { [room.players[0].id]: legacy };
+  migrateRoom(room);
+  assert.equal(room.reads, undefined, '迁移之后房间快照里不该再留着 reads 这个字段');
+  assert.equal(memoryKey(room.players[0]), 'acc:acc-1', '有账户的真人按账户索引，不是按房内座位 id');
+  // 旧快照里没有梭哈表态那两栏（§4.6 之后才有），聚合出来必须是 0，其余一栏不差。
+  const expected: TableRead = { ...legacy, allInFaced: 0, allInTaken: 0 };
+  assert.deepEqual(tableRead(room, room.players[0].id), expected, '并进长期档案之后聚合口径必须和旧数据完全一致');
+
+  // 迁移必须是幂等的：同一份旧快照被恢复两次，不能把旧笔记再叠加一遍。
+  migrateRoom(room);
+  assert.deepEqual(tableRead(room, room.players[0].id), expected, '迁移只能生效一次，不能重复叠加');
+});
+
+test('旧快照里 handActions 是字符串数组，会被规范成事件对象', () => {
+  const room = makeRoom(2);
+  // betUnit 只有在「进行中」才不会被 migrateRoom 同步成新底注（大厅/结算阶段
+  // 会直接显示新底注），所以这条迁移要在 playing 阶段验证才测得到真实单价。
+  startRound(room, room.hostId);
+  room.betUnit = 20_000;
+  room.roundNo = 2;
+  (room.players[0] as unknown as { handActions: string[] }).handActions = ['call', 'raise'];
+  migrateRoom(room);
+  assert.deepEqual(
+    room.players[0].handActions,
+    [
+      { kind: 'call', looked: false, unit: 20_000, roundNo: 2, at: 0 },
+      { kind: 'raise', looked: false, unit: 20_000, roundNo: 2, at: 0 },
+    ],
+    '老字符串动作按闷牌、当时的单价补成事件对象，不能直接崩掉或丢弃',
+  );
+});
+
 test('进行中的旧牌局同步新档位，但不在半路强改当前单价', () => {
   const room = makeRoom(2);
   startRound(room, room.hostId);
@@ -376,15 +546,22 @@ test('进行中的旧牌局同步新档位，但不在半路强改当前单价',
   assert.equal(room.betUnit, 5_000, '本局当前单价保持不动，下一局才从新底注开始');
 });
 
-test('场上有人跟不起时，梭哈提前开放', () => {
+/*
+ * 2026-09-05：以前叫「场上有人跟不起时，梭哈提前开放」。为了给一个人的出路
+ * 把**全桌**的梭哈提前放开，是拿房规换便利；他现在有全押跟，不需要这条。
+ * 解锁只看轮次。
+ */
+test('解锁只看轮次：场上有人跟不起也不会提前放开梭哈', () => {
   const room = makeRoom(3);
   startRound(room, room.hostId);
   assert.equal(room.roundNo, 1);
   assert.equal(canAllInNow(room), false, '第一轮且人人有钱时不该开放');
 
-  // 让一个人跟不起，梭哈就该提前可用
   room.players.find((p) => p.status === 'active')!.chips = 50;
-  assert.equal(canAllInNow(room), true);
+  assert.equal(canAllInNow(room), false, '有人跟不起也不解锁');
+
+  room.roundNo = room.settings.allInFromRound;
+  assert.equal(canAllInNow(room), true, '到轮次才解锁');
 });
 
 test('前两轮不能主动梭哈', () => {
@@ -449,11 +626,17 @@ function settleShove(room: RoomState, opts: { fold?: string[]; lookFirst?: strin
   return paid;
 }
 
-test('梭哈发起人：闷牌实付正好是看牌实付的一半', () => {
+/*
+ * 2026-09-05：以前叫「发起人闷牌实付正好是看牌实付的一半」——「实付」由被封顶的
+ * 单价 × 自己的倍率算出来。梭哈改成全押之后，发起人**闷牌看牌都推光**，实付一样；
+ * 倍率影响的是他定出来的**闷牌单价 base**（别人接的价）：看牌的人一份算两份，
+ * 所以他的 base 只有身家的一半。这条改成断言 base 这一半。
+ */
+test('梭哈发起人：闷牌看牌都是全押，看牌的人定出来的闷牌单价是一半', () => {
   // 同一个局面各跑一遍，唯一的差别是发起人有没有看牌。
-  // 单价由别人（3000 的短码）压住，所以发起人的倍率是唯一变量。
   const dark = shoveReady();
-  dark.others[0].chips = 3000;
+  dark.others[0].chips = 3000; // 场上有个短码：他压不低任何东西了
+  const darkStack = dark.actor.chips;
   const darkBefore = dark.actor.bet;
   applyCommand(dark.room, dark.actor.id, { type: 'all_in' });
   const darkPaid = dark.actor.bet - darkBefore;
@@ -461,75 +644,82 @@ test('梭哈发起人：闷牌实付正好是看牌实付的一半', () => {
   const lit = shoveReady();
   lit.others[0].chips = 3000;
   applyCommand(lit.room, lit.actor.id, { type: 'look' });
+  const litStack = lit.actor.chips;
   const litBefore = lit.actor.bet;
   applyCommand(lit.room, lit.actor.id, { type: 'all_in' });
   const litPaid = lit.actor.bet - litBefore;
 
-  assert.equal(dark.room.allIn!.base, 3000, '闷牌单价由场上最短的一家决定');
-  assert.equal(lit.room.allIn!.base, 3000, '看牌不改变单价，只改变自己的倍率');
-  assert.equal(darkPaid, 3000, '闷牌一份');
-  assert.equal(litPaid, 6000, '看牌两份');
-  assert.equal(darkPaid * 2, litPaid, '闷牌是看牌的一半');
-  assert.equal(dark.room.allIn!.amount, darkPaid, 'amount 记的是发起人自己押上的数');
+  assert.equal(darkPaid, darkStack, '闷牌发起：推光');
+  assert.equal(litPaid, litStack, '看牌发起：一样推光');
+  assert.equal(darkPaid, litPaid, '押的都是全部身家，和看没看牌无关');
+  assert.equal(dark.room.allIn!.base, darkStack, '闷牌发起：一份就是全部身家');
+  assert.equal(lit.room.allIn!.base, Math.ceil(litStack / 2), '看牌发起：一份是身家的一半');
+  assert.equal(lit.room.allIn!.base * 2, darkPaid, '看牌的闷牌单价正好是闷牌的一半');
+  assert.equal(dark.room.allIn!.amount, darkPaid, 'amount 记的是发起人押上的全部身家');
   assert.equal(lit.room.allIn!.amount, litPaid);
 });
 
 test('接受梭哈：闷牌接的人实付正好是看牌接的人的一半', () => {
   const { room, actor, others } = shoveReady(4);
+  // 发起人闷牌推光，所以闷牌单价就是他的全部身家；给别人配足够的钱把这一份接下来
+  const stack = actor.chips;
+  for (const o of others) o.chips = stack * 3;
   const short = others[0];
-  short.chips = 3000; // 由他把闷牌单价压到 3000
   applyCommand(room, actor.id, { type: 'all_in' });
-  assert.equal(room.allIn!.base, 3000);
+  assert.equal(room.allIn!.base, stack, '闷牌发起：一份就是发起人的全部身家');
 
   const responders = room.allIn!.pending.filter((id) => id !== short.id);
   const [darkId, litId] = responders;
   const paid = settleShove(room, { fold: [short.id], lookFirst: [litId] });
 
-  assert.equal(paid.get(darkId), 3000, '闷牌接受只付一份');
-  assert.equal(paid.get(litId), 6000, '看牌接受要付两份');
+  assert.equal(paid.get(darkId), stack, '闷牌接受只付一份');
+  assert.equal(paid.get(litId), stack * 2, '看牌接受要付两份');
   assert.equal(paid.get(darkId)! * 2, paid.get(litId), '闷牌接受是看牌接受的一半');
 });
 
-test('闷牌单价保证人人掏得起：看牌的短码按 chips/2 卡住，而不是按 chips', () => {
+/*
+ * 2026-09-05：以前叫「闷牌单价保证人人掏得起」。**这条保证已经取消了** ——
+ * 梭哈就是发起人推光自己，别人掏不掏得起是别人的事：掏不动就全押接，边池分层，
+ * 谁也不会被扣成负数。这条改成断言新口径：单价只由发起人自己的身家和倍率决定。
+ */
+test('梭哈单价只看发起人：闷牌 = 全部身家，看牌 = 身家的一半（ceil）', () => {
   const { room, actor, others } = shoveReady();
   others[0].chips = 1000;
-  applyCommand(room, others[0].id, { type: 'look' }); // 看牌的人筹码最少
-  others[1].chips = 900; // 闷牌的人筹码更少一点，但只按一倍算
+  applyCommand(room, others[0].id, { type: 'look' }); // 场上有个看牌的短码
+  others[1].chips = 900;
 
-  // 老规则会取 min(chips) = 900，看牌那家就要掏 1800，比身家还多 —— 被迫破产。
-  assert.equal(allInBase(room), 500, '要被看牌那家的 chips/2 卡住');
-  assert.equal(allInCost(room, others[0]), 1000, '看牌的短码正好推光筹码');
-  assert.equal(allInCost(room, actor), 500, '闷牌的人只掏一份');
-  for (const p of room.players.filter((x) => x.status === 'active')) {
-    assert.ok(
-      allInBase(room) * (p.looked ? 2 : 1) <= p.chips,
-      `${p.name} 应付超过了自己的身家，不该发生`,
-    );
-  }
+  assert.equal(allInBase(room, actor), actor.chips, '闷牌发起：一份就是他的全部身家');
+  assert.equal(allInCost(room, actor), actor.chips, '梭哈价 = 全部筹码');
+  assert.equal(allInBase(room, others[0]), 500, '看牌的人：ceil(1000 / 2)');
+  assert.equal(allInCost(room, others[0]), 1000, '他梭哈一样是推光');
+  // 别人的身家一概不参与 —— 老规则会被 900 / 500 这两个短码压死
+  assert.ok(allInBase(room, actor) > 900, '短码压不低梭哈价');
 
   applyCommand(room, actor.id, { type: 'all_in' });
   settleShove(room);
   assert.equal(room.phase, 'round_end');
-  for (const p of room.players) assert.ok(p.chips >= 0, '不该有人被打成负数');
+  for (const p of room.players) assert.ok(p.chips >= 0, '接不动的人全押接，不该有人被打成负数');
 });
 
 test('表态时先看牌再接受的人要付两倍；翻倍翻过身家就推光筹码', () => {
-  // 甲：家底厚，看牌把自己的价从 3000 抬到 6000，照付
+  // 甲：家底厚（发起人身家的三倍），看牌把自己的价翻一倍，照付
   const rich = shoveReady();
-  rich.others[0].chips = 3000;
+  const richStack = rich.actor.chips;
+  for (const o of rich.others) o.chips = richStack * 3;
   applyCommand(rich.room, rich.actor.id, { type: 'all_in' });
   const richId = rich.room.allIn!.pending.find((id) => id !== rich.others[0].id)!;
   const richPaid = settleShove(rich.room, { fold: [rich.others[0].id], lookFirst: [richId] });
-  assert.equal(richPaid.get(richId), 6000, '表态阶段看牌，价当场翻倍');
+  assert.equal(richPaid.get(richId), richStack * 2, '表态阶段看牌，价当场翻倍');
 
-  // 乙：他自己就是那个短码，看牌后 6000 已经超过身家 3000 —— 推光筹码，而不是报错
+  // 乙：他闷着刚好接得下（身家 = 一份），看牌后要两份 —— 推光筹码，而不是报错
   const broke = shoveReady();
+  const brokeStack = broke.actor.chips;
   const shortId = broke.others[0].id;
-  broke.others[0].chips = 3000;
+  broke.others[0].chips = brokeStack;
   applyCommand(broke.room, broke.actor.id, { type: 'all_in' });
-  assert.equal(broke.room.allIn!.base, 3000);
+  assert.equal(broke.room.allIn!.base, brokeStack);
   const brokePaid = settleShove(broke.room, { lookFirst: [shortId] });
-  assert.equal(brokePaid.get(shortId), 3000, '夹到全部筹码，一分不多');
+  assert.equal(brokePaid.get(shortId), brokeStack, '夹到全部筹码，一分不多');
   // 这里不能断言 chips === 0：最后一个接的人会在同一次 applyCommand 里开牌收锅，
   // 他要是赢了，奖池当场就发回到 chips 上（牌是随机发的，断言 0 会时过时不过）。
   // 「推光了」的证据是上面那行：实付正好等于他的全部身家，而不是翻倍后的 6000。
@@ -538,19 +728,31 @@ test('表态时先看牌再接受的人要付两倍；翻倍翻过身家就推�
 
 test('梭哈的底池等于各家实付之和', () => {
   const { room, actor, others } = shoveReady(4);
+  const stack = actor.chips;
+  for (const o of others) o.chips = stack * 3; // 别人都接得下这一份
   const short = others[0];
-  short.chips = 3000;
   const potBefore = room.pot;
-  const actorBefore = actor.bet;
+  const betsBefore = new Map(room.players.map((p) => [p.id, p.bet]));
   applyCommand(room, actor.id, { type: 'all_in' });
-  const actorPaid = actor.bet - actorBefore;
+  const actorPaid = actor.bet - betsBefore.get(actor.id)!;
   assert.equal(room.pot, potBefore + actorPaid, '先只有发起人掏钱');
+  assert.equal(actorPaid, stack, '梭哈 = 发起人推光自己');
 
   const litId = room.allIn!.pending.find((id) => id !== short.id)!;
   const paid = settleShove(room, { fold: [short.id], lookFirst: [litId] });
-  const total = actorPaid + [...paid.values()].reduce((a, b) => a + b, 0);
-  assert.equal(total, 3000 + 3000 + 6000, '一份 + 一份 + 两份');
-  assert.equal(room.result!.potWon, potBefore + total, '底池就是各家实付之和，一分不差');
+  assert.equal(paid.get(litId), stack * 2, '看牌接的人两份，单价是发起时定死的那个');
+
+  /*
+   * 2026-09-05：这里原来解释的是「有人弃牌就重算单价、已付的人补差价」。
+   * 那套房规已经废掉 —— 单价从发起到收场是同一个数，有人弃牌也不动。
+   * 「各家实付」照旧按最终的 bet 去加（有人是全押接，付的不是名义价），
+   * 守恒这条不受影响：发出去的钱永远等于收进来的钱。
+   */
+  const total = room.players.reduce((n, p) => n + p.bet - betsBefore.get(p.id)!, 0);
+  // 有了边池，potWon 只是**牌面赢家**分到的那几层；守恒要看发出去的总额。
+  const paidOut = room.result!.deltas.reduce((n, d) => n + d.delta + d.bet, 0);
+  assert.equal(paidOut, potBefore + total, '底池就是各家实付之和，一分不差');
+  assert.equal(short.bet - betsBefore.get(short.id)!, 0, '弃牌的短码一分没为这次梭哈掏');
 });
 
 test('还没轮到自己也能弃牌，且不会打乱行动顺序', () => {
@@ -805,7 +1007,10 @@ test('比牌直接收锅时，比牌双方的牌摊给全场', () => {
   // 没参与的那家弃了牌，不该被连坐亮出来
   assert.equal(room.result?.hands[rest[1].id], undefined);
   const seenByFolder = sanitizeRoom(room, rest[1].id);
-  assert.equal(seenByFolder.players.filter((p) => p.hand.length === 3).length, 2, '旁观者也看得到摊开的两家');
+  // 摊开的两家 + 他自己那一手。局终把牌亮给本人是有意为之（见 tests/table-flow.test.ts 问题 2），
+  // 别人的信息边界没变：他仍然只看得到比过牌的那两家。
+  assert.equal(seenByFolder.players.filter((p) => p.hand.length === 3).length, 3, '旁观者看得到摊开的两家，外加自己那一手');
+  assert.equal(seenByFolder.players.find((p) => p.id === rest[1].id)!.hand.length, 3, '自己的牌局终要还给自己');
 });
 
 test('中途被比牌比下去的人，牌局继续也要在结算时亮牌', () => {
@@ -888,17 +1093,40 @@ test('中途弃牌的人不会在结算时被亮牌', () => {
   assert.equal(room.phase, 'round_end');
   assert.deepEqual(room.result?.revealed, [], '没有摊牌就不该亮任何人的牌');
   const view = sanitizeRoom(room, first.id);
-  assert.equal(view.players.filter((p) => p.hand.length === 3).length, 0);
+  // 局终只有「自己那一手」会回到自己手里，别人的一张都不多给
+  assert.equal(view.players.filter((p) => p.hand.length === 3).length, 1);
+  assert.equal(view.players.find((p) => p.id === first.id)!.hand.length, 3);
+  const other = sanitizeRoom(room, second.id);
+  assert.equal(other.players.find((p) => p.id === first.id)!.hand.length, 0, '别人的暗牌仍然看不到');
 });
 
 /* ----------------------------------------------------------- 机器人 */
 
 test('机器人有稳定且不同的性格，不会每一步随机换人格', () => {
-  const aggressive = botPersonality({ id: 'same', name: '阿凯' });
-  const patient = botPersonality({ id: 'same', name: '老陈' });
-  assert.ok(aggressive.aggression > patient.aggression);
-  assert.ok(patient.patience > aggressive.patience);
-  assert.deepEqual(botPersonality({ id: 'same', name: '阿凯' }), aggressive);
+  // 名字就是身份（§4.7.1）：同名同人，跨房间跨天不变。
+  const 赌徒 = personaFor({ id: 'same', name: '阿凯' });
+  const 岩石 = personaFor({ id: 'other', name: '老陈' });
+  // §4.7.3 那张表上的两个人，性子该反着来。
+  assert.ok(赌徒.lines.偷池, '松凶的赌徒有「偷池」这条线');
+  assert.equal(岩石.lines.偷池, undefined, '「只用真牌说话」的岩石根本不走偷池');
+  assert.ok(赌徒.emotion.tiltGain > 岩石.emotion.tiltGain, '赌徒该比岩石上头得重');
+  assert.equal(personaFor({ id: 'yet-another', name: '阿凯' }), 赌徒, '同名必须是同一张卡');
+});
+
+test('八个名字全部落在名册上，没有人走常人卡', () => {
+  // 过渡期的 7 维性格表（botPersonality / tuneTraits）已在集成第 2 步删除：
+  // 现在只有「名册上的那个人」和「常人」两种，桌上不该再出现半个人。
+  assert.equal(BOT_NAMES.length, 8, '名册就是 §4.7.3 的八个人');
+  assert.equal(new Set(BOT_NAMES).size, 8);
+  for (const name of BOT_NAMES) {
+    assert.ok(PERSONAS[name], `${name} 不在 §4.7.3 名册上`);
+    assert.notEqual(personaFor({ id: 'x', name }), COMMON_PERSONA, `${name} 落回了常人卡`);
+  }
+  // 反向也要一一对应：有卡却上不了桌的人等于没写。
+  assert.deepEqual([...BOT_NAMES].sort(), Object.keys(PERSONAS).sort());
+  // 座位只有六个，抽到谁都必须是名册上的人。
+  const room = makeRoom(1, 5);
+  for (const b of room.players.filter((p) => p.isBot)) assert.ok(BOT_NAMES.includes(b.name));
 });
 
 test('一桌会抽到多个不重复的机器人，且风格各不相同', () => {
@@ -906,8 +1134,8 @@ test('一桌会抽到多个不重复的机器人，且风格各不相同', () =>
   const bots = room.players.filter((p) => p.isBot);
   assert.equal(bots.length, 5);
   assert.equal(new Set(bots.map((p) => p.name)).size, 5);
-  // 性格必须真的不一样，但**不能**出现在牌桌上：打法要靠观察摸出来
-  assert.equal(new Set(bots.map((p) => JSON.stringify(botPersonality(p)))).size, 5);
+  // 人格必须真的不一样，但**不能**出现在牌桌上：打法要靠观察摸出来
+  assert.equal(new Set(bots.map((p) => personaFor(p))).size, 5);
   assert.ok(bots.every((p) => !('botStyle' in p)), '不该把风格标签下发给客户端');
 });
 
@@ -993,10 +1221,40 @@ test('狡诈型会临场变招：低压力后位能诈唬，同一弱牌遇高�
   bot.looked = true;
   bot.hand = [c(2, 'S'), c(4, 'H'), c(7, 'D')];
   room.turnSeat = bot.seat;
-  room.turnCount = 2; // 三人桌后位
+  // 后位 = 从 firstActorSeat 顺时针数，他排在最后（M5 修好之后位置只看座次，不看 turnCount）
+  room.firstActorSeat = (bot.seat + 1) % room.settings.maxPlayers;
+  room.turnCount = 2;
   room.compareUnlockAt = 999;
-  room.pot = 3_000;
-  room.betUnit = 1_000;
+  /**
+   * 诈唬得有个**偷得到的池子**。这个场景原本是「底注 3 千、单价 1 千」——
+   * 但这一局的档位表是 [1千, 2万, 5万, 10万]，在 1 千档上「加一档」就是 2 万，
+   * 看过牌的人要掏 4 万去偷一个 3 千的池子：保本成功率 93%，谁来了都不该诈唬。
+   * 旧模型会在那里诈唬，只是因为它的偷池阈值是一条与价钱无关的常数（`steal >= 0.22`）。
+   *
+   * 真正的诈唬点在**升档之后、池子养起来、人少**的时候：三轮过后单价 2 万、池子 12 万，
+   * 加一档（5 万，成本 10 万）去偷 12 万，保本线落到四成上下，这时候才轮到
+   * 「他会不会被我吓走」说话。这也是 §4.4「偷池成功率随人数下降但升档后显著上升」
+   * 那句话的另一面（S11）。
+   */
+  room.roundNo = 3;
+  room.betUnit = 20_000;
+  room.pot = 120_000;
+  /**
+   * 「压力」在脑子里读的是**事件流**（`handActions`），不是 `lastAction` 那行给人看的字。
+   * 这个场景以前只写了 `lastAction`，于是两半其实是同一个局面：对手在机器人眼里
+   * 从头到尾都「什么也没做过」（`storyHeat` 的空数组分支 0.08），高压那一半根本没高压。
+   * 真实牌局里这两个数组永远是满的，所以这里把故事补上 —— 断言一个字没改。
+   */
+  const story = (kinds: ('call' | 'raise')[], unit: number) =>
+    kinds.map((kind) => ({ kind, looked: true, unit, roundNo: 3, at: 0 }));
+  // 低压力 = 桌上只剩一个人，而且他只是平跟着（`storyHeat` 里没有加注）
+  const rest = room.players.filter((p) => p.id !== bot.id);
+  rest[0].status = 'folded';
+  rest[1].looked = true;
+  rest[1].bet = 43_000;
+  rest[1].lastAction = '跟注';
+  rest[1].handActions = story(['call'], 20_000);
+  bot.bet = 43_000;
 
   let bluffSeq = -1;
   for (let seq = 0; seq < 240; seq++) {
@@ -1014,12 +1272,34 @@ test('狡诈型会临场变招：低压力后位能诈唬，同一弱牌遇高�
   room.pot = 150_000;
   for (const p of room.players) {
     if (p.id !== bot.id) {
+      p.status = 'active';
       p.looked = true;
       p.bet = 50_000;
       p.lastAction = '加到 50000';
+      p.handActions = story(['call', 'raise'], 50_000);
     }
   }
-  assert.deepEqual(botDecision(room, bot), { type: 'fold' }, '桌况转为高压后不能继续机械诈唬');
+  /**
+   * 收手这一半按**分布**断言（§6.3 的口径：固定局面采样 200 次）。
+   *
+   * 以前这里是一次采样、一次 `deepEqual('fold')` —— 可决策是从软性评分表里
+   * **采**出来的，一次采样断言一个 97%–98% 的事件，剩下的 2%–3% 就是这条测试
+   * 每几十次跑必红一回的原因（2026-09-04 实测：200 个 `actionSeq` × 15 张桌，
+   * 弃牌率 96.5%–99.0%，合计 98.2%；不同桌之间的差别来自 `bot.id`，
+   * 它每建一次房都是新的随机串，所以「哪一次红」跟代码没关系）。
+   * 断言的是同一件事，只是问的是「他还会不会机械地接着吹」而不是「这一次他吹没吹」。
+   */
+  let folds = 0;
+  const highSeqs = 200;
+  for (let seq = 0; seq < highSeqs; seq++) {
+    room.actionSeq = seq;
+    if (botDecision(room, bot).type === 'fold') folds++;
+  }
+  const foldShare = folds / highSeqs;
+  assert.ok(
+    foldShare >= 0.90,
+    `桌况转为高压后只有 ${(foldShare * 100).toFixed(1)}% 收手，剩下的还在机械诈唬`,
+  );
 });
 
 test('狡诈型顶级牌有时慢打设陷阱、有时直接价值加注', () => {
@@ -1162,4 +1442,29 @@ test('改名换头像不挑时候：牌局进行中照样能改', () => {
     () => applyCommand(room, room.hostId, { type: 'rename', name: '同桌那个人', avatar: '🐯' }),
     /已经有人用了/,
   );
+});
+
+test('发牌档：只有房主能改、取值要合法、改了本局不动下一局才生效', () => {
+  const room = makeRoom(3);
+  assert.equal(room.settings.dealMode, 'standard', '默认是标准档');
+
+  assert.throws(() => applyCommand(room, room.players[1].id, { type: 'settings', dealMode: 'party' }),
+    /房主/, '不是房主不能改发牌档');
+  assert.equal(room.settings.dealMode, 'standard');
+
+  assert.throws(
+    () => applyCommand(room, room.hostId, { type: 'settings', dealMode: 'PARTY' as DealMode }),
+    /standard 或 party/, '取值非法要被拒');
+  assert.equal(room.settings.dealMode, 'standard');
+
+  applyCommand(room, room.hostId, { type: 'settings', dealMode: 'party' });
+  assert.equal(room.settings.dealMode, 'party');
+  assert.ok(room.log.some((l) => l.text.includes('已切换到娱乐增强发牌，下一局生效')), '房间日志要留一条');
+
+  // 牌局进行中不许改 —— 这正是「下一局生效」的实现：这一局的牌早就发完了
+  applyCommand(room, room.hostId, { type: 'start' });
+  assert.equal(room.phase, 'playing');
+  assert.throws(() => applyCommand(room, room.hostId, { type: 'settings', dealMode: 'standard' }),
+    /牌局进行中/, '牌局进行中不能改房规');
+  assert.equal(room.settings.dealMode, 'party', '本局用的还是发牌时那一档');
 });

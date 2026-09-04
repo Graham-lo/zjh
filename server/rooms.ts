@@ -1,12 +1,13 @@
 import type { WebSocket } from 'ws';
 import {
-  AUTO_START_MS, canAutoStart, CHIP_GRANT_VERSION, currentPlayer, DEFAULT_SETTINGS, GameError, randomId, resetToLobby,
+  AUTO_START_MS, botOffTurn, canAutoStart, CHIP_GRANT_VERSION, currentPlayer, DEFAULT_SETTINGS, GameError, memoryKey,
+  mergeMemory, randomId, resetToLobby,
   ROUND_END_MS, startRound,
   ZJH_ECONOMY_VERSION,
-  type RoomState,
+  type GameCommand, type PlayerState, type RoomState,
 } from '../shared/game.ts';
 import {
-  engine, engineFor, isSjRoom, GAME_KINDS, isGameKind,
+  engine, engineFor, isSjRoom, zjhOffTurnDelay, GAME_KINDS, isGameKind,
   type AnyRoomState, type BotMove, type GameKind,
 } from '../shared/games.ts';
 import {
@@ -16,13 +17,15 @@ import {
 import type { AccountInfo, AnyGameCommand, GameEvent, ServerMsg } from '../shared/protocol.ts';
 import { getBuildId } from './build.ts';
 import { Store, type Account } from './store.ts';
+import { TraceRecorder } from './trace.ts';
 
 const ROOM_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 快照保留 3 天
 const IDLE_DROP_MS = 30 * 60 * 1000; // 无人连接 30 分钟后从内存卸载
 // 结算展示时长。前 ~3.2s 是牌桌上的开牌亮相（翻牌 → 牌型徽章 → 赢家金环金币），
 // 之后才升起结算面板 —— 两拍都要看得完，所以这里给的是两段之和。
-const HOST_GRACE_MS = 20_000; // 房主掉线多久后移交
 const MAX_ROOMS = 400;
+
+const NOOP_COMMIT = () => {};
 
 export interface Conn {
   ws: WebSocket;
@@ -35,11 +38,27 @@ interface Room {
   state: AnyRoomState;
   conns: Set<Conn>;
   timer: NodeJS.Timeout | null;
-  hostTimer: NodeJS.Timeout | null;
   saveTimer: NodeJS.Timeout | null;
   touchedAt: number;
   /** 升级：已经把哪一局的战绩写回账户了，避免重复计数 */
   creditedHand: number;
+  /** 炸金花：已经把哪一局的打法档案落库了，避免重复写 */
+  memoryHand: number;
+  /** 炸金花：已经把哪一局的结算留痕落库了，避免重复写（§4.11） */
+  traceHand: number;
+  /**
+   * 上一次**牌局状态**变化的时刻，用来量真人「从看到局面到按下去」的真实耗时
+   * （§4.11.1）。只有走过引擎的动作会刷它，见 `markChange`。
+   */
+  changedAt: number;
+  /** 炸金花：已经从长期表里补过水的档案键 */
+  memoryLoaded: Set<string>;
+  /**
+   * 炸金花：非回合动作的定时器，一个机器人一个（§4.6）。
+   * 刻意**不**放进 `timer`：那一个是「牌桌的节拍」，`arm()` 每次都会把它清掉重排；
+   * 这些是各人自己在旁边的反应，谁也不该因为别人行动了就被打断。
+   */
+  offTimers: Map<string, NodeJS.Timeout>;
 }
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -68,13 +87,44 @@ function snapshot(state: AnyRoomState): AnyRoomState {
   return structuredClone(state);
 }
 
+/**
+ * 牌桌指纹：只取「局面」相关的字段。
+ *
+ * 用来判断一条指令到底有没有动牌桌（§4.11.1 的用时起点，见 `Hub.markChange`）。
+ * 刻意**不**收进来的：昵称、头像、在线状态、表情、`log` / `actionSeq`。
+ * 这些都会广播出去，但一个正在想牌的人看到的牌桌一点没变 —— 对面边想边发表情
+ * 是牌桌上最常见的事，让它去冲用时的时钟，会系统性地把反应时间压短。
+ *
+ * 用指纹而不是「哪些指令不算数」的名单：以后加了新指令，它改没改牌桌是自己算出来的，
+ * 不需要有人记得回来改名单。
+ */
+function tableFingerprint(state: RoomState): string {
+  return JSON.stringify([
+    state.phase, state.handNo, state.roundNo, state.turnSeat, state.turnCount,
+    state.dealerSeat, state.firstActorSeat, state.pot, state.betUnit,
+    state.turnDeadline, state.compareUnlockAt, state.hostId, state.settings,
+    state.allIn ?? null, state.nextAt ?? null,
+    // 结算只取「谁赢、赢多少、谁亮了牌」—— 牌面不进指纹
+    state.result ? [state.result.winnerId, state.result.potWon, state.result.revealed] : null,
+    state.seen ?? null,
+    state.players.map((p) => [
+      p.id, p.seat, p.status, p.chips, p.bet, p.looked, p.bared, p.ready,
+      p.lastAction ?? null, p.pendingLeave ?? false, p.handActions?.length ?? 0,
+    ]),
+  ]);
+}
+
 export class Hub {
   private rooms = new Map<string, Room>();
 
   private store: Store;
 
-  constructor(store: Store) {
+  /** 决策留痕（§4.11）。旁路，写挂了也不影响牌局。 */
+  readonly trace: TraceRecorder;
+
+  constructor(store: Store, trace?: TraceRecorder) {
     this.store = store;
+    this.trace = trace ?? new TraceRecorder(store);
     let restored = 0;
     let chipMigrated = 0;
     let economyMigrated = 0;
@@ -89,10 +139,17 @@ export class Hub {
       for (const p of state.players) if (!p.isBot) p.online = false;
       state.turnDeadline = null;
       this.rooms.set(state.code, {
-        state, conns: new Set(), timer: null, hostTimer: null, saveTimer: null,
+        state, conns: new Set(), timer: null, saveTimer: null,
         touchedAt: Date.now(),
         // 重启前如果已经打完一局，账户那一笔早就写过了，别再记一次
         creditedHand: isSjRoom(state) ? (state.result?.handNo ?? 0) : 0,
+        // 重启前那一局的档案早就落过库了，别再写一次
+        memoryHand: isSjRoom(state) ? 0 : ((state as RoomState).handNo ?? 0),
+        // 重启前那一局的留痕同理：队列早就跟着进程没了，别写半局
+        traceHand: isSjRoom(state) ? 0 : ((state as RoomState).handNo ?? 0),
+        memoryLoaded: new Set(),
+        changedAt: Date.now(),
+        offTimers: new Map(),
       });
       // 迁移后立即落盘，旧房间无需等待玩家重新进入或下一次操作。
       if (needsChipMigration || needsEconomyMigration) {
@@ -214,6 +271,101 @@ export class Hub {
     }
   }
 
+  /**
+   * 炸金花的长期打法档案：从库里补水。
+   *
+   * 「老张一晚上只打三把」这件事隔天还该记得，所以档案按人（账户 / 机器人名字）存，
+   * 不跟房间快照一起走。房间里已经有的（旧快照迁移出来的 reads）和库里的两边都留。
+   */
+  private hydrateZjhMemory(room: Room) {
+    const s = room.state;
+    if (isSjRoom(s)) return;
+    const state = s as RoomState;
+    for (const p of state.players) {
+      const key = memoryKey(p);
+      if (room.memoryLoaded.has(key)) continue;
+      room.memoryLoaded.add(key);
+      let stored: ReturnType<Store['loadMemory']> = null;
+      try {
+        stored = this.store.loadMemory(key);
+      } catch (e) {
+        console.error('[hub] 打法档案读取失败', e);
+      }
+      if (!stored) continue;
+      state.memory ??= {};
+      const pending = state.memory[key];
+      state.memory[key] = pending ? mergeMemory(stored, pending) : stored;
+    }
+  }
+
+  /** 一局打完把档案写回长期表。用 `memoryHand` 挡重复 —— round_end 会广播很多次。 */
+  private creditZjhMemory(room: Room) {
+    const s = room.state;
+    if (isSjRoom(s)) return;
+    const state = s as RoomState;
+    if (state.phase !== 'round_end' || !state.result) return;
+    if (room.memoryHand >= state.handNo) return;
+    room.memoryHand = state.handNo;
+    for (const p of state.players) {
+      const mem = state.memory?.[memoryKey(p)];
+      if (!mem) continue;
+      try {
+        this.store.saveMemory(mem);
+      } catch (e) {
+        console.error('[hub] 打法档案写入失败', e);
+      }
+    }
+  }
+
+  /**
+   * 一局打完把结算留痕落库（§4.11.1 的 `zjh_hand_outcomes`）。
+   * 跟 `creditZjhMemory` 一样靠局号挡重复，但用自己的闸门 —— 留痕坏了不该拖累档案，
+   * 档案的闸门改了也不该悄悄改留痕的行为。
+   */
+  private traceZjhHand(room: Room) {
+    const s = room.state;
+    if (isSjRoom(s)) return;
+    const state = s as RoomState;
+    if (state.phase !== 'round_end' || !state.result) return;
+    if (room.traceHand >= state.handNo) return;
+    room.traceHand = state.handNo;
+    this.trace.hand(state);
+  }
+
+  /**
+   * 牌局状态真的动了。§4.11.1 里真人的用时是「从上一次**状态变化**到动作」，
+   * 所以只有走过引擎的那几条路（真人指令、机器人落子、非回合动作、超时弃牌、
+   * 开局 / 新一局）才刷这个时钟。上下线、进房、房主移交同样会广播，但牌桌没变，
+   * 一个正在想牌的人不该因为别人掉了个线就被当成「刚看到局面」。
+   */
+  private markChange(room: Room) {
+    room.changedAt = Date.now();
+  }
+
+  /**
+   * 走过引擎、但不一定动了牌桌的那一条路（`command()`）。表情就是典型：
+   * 它是一条正经指令、会广播、也会进快照，可牌桌一张牌都没动。拿指纹比一比，
+   * 真变了才刷时钟。升级（sj）不走留痕，这口钟没人读，照旧刷。
+   */
+  private markIfTableChanged(room: Room, before: AnyRoomState) {
+    if (isSjRoom(room.state) || isSjRoom(before)) return this.markChange(room);
+    if (tableFingerprint(before as RoomState) !== tableFingerprint(room.state as RoomState)) {
+      this.markChange(room);
+    }
+  }
+
+  /**
+   * 真人动作的取样口（§4.11.1）。**在 `eng.apply` 之前**调用，返回的函数在动作
+   * 真的生效之后再调 —— 指令被引擎拒掉时什么都不该落库。
+   */
+  private traceHumanCommand(room: Room, actorId: string, cmd: AnyGameCommand): () => void {
+    if (isSjRoom(room.state)) return NOOP_COMMIT;
+    const s = room.state as RoomState;
+    const me: PlayerState | undefined = s.players.find((p) => p.id === actorId);
+    if (!me) return NOOP_COMMIT;
+    return this.trace.human(s, me, cmd as GameCommand, Date.now() - room.changedAt);
+  }
+
   /* ------------------------------------------------------------- 生命周期 */
 
   private sweep() {
@@ -230,9 +382,14 @@ export class Hub {
 
   private clearTimers(room: Room) {
     if (room.timer) clearTimeout(room.timer);
-    if (room.hostTimer) clearTimeout(room.hostTimer);
     if (room.saveTimer) clearTimeout(room.saveTimer);
-    room.timer = room.hostTimer = room.saveTimer = null;
+    room.timer = room.saveTimer = null;
+    this.clearOffTimers(room);
+  }
+
+  private clearOffTimers(room: Room) {
+    for (const t of room.offTimers.values()) clearTimeout(t);
+    room.offTimers.clear();
   }
 
   /**
@@ -277,6 +434,9 @@ export class Hub {
   private broadcast(room: Room, events: GameEvent[] = []) {
     room.touchedAt = Date.now();
     this.creditSj(room);
+    this.hydrateZjhMemory(room);
+    this.creditZjhMemory(room);
+    this.traceZjhHand(room);
     const eng = engineFor(room.state);
     for (const conn of [...room.conns]) {
       if (!conn.playerId) continue;
@@ -333,7 +493,8 @@ export class Hub {
     const eng = engine('zjh');
     const before = snapshot(s);
     try {
-      eng.apply(s, move.actorId, move.cmd);
+      // 用时进事件流：机器人这一步「想了多久」就是 Hub 给它排的延迟（§4.8 / S17）
+      eng.apply(s, move.actorId, move.cmd, { spentMs: move.delay });
     } catch {
       // 决策与状态对不上（比如刚被人比牌出局）就退回弃牌，绝不让牌桌卡住
       try {
@@ -343,7 +504,67 @@ export class Hub {
         return this.arm(room);
       }
     }
+    this.markChange(room);
+    this.trace.bot(s, move.record, move.cmd as GameCommand);
     this.broadcast(room, eng.deriveEvents(before, s, move.actorId, move.cmd));
+    this.arm(room);
+    this.offTurnHook(room, move.actorId, move.cmd);
+  }
+
+  /* -------------------------------------------------- 非回合动作（§4.6 / S3 / S4） */
+
+  /**
+   * 有人把赌注抬高之后，桌上其他人不会安静地等到自己那一轮 —— 手里是散牌的当场就退，
+   * 想看牌的当场就看。看牌和弃牌在引擎里都不占行动权，所以这两件事真的可以现在做。
+   *
+   * 触发条件写成**事件的形状**（有人加档、有人梭哈），不是「涨到某个数」：
+   * 多大算响、响到什么程度值得反应，是人物卡和当时情绪的事，不是服务端的事。
+   */
+  private offTurnHook(room: Room, actorId: string, cmd: AnyGameCommand | null) {
+    if (isSjRoom(room.state)) return;
+    if (!cmd || (cmd.type !== 'raise' && cmd.type !== 'all_in')) return;
+    const s = room.state as RoomState;
+    if (s.phase !== 'playing') return;
+    for (const p of s.players) {
+      if (!p.isBot || p.status !== 'active' || p.id === actorId) continue;
+      if (room.offTimers.has(p.id)) continue;
+      const id = p.id;
+      // 各人反应快慢不同，也不该整齐划一地同时动（§4.6：独立的 300–900ms）
+      const t = setTimeout(() => {
+        room.offTimers.delete(id);
+        this.runOffTurn(room, id);
+      }, zjhOffTurnDelay());
+      t.unref?.();
+      room.offTimers.set(id, t);
+    }
+  }
+
+  private runOffTurn(room: Room, playerId: string) {
+    if (isSjRoom(room.state)) return;
+    const s = room.state as RoomState;
+    if (s.phase !== 'playing') return;
+    const me = s.players.find((p) => p.id === playerId);
+    // 这几百毫秒里牌桌可能已经变了：局结束了、他被比掉了、或者轮到他自己了
+    if (!me || !me.isBot || me.status !== 'active') return;
+    let act;
+    try {
+      act = botOffTurn(s, me);
+    } catch (e) {
+      return console.error('[hub] 非回合决策失败', e);
+    }
+    if (!act) return;
+    const eng = engine('zjh');
+    const before = snapshot(s);
+    try {
+      eng.apply(s, playerId, act.cmd, { spentMs: act.thinkMs });
+    } catch {
+      // 抢跑撞上了引擎规则（比如同一瞬间局已经结束）—— 当作没发生，绝不退回弃牌：
+      // 非回合动作是「顺手做的事」，做不成就不做，不能因此替他丢掉一手牌。
+      return;
+    }
+    this.markChange(room);
+    this.trace.bot(s, act.record, act.cmd);
+    this.broadcast(room, eng.deriveEvents(before, s, playerId, act.cmd));
     this.arm(room);
   }
 
@@ -354,6 +575,7 @@ export class Hub {
     const cur = currentPlayer(s);
     const before = snapshot(s);
     if (eng.timeout(s)) {
+      this.markChange(room);
       this.broadcast(room, cur ? eng.deriveEvents(before, s, cur.id, { type: 'fold' }) : []);
     }
     this.arm(room);
@@ -364,6 +586,7 @@ export class Hub {
     if (s.phase !== 'round_end') return this.arm(room);
     const before = snapshot(s);
     resetToLobby(s);
+    this.markChange(room);
     this.broadcast(room, engine('zjh').deriveEvents(before, s, '', null));
     this.arm(room);
   }
@@ -377,6 +600,7 @@ export class Hub {
     } catch {
       return this.arm(room);
     }
+    this.markChange(room);
     this.broadcast(room, engine('zjh').deriveEvents(before, s, '', null));
     this.arm(room);
   }
@@ -519,8 +743,9 @@ export class Hub {
       accountId: account.id, chips: account.chips, granted: account.granted, wins: account.wins,
     });
     const room: Room = {
-      state, conns: new Set(), timer: null, hostTimer: null, saveTimer: null,
-      touchedAt: Date.now(), creditedHand: 0,
+      state, conns: new Set(), timer: null, saveTimer: null,
+      touchedAt: Date.now(), creditedHand: 0, memoryHand: 0, traceHand: 0, memoryLoaded: new Set(),
+      changedAt: Date.now(), offTimers: new Map(),
     };
     this.rooms.set(code, room);
     this.attach(conn, room, playerId);
@@ -567,10 +792,6 @@ export class Hub {
     if (!host || host.isBot) room.state.hostId = playerId;
     this.attach(conn, room, playerId);
     this.send(conn, { t: 'welcome', code, playerId, token, build: getBuildId(), room: eng.sanitize(room.state, playerId) });
-    if (room.hostTimer) {
-      clearTimeout(room.hostTimer);
-      room.hostTimer = null;
-    }
     this.broadcast(room, [{ k: 'presence', playerId, online: true }]);
     this.arm(room);
   }
@@ -582,8 +803,11 @@ export class Hub {
     if (!cmd || typeof cmd.type !== 'string' || !eng.commandTypes().has(cmd.type)) throw new GameError('操作无效');
     const actorId = conn.playerId;
     const before = snapshot(room.state);
+    const commitTrace = this.traceHumanCommand(room, actorId, cmd);
     eng.apply(room.state, actorId, cmd);
+    this.markIfTableChanged(room, before);
     const events = eng.deriveEvents(before, room.state, actorId, cmd);
+    commitTrace();
 
     if (cmd.type === 'leave') {
       const stillSeated = room.state.players.some((p) => p.id === actorId);
@@ -593,6 +817,7 @@ export class Hub {
     }
     this.broadcast(room, events);
     this.arm(room);
+    this.offTurnHook(room, actorId, cmd);
   }
 
   /* ---------------------------------------------------------- 连接与在线 */
@@ -620,20 +845,18 @@ export class Hub {
 
     player.online = false;
     if (!silent) {
-      this.broadcast(room, [{ k: 'presence', playerId, online: false }]);
-      // 房主掉线不再让整桌卡死：宽限一段时间后自动移交给还在线的真人。
-      if (room.state.hostId === playerId && !room.hostTimer) {
-        room.hostTimer = setTimeout(() => {
-          room.hostTimer = null;
-          const host = room.state.players.find((p) => p.id === playerId);
-          if (!host || host.online) return;
-          engineFor(room.state).transferHost(room.state, playerId);
-          this.broadcast(room);
-          this.arm(room);
-        }, HOST_GRACE_MS);
-        room.hostTimer.unref?.();
-      }
+      /*
+       * 房主掉线**立刻**移交给在线真人（入座最早的那个）。
+       *
+       * 以前这里挂着 20 秒宽限期：那 20 秒里开下一局、加电脑、改房规、点「继续」
+       * 全要房主点，桌上的人只能干等一个已经不在的人。宽限期换来的只是
+       * 「原房主几秒内回来还是房主」，代价是整桌卡住 —— 不值。
+       * 原房主重连也不会夺回房主（`resume` 只在房主空缺或落在电脑身上时才认领），
+       * 免得房主在两个人之间来回跳。
+       */
+      if (room.state.hostId === playerId) engineFor(room.state).transferHost(room.state, playerId);
     }
+    if (!silent) this.broadcast(room, [{ k: 'presence', playerId, online: false }]);
     this.arm(room);
   }
 

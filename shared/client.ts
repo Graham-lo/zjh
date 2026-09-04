@@ -277,8 +277,10 @@ export class RoomClient {
 export interface LegalAction {
   action: string;
   label: string;
-  /** 这一步要花多少积分 */
+  /** 这一步要花多少积分（钱不够时已经夹到全部筹码） */
   cost?: number;
+  /** 这一口是「全押跟」：名义价钱高过身家，按全部筹码打出去 */
+  allIn?: boolean;
   unit?: number;
   targetId?: string;
   targetName?: string;
@@ -302,29 +304,62 @@ export function legalActions(room: PublicRoom): LegalAction[] {
   if (room.allIn) {
     // 接梭哈的价按**自己**的倍率算：闷牌半价、看牌双倍。
     // 上面的看牌是自由动作，点完这个数就会翻倍 —— 翻过头就夹到自己的全部筹码。
-    const price = Math.min(room.allIn.base * (me.looked ? 2 : 1), me.chips);
-    out.push({ action: 'accept', label: me.looked ? '接受梭哈' : '接受梭哈（闷牌半价）', cost: price });
+    const asked = room.allIn.base * (me.looked ? 2 : 1);
+    const price = Math.min(asked, me.chips);
+    const shove = price < asked;
+    out.push({
+      action: 'accept',
+      label: shove ? '全押接下' : me.looked ? '接受梭哈' : '接受梭哈（闷牌半价）',
+      cost: price,
+      allIn: shove || undefined,
+    });
     return out;
   }
 
   const cost = callCost(room, me);
-  if (me.chips > cost) out.push({ action: 'call', label: '跟注', cost });
+  /*
+   * 钱不够**不等于**只能弃牌。台面单价涨过身家时，跟注和比牌都还能打出去，
+   * 只是金额封到全部筹码（「全押跟」，见 shared/game.ts 的 `pay`）。
+   * 以前这里是 `me.chips > cost`，于是短筹码的人一屏只剩一个弃牌按钮 ——
+   * 这条门槛和引擎那边一起放开，两边必须同口径，否则又会出现「按钮说不能点、
+   * 引擎说其实可以」的错位。
+   */
+  if (me.chips > 0) {
+    const price = Math.min(cost, me.chips);
+    const shove = price < cost;
+    out.push({ action: 'call', label: shove ? '全押跟' : '跟注', cost: price, allIn: shove || undefined });
+  }
+  // 加注是主动把台面价抬高，抬不动就不该抬：这条仍然要求钱够，规则不变
   for (const unit of room.settings.betOptions.filter((x) => x > room.betUnit)) {
     const c = unit * (me.looked ? 2 : 1);
     if (me.chips > c) out.push({ action: 'raise', label: `加注到 ${unit}`, unit, cost: c });
   }
-  if (me.chips > 0 && (canAllInNow(room) || me.chips <= cost)) {
+  /*
+   * 梭哈 = 全押，而且**永远不比跟注便宜**：钱不够跟注的人没有梭哈，他的出路是
+   * 上面那个「全押跟」（或者全押比牌 / 弃牌）。解锁只看轮次，和别人有多少钱无关。
+   * 这条门槛和引擎的 doAllIn 逐字同口径，不会出现「按钮能点、引擎说不行」。
+   */
+  if (me.chips > cost && canAllInNow(room)) {
     const active = room.players.filter((p) => p.status === 'active');
     if (active.length > 1) {
-      out.push({ action: 'all_in', label: '梭哈（其他人可以接或弃）', cost: allInCost(room, me) });
+      const shovePay = allInCost(room, me);
+      out.push({
+        action: 'all_in',
+        label: `梭哈（全押 ${shovePay.toLocaleString('zh-CN')}，其他人可以接或弃）`,
+        cost: shovePay,
+      });
     }
   }
-  if (canCompareNow(room)) {
-    const price = compareCost(room, me);
-    if (me.chips >= price) {
-      for (const t of room.players.filter((p) => p.status === 'active' && p.id !== me.id)) {
-        out.push({ action: 'compare', label: `和 ${t.name} 比牌`, cost: price, targetId: t.id, targetName: t.name });
-      }
+  if (canCompareNow(room) && me.chips > 0) {
+    const asked = compareCost(room, me);
+    const price = Math.min(asked, me.chips);
+    const shove = price < asked;
+    for (const t of room.players.filter((p) => p.status === 'active' && p.id !== me.id)) {
+      out.push({
+        action: 'compare',
+        label: shove ? `全押和 ${t.name} 比牌` : `和 ${t.name} 比牌`,
+        cost: price, targetId: t.id, targetName: t.name, allIn: shove || undefined,
+      });
     }
   }
   return out;
@@ -358,7 +393,7 @@ export function tableView(room: PublicRoom) {
           looked: me.looked,
           cards: myCards ? myCards.map(cardText) : null,
           handType: myCards ? evaluateHand(myCards).name : null,
-          strength: myCards ? Number(handPercentile(myCards).toFixed(4)) : null,
+          strength: myCards ? Number(handPercentile(myCards, room.settings.dealMode).toFixed(4)) : null,
           table_net: me.net,
           isHost: room.hostId === me.id,
         }

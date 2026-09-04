@@ -457,6 +457,18 @@ export function Table({
             房间 {room.code.slice(0, 3)} {room.code.slice(3)}
             <IconCopy size={13} />
           </button>
+          {/* 这一桌怎么发牌，所有人都该看得见 —— 不然只有房主知道自己开了大牌档。
+              标准档不加重量，娱乐增强档才点亮。 */}
+          <span
+            className={`deal-pill${room.settings.dealMode === 'party' ? ' party' : ''}`}
+            title={
+              room.settings.dealMode === 'party'
+                ? '娱乐增强：大牌更多、碰撞更多（大牌约 54%，默认档约 26%）'
+                : '标准发牌：大牌约 26%'
+            }
+          >
+            {room.settings.dealMode === 'party' ? '娱乐增强' : '标准'}
+          </span>
           {/* 点自己的脸就能改名换头像 —— 首页选完样子进了房间就再也改不了，
               想换个名字只能退房重进，桌上其他人还得干等。引擎的 rename 一直都在，
               缺的只是这个入口。 */}

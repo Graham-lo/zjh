@@ -490,7 +490,11 @@ export function renderRoom(input: RenderInput): string[] {
       ? `底池 ${C.gold}${C.bold}${fmt(room.pot)}${C.reset} ${potFlame(room.pot, room.settings.ante)}` +
         `  底注 ${fmt(room.betUnit)}   第 ${room.handNo} 局 · 第 ${room.roundNo}${room.settings.maxRounds > 0 ? `/${room.settings.maxRounds}` : ''} 轮`
       : `${room.players.length}/${room.settings.maxPlayers} 人   底注 ${fmt(room.settings.ante)}   ${room.settings.maxRounds > 0 ? `${room.settings.maxRounds} 轮封顶` : '不封顶'}   行动限时 ${room.settings.turnSeconds}s`;
-  line(`${C.bold}${phase}${C.reset}   ${meta}`);
+  // 发牌档：一桌怎么发牌所有人都该看得见，不管是谁开的房。
+  const dealTag = room.settings.dealMode === 'party'
+    ? `${C.gold}娱乐增强${C.reset}`
+    : `${C.dim}标准${C.reset}`;
+  line(`${C.bold}${phase}${C.reset}   ${meta}   ${C.dim}发牌${C.reset} ${dealTag}`);
 
   // 梭哈横幅落在牌桌正上方，压着整张桌子
   if (fx.allIn) for (const b of allInBanner(fx, fx.allIn.amount, fx.allIn.at)) line(b);
@@ -588,8 +592,10 @@ export function renderRoom(input: RenderInput): string[] {
     line();
   }
 
-  // 自己的牌：看过就画出牌面，没看就是三张背面
-  if (me && me.status === 'active' && (me.hand.length === 3 || me.hasHand)) {
+  // 自己的牌：看过就画出牌面，没看就是三张背面。
+  // 局终（round_end）不管还在不在局里都画 —— 服务端这时会把自己那手发回来，
+  // 闷着打完的人总得知道刚才拿的是什么。
+  if (me && (me.status === 'active' || room.phase === 'round_end') && (me.hand.length === 3 || me.hasHand)) {
     const myIdx = seated.findIndex((p) => p.id === me.id);
     const myDealT = dealT - (140 + myIdx * 130);
     const revealed = me.hand.length === 3;
@@ -603,7 +609,7 @@ export function renderRoom(input: RenderInput): string[] {
     } else if (revealed) {
       if (lookT >= LOOK_DONE) {
         const e = evaluateHand(me.hand);
-        const pct = Math.round(handPercentile(me.hand) * 100);
+        const pct = Math.round(handPercentile(me.hand, room.settings.dealMode) * 100);
         // 牌型行淡入：先暗一帧再正常
         const fade = lookT < LOOK_DONE + FRAME ? C.dim : `${C.bold}${C.gold}`;
         // 金花及以上（category >= 4）值得两侧点两下星
@@ -692,16 +698,21 @@ function hintLine(room: PublicRoom, auto: boolean): string {
   // 提示行上只写一套键位（左手那套），右手的镜像键留给 ? 帮助 —— 一行里塞两套
   // 反而没人看得清哪个是哪个。空格单拎出来加粗，它是这一屏最该按的那一下。
   for (const a of acts) {
-    if (a.action === 'call') parts.push(`${C.bold}${k('空格', `跟注 ${fmt(a.cost!)}`)}${C.reset}`);
+    if (a.action === 'call') {
+      // 钱不够的时候金额就是全部身家，必须写明「全押」，不然按下去才发现推光了
+      parts.push(`${C.bold}${k('空格', `${a.allIn ? '全押' : '跟注'} ${fmt(a.cost!)}`)}${C.reset}`);
+    }
   }
   for (const a of acts) {
     if (a.action === 'look') parts.push(k('s', '看牌'));
     if (a.action === 'fold') parts.push(k('f', '弃牌'));
-    if (a.action === 'all_in') parts.push(k('a', `梭哈 ${fmt(a.cost!)}${C.dim}（连按两次）${C.reset}`));
+    // 梭哈 = 全押：按钮上写的这个数就是我的全部筹码
+    if (a.action === 'all_in') parts.push(k('a', `梭哈 ${fmt(a.cost!)}${C.dim}（全押，连按两次）${C.reset}`));
   }
   const raises = acts.filter((a) => a.action === 'raise');
   if (raises.length) parts.push(k(`1-${raises.length}`, `加注 ${raises.map((r) => fmt(r.unit!)).join('/')}`));
-  if (acts.some((a) => a.action === 'compare')) parts.push(k('v', '比牌'));
+  const cmp = acts.find((a) => a.action === 'compare');
+  if (cmp) parts.push(k('v', cmp.allIn ? `全押比牌 ${fmt(cmp.cost!)}` : '比牌'));
   // 开着的时候不是一个普通提示了，是一个「你现在没在自己打牌」的状态灯，所以整条加粗点亮
   parts.push(auto ? `${C.bold}${C.gold}[g]● 自动跟注中${C.reset}` : k('g', '自动跟注'));
   parts.push(k('e', '表情'), k(':', '命令'), k('?', '帮助'));
@@ -732,7 +743,7 @@ function allInPrompt(
   }
   const parts = [
     `${C.bold}${C.gold}⚡ 表态${C.reset}`,
-    `${C.bold}${k('y', `接受 ${fmt(accept.cost!)}`)}${C.reset}`,
+    `${C.bold}${k('y', `${accept.allIn ? '全押接下' : '接受'} ${fmt(accept.cost!)}`)}${C.reset}`,
     `${C.bold}${k('n', '弃牌出局')}${C.reset}`,
   ];
   // 闷着接是半价，先看牌就翻倍 —— 这个取舍必须摆在决定的旁边，不能藏进帮助里

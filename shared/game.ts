@@ -1,3 +1,5 @@
+import { emptyPublicStats, observePublic, type PublicStats } from './zjh/bot/learned.ts';
+import { socialKey } from './zjh/bot/profile.ts';
 /**
  * 炸金花游戏内核。
  *
@@ -5,6 +7,29 @@
  * (crypto.getRandomValues、structuredClone)，不 import 任何服务端模块。
  * 服务器把它当纯函数状态机用，测试直接跑它，客户端复用它的类型和赔率计算。
  */
+
+import {
+  normalizeHandActions, unitTier, type HandActionKind, type HandEvent,
+} from './zjh/bot/events.ts';
+import {
+  bucketKey, editBucket, emptyMemory, memoryKey, mergeLegacyRead, toTableRead,
+  type BotMemory, type MemoryBucket,
+} from './zjh/bot/profile.ts';
+import { botAction, botDecision, botOffTurn, personaFor } from './zjh/bot/index.ts';
+import { tiltFactor } from './zjh/bot/personas/index.ts';
+import { emotionChannels, readMind, type MindState } from './mind/emotion.ts';
+import { emoteFor } from './zjh/bot/tempo.ts';
+import { settle } from './mind/regularities.ts';
+
+/**
+ * 机器人大脑住在 `shared/zjh/bot/`（设计文档 §4.1）。这里只做转发，
+ * 让 `shared/game.ts` 回到「纯状态机 + 记账」的本分。
+ */
+export { botAction, botDecision, botOffTurn };
+export type { BotAction } from './zjh/bot/index.ts';
+export type { HandEvent } from './zjh/bot/events.ts';
+export { memoryKey, mergeMemory, emptyMemory, toTableRead } from './zjh/bot/profile.ts';
+export type { BotMemory } from './zjh/bot/profile.ts';
 
 export type Suit = 'S' | 'H' | 'C' | 'D';
 export type Phase = 'lobby' | 'playing' | 'round_end';
@@ -26,7 +51,7 @@ export interface GameSettings {
    * 封顶轮数：到达后强制全员开牌。**0 = 不封顶**，一直打到分出胜负为止。
    *
    * 不封顶不等于会打不完：底注升到最高档之后每轮翻倍（见 advanceTurn），
-   * 筹码是有限的，所以每个人在有限几轮内一定会被逼到「梭哈或者弃牌」。
+   * 筹码是有限的，所以每个人在有限几轮内一定会被逼到「全押跟或者弃牌」。
    * 收敛靠的是经济压力，不是一刀切的轮数。
    */
   maxRounds: number;
@@ -36,8 +61,15 @@ export interface GameSettings {
   turnSeconds: number;
   /** 本局结束后自动开下一局（所有在线玩家仍处于准备状态时） */
   autoContinue: boolean;
-  /** 第几轮起才允许主动梭哈（跟不起时的被动梭哈不受此限） */
+  /** 第几轮起才允许梭哈。**没有例外**：钱不够跟注的人不能梭哈，只能全押跟 / 全押比牌 / 弃牌 */
   allInFromRound: number;
+  /**
+   * 发牌档位（房主可调，**下一局生效**）。
+   *
+   * 它不只是发牌：牌力分位、机器人的范围先验和桶边界全部跟着这一档走
+   * （`categoryBands` / `range.ts`），所以一桌只能有一档，中途也不在一局里换。
+   */
+  dealMode: DealMode;
 }
 
 export interface PlayerState {
@@ -59,6 +91,17 @@ export interface PlayerState {
    * 别人只会看到有人被比掉却不知道被什么牌比掉，那是更难受的半截信息。
    */
   bared: boolean;
+  /**
+   * 本局是**谁**把他打下去的（`docs/zjh/personas.md`「待集成」#14）。
+   *
+   * 只有牌面上真的把人淘汰掉的那两条路会写它：开比牌赢了他的人、他接下的那一手
+   * 梭哈的发起人。自己主动弃牌不写 —— 那是自己走的，不是被谁打下去的。
+   *
+   * 为什么不能拿「这一手的赢家」代替：比牌把他打下去的那个人，后面可能又输给了
+   * 第三个人；实测「把他比掉的人 == 赢家」只有 62.5%，也就是三分之一的仇记错了人。
+   * 这个字段随 `RoundResult.knockedOutBy` 带出结算，`settleMinds` 按它归因。
+   */
+  knockedOutBy?: string;
   hand: Card[];
   isBot: boolean;
   /** 跨房间跨会话的账户 id。换个房间还是同一个人，积分接着上次 */
@@ -70,19 +113,32 @@ export interface PlayerState {
   /** 由外部 AI（MCP 客户端）驱动的真人席位。牌桌上会明示，避免有人挂 AI 代打别人不知道 */
   isAgent?: boolean;
   online: boolean;
-  /** 本局已投入，用于座位上的筹码显示 */
+  /** 本局已投入（累计出资），用于座位上的筹码显示，也是边池分层的依据 */
   bet: number;
+  /**
+   * 已经把筹码推光，本局不能再出资了。
+   *
+   * 「跟不起就只能弃牌」是最伤人的一种设计：手里还有钱、牌也还在，却因为台面单价
+   * 涨过了身家而被剥夺继续打的权利。真实牌桌上没有这条规矩 —— 钱不够就把剩下的
+   * 全推出去（「全押跟」），动作还是那个动作，只是金额封到自己的全部身家，
+   * 之后不再被要求出资、轮到他自动跳过，但人还在局里等结算。
+   *
+   * 结算时靠 `bet`（累计出资）分层做边池：他只能赢下自己出资覆盖到的那几层，
+   * 押得比他多的人在更高的层里另分胜负。
+   */
+  allIn?: boolean;
   wins: number;
   tokenHash?: string;
   pendingLeave?: boolean;
   lastAction?: string;
   /**
-   * 本局到目前为止的动作序列（'look' | 'call' | 'raise' | 'compare' | 'all_in'）。
+   * 本局到目前为止的**事件流**。
    *
    * 只有 lastAction 是看不懂牌的：连加两手和「加一手之后缩回去只跟」是完全相反的两个故事，
-   * 但最后一个动作都是「跟」。机器人要读故事，就得看整串。全是公开动作，不含任何暗牌信息。
+   * 但最后一个动作都是「跟」。机器人要读故事，就得看整串 —— 而且要连当时的处境一起看：
+   * 闷牌加注和看牌加注是两句完全不同的话（见 `HandEvent`）。全是公开动作，不含暗牌信息。
    */
-  handActions?: string[];
+  handActions?: HandEvent[];
   /**
    * 上头程度，−1 到 1，只有电脑玩家有。
    *
@@ -92,7 +148,14 @@ export interface PlayerState {
    */
   tilt?: number;
   /** 最近一次表情，客户端用来播浮动动画 */
-  emote?: { id: string; at: number };
+  /**
+   * `target` = 这个表情是**冲着谁**做的（`docs/zjh/personas.md`「待集成」#10）。
+   * 复仇者阿彪卡上写的是「表情针对仇人 😂」，没有落点字段这句话就落不了地。
+   * 可选：真人发的表情没有落点，UI 也不读它，只有机器人和统计用得上。
+   */
+  emote?: { id: string; at: number; target?: string };
+  /** 这一局已经发过几个表情（`EmotePolicy.cap` 的计数，每局清零） */
+  emoted?: number;
 }
 
 /**
@@ -102,6 +165,8 @@ export interface PlayerState {
  * 暗牌永远不进这里 —— 这和真人坐在桌边记牌是同一回事，不是开天眼。
  */
 export interface TableRead {
+  publicStats?: PublicStats;
+  recent?: TableRead[];
   /** 参与过的局数 */
   hands: number;
   /** 其中没有在第一时间弃牌、真的投钱打下去的局数 → 起手范围松紧 */
@@ -120,6 +185,14 @@ export interface TableRead {
   showdownStrength: number;
   /** 亮牌时牌力很差、也就是被抓到在吹的次数 */
   bluffsCaught: number;
+  /**
+   * 面对**别人发起的梭哈**、需要表态的次数，以及其中真的接下来的次数（设计文档 §4.6）。
+   * 「他吓不吓得走」和「他敢不敢接梭哈」不是一回事：一口 5 万的加注跑掉的人，
+   * 面对推光身家反而可能上头就接。发起端要用的是这一栏，不是 `foldsToPressure`。
+   * 老快照里没有这两项，读的时候一律 `?? 0`。
+   */
+  allInFaced?: number;
+  allInTaken?: number;
 }
 
 export interface LogEntry {
@@ -138,6 +211,11 @@ export interface RoundResult {
   /** 输赢在牌面上定过的人都会亮牌（摊牌方、比牌双方）；只有主动弃牌的人不亮 */
   revealed: string[];
   hands: Record<string, Card[]>;
+  /**
+   * 被淘汰的人 → 把他打下去的那个人（比牌赢他的人 / 他接下的那手梭哈的发起人）。
+   * 没有条目的人就是「输给了赢家」或自己弃的牌，归因回落到 `winnerId`。
+   */
+  knockedOutBy: Record<string, string>;
 }
 
 export interface RoomState {
@@ -187,12 +265,18 @@ export interface RoomState {
    */
   nextAt?: number;
   /**
-   * 跨局累积的打法笔记，key 是玩家 id。
-   *
-   * 只喂给电脑玩家，不下发给客户端（真人自己看桌子就好，不需要一份统计表）。
-   * 内容全部来自公开信息，见 TableRead。
+   * @deprecated 旧版的房内笔记，key 是**房内 id**，换个房间这个人就重新是陌生人。
+   * 已被 `memory` 取代；只在 `migrateRoom` 里被一次性并进长期档案，之后就删掉。
    */
   reads?: Record<string, TableRead>;
+  /**
+   * 跨局累积的长期档案，key 见 `memoryKey`（真人按账户、机器人按名字）。
+   *
+   * 只喂给电脑玩家，既不下发给客户端（`sanitizeRoom` 剥掉），也不跟着房间快照
+   * 一起存（`store.save` 剥掉）—— 它有自己的表，生命周期比房间长。
+   * 内容全部来自公开信息，见 TableRead / BotMemory。
+   */
+  memory?: Record<string, BotMemory>;
 }
 
 /** 一次梭哈的表态过程 */
@@ -200,14 +284,18 @@ export interface PendingAllIn {
   initiatorId: string;
   initiatorName: string;
   /**
-   * 梭哈的**闷牌单价**，发起时定死。每家实际要掏 `base * (looked ? 2 : 1)` ——
-   * 和跟注、加注、比牌一样的 1:2 定价，闷牌半价、看牌双倍。
+   * 梭哈的**闷牌单价**，发起时定死，之后**永远不变**。每家实际要掏
+   * `base * (looked ? 2 : 1)` —— 和跟注、加注、比牌一样的 1:2 定价，
+   * 闷牌半价、看牌双倍。
+   *
+   * 主流玩法里梭哈就是发起人推光自己，所以 `base = ceil(amount / 他的倍率)`：
+   * 闷牌的人一份就是全部身家，看牌的人一份是身家的一半（他要掏两份）。
+   * 别人接不接得起是别人的事 —— 掏不动就按 `pay` 夹到全部筹码，边池分层结算。
    */
   base: number;
   /**
-   * **发起人自己押上的金额**（= base × 他当时的倍率），只用于播报展示
-   * 「XX 梭哈了 890」。**不要拿它当成每家要付的数** —— 闷牌的人付一半，
-   * 看牌的人付两倍，各家的价要用 base 现算。
+   * **发起人押上的金额，也就是他的全部筹码**。用于播报「XX 梭哈了 890」。
+   * **不要拿它当成每家要付的数** —— 别人按自己的倍率算，闷牌一份、看牌两份。
    */
   amount: number;
   /** 还没表态的玩家 id，按行动顺序 */
@@ -229,6 +317,8 @@ export const DEFAULT_SETTINGS: GameSettings = {
   turnSeconds: 30,
   autoContinue: true,
   allInFromRound: 3,
+  // 默认标准档：娱乐增强是房主主动打开的一个「今晚图热闹」的开关，不是默认体验
+  dealMode: 'standard',
 };
 
 /** 版本每提升一次，旧房间/旧账户会在保持净战绩不变的前提下补到当前筹码基线。 */
@@ -243,8 +333,32 @@ export const AUTO_START_MS = 2_500;
 export const AVATARS = ['🐯', '🦊', '🐼', '🐵', '🐸', '🦁', '🐺', '🐷', '🐨', '🦉', '🐲', '🦄'];
 export const EMOTES = ['👍', '😂', '😱', '🤔', '🔥', '💰', '🙏', '😭'];
 
-const BOT_NAMES = ['阿凯', '老陈', '小北', '阿杰', '小林', '老王'];
-const BOT_AVATARS = ['🤖', '👾', '🎩', '🕶️', '🎯', '🃏'];
+/**
+ * 事件流的时刻戳。
+ *
+ * 事件的先后是**读牌的全部依据**（`feel.ts` 把各家的 `handActions` 按 `at` 归并成一条流，
+ * 游标按条数往前走）。真人打牌两个动作之间隔着秒，`Date.now()` 够用；但机器人自对弈
+ * 一毫秒里能走完一整轮，同一毫秒里的动作按 `at` 排就变成了「按 `state.players`
+ * 的数组顺序排」—— 而一轮的实际发言顺序是从首家开始轮转的，两者不一致。
+ * 于是同一个种子跑两遍，归并出来的事件流不一样，读牌结果也不一样
+ * （实测 §6.2 探针「对岩石的弱牌弃牌率」在 83.8%–87.5% 之间漂）。
+ *
+ * 这里保证时刻戳在进程内**严格递增**：拿到的还是毫秒时刻（语义没变、不需要迁移、
+ * 旧快照照读），但同一毫秒里的多个动作会被摊成 +1ms，先后顺序就是真实动作顺序。
+ */
+let lastEventAt = 0;
+export function eventTime(): number {
+  lastEventAt = Math.max(Date.now(), lastEventAt + 1);
+  return lastEventAt;
+}
+
+/**
+ * 一桌能坐的电脑就是 §4.7.3 名册上这八个人，顺序即 `PERSONAS` 的顺序。
+ * 名字就是身份：这里加名字必须同时有一张手写卡（`shared/zjh/bot/personas/`），
+ * 否则 `personaFor` 会把他退回常人卡 —— 那是个没人认得出来的人。
+ */
+export const BOT_NAMES = ['阿凯', '老陈', '小北', '阿杰', '小林', '老王', '小雨', '阿彪'];
+const BOT_AVATARS = ['🤖', '👾', '🎩', '🕶️', '🎯', '🃏', '🌧️', '🐯'];
 
 export class GameError extends Error {
   status: number;
@@ -344,17 +458,72 @@ export function compareHands(a: Card[], b: Card[], special235 = true): number {
 /* --------------------------------------------------------- 娱乐增强发牌 */
 
 /**
- * 每手牌的目标牌型（千分比）。四类大牌占 92%；散牌和对子保留在 8% 的长尾，
- * 避免完全失去牌型落差。顺金与豹子合计 25%，让强牌碰撞明显增多。
+ * 发牌档位。房主选，整桌共用，**下一局生效**。
+ *
+ * - `standard`（默认）：四类大牌合计 26%，散牌重新是桌面的底色；
+ * - `party`（娱乐增强）：四类大牌合计 54%，为「就想热闹」的朋友局准备。
  */
-export const ZJH_HAND_DISTRIBUTION_PER_MILLE = {
-  flush: 380,
-  straight: 290,
-  trips: 130,
-  straightFlush: 120,
-  highCard: 50,
-  pair: 30,
-} as const;
+export type DealMode = 'standard' | 'party';
+
+export interface HandDistribution {
+  flush: number;
+  straight: number;
+  trips: number;
+  straightFlush: number;
+  highCard: number;
+  pair: number;
+}
+
+/**
+ * 两档发牌的目标牌型（千分比）。
+ *
+ * 真实 52 选 3 的频率是：散牌 744、对子 169、顺子 33、金花 50、顺金 2.2、豹子 2.4
+ * （四类大牌合计 8.8%）。最早那一版为了「热闹」把四类大牌拉到 92%，结果是桌上人手一副
+ * 金花以上，大牌不再是事件、比牌没有落差，玩家反馈体验超标。
+ *
+ * **standard**：四类大牌合计压到 **26%**，仍然远高于真实的 8.8%（顺子放大 3 倍、
+ * 金花 2.4 倍、顺金 8 倍、豹子 9 倍，六人桌上平均每 5 局能见到一次顺金或豹子），
+ * 但散牌重新成为桌面的底色。散牌与对子按**真实比例** 744:169 摊在剩下的 74% 上
+ * （600:140），这样「对子就不错」这类真实炸金花的直觉在低端仍然成立。
+ *
+ * **party**：四类大牌合计 **54%**，六人桌上几乎每两局就要撞一次金花以上的对撞。
+ * 它不是「standard 的放大版」而是另一种玩法：加价和比牌的频率整体抬起来，
+ * 顺子和金花才是常态，散牌 35% 只够做背景。给「今晚就图个刺激」的房间用。
+ *
+ * 改这两张表**不需要**同步改别处：每档的带由它自己算出来（`categoryBands`），
+ * `shared/zjh/bot/range.ts` 的桶边界又对齐那一档的带。
+ * 唯一要人工复核的是桶数分配 `BUCKETS_PER_CATEGORY`（带宽变了，分辨率要重排）。
+ */
+export const ZJH_DEAL_PROFILES: Record<DealMode, HandDistribution> = {
+  standard: {
+    flush: 120,
+    straight: 100,
+    trips: 22,
+    straightFlush: 18,
+    highCard: 600,
+    pair: 140,
+  },
+  party: {
+    flush: 240,
+    straight: 200,
+    trips: 55,
+    straightFlush: 45,
+    highCard: 350,
+    pair: 110,
+  },
+};
+
+/** 标准档那份分布的旧名字。外部引用（以及只认默认档的旧调用）继续指向它。 */
+export const ZJH_HAND_DISTRIBUTION_PER_MILLE = ZJH_DEAL_PROFILES.standard;
+
+/** 取值不合法一律退回标准档 —— 发牌这件事不允许因为一个脏字段就崩掉。 */
+export function dealProfile(mode: DealMode = 'standard'): HandDistribution {
+  return ZJH_DEAL_PROFILES[mode] ?? ZJH_DEAL_PROFILES.standard;
+}
+
+export const DEAL_MODES: DealMode[] = ['standard', 'party'];
+export const DEAL_MODE_LABEL: Record<DealMode, string> = { standard: '标准', party: '娱乐增强' };
+export const isDealMode = (v: unknown): v is DealMode => v === 'standard' || v === 'party';
 
 type DealCategory = 1 | 2 | 3 | 4 | 5 | 6;
 type IndexPicker = (maxExclusive: number) => number;
@@ -389,18 +558,19 @@ function handCatalog(): Record<DealCategory, CatalogHand[]> {
   return catalog;
 }
 
-/** 公开成纯函数，让概率边界能被测试锁定。 */
-export function dealCategoryForRoll(roll: number): DealCategory {
+/** 公开成纯函数，让两档的概率边界都能被测试锁定。 */
+export function dealCategoryForRoll(roll: number, mode: DealMode = 'standard'): DealCategory {
   if (!Number.isInteger(roll) || roll < 0 || roll >= 1000) throw new GameError('发牌随机数越界');
-  let edge = ZJH_HAND_DISTRIBUTION_PER_MILLE.flush;
+  const dist = dealProfile(mode);
+  let edge = dist.flush;
   if (roll < edge) return 4;
-  edge += ZJH_HAND_DISTRIBUTION_PER_MILLE.straight;
+  edge += dist.straight;
   if (roll < edge) return 3;
-  edge += ZJH_HAND_DISTRIBUTION_PER_MILLE.trips;
+  edge += dist.trips;
   if (roll < edge) return 6;
-  edge += ZJH_HAND_DISTRIBUTION_PER_MILLE.straightFlush;
+  edge += dist.straightFlush;
   if (roll < edge) return 5;
-  edge += ZJH_HAND_DISTRIBUTION_PER_MILLE.highCard;
+  edge += dist.highCard;
   if (roll < edge) return 1;
   return 2;
 }
@@ -427,9 +597,13 @@ function takeWeightedHand(deck: Card[], category: DealCategory, pick: IndexPicke
  * 给整桌按目标分布发牌。每个座位先独立抽牌型，再随机处理座位顺序，真人、机器人、
  * 庄家和座位号完全同权。极端冲突下若目标牌型已组不出来，才依次尝试其他牌型。
  */
-export function dealWeightedHands(handCount: number, pick: IndexPicker = randomIndex): Card[][] {
+export function dealWeightedHands(
+  handCount: number,
+  pick: IndexPicker = randomIndex,
+  mode: DealMode = 'standard',
+): Card[][] {
   if (!Number.isInteger(handCount) || handCount < 1 || handCount > 6) throw new GameError('发牌人数不合法');
-  const plans = Array.from({ length: handCount }, () => dealCategoryForRoll(pick(1000)));
+  const plans = Array.from({ length: handCount }, () => dealCategoryForRoll(pick(1000), mode));
   const order = Array.from({ length: handCount }, (_, i) => i);
   for (let i = order.length - 1; i > 0; i--) {
     const j = pick(i + 1);
@@ -453,23 +627,56 @@ export function dealWeightedHands(handCount: number, pick: IndexPicker = randomI
 }
 
 /**
- * 估算一手牌能打败随机一手牌的比例（0–1）。
+ * 一档发牌下的牌力分段（估算一手牌能打败随机一手牌的比例）。
  *
- * 用娱乐增强后的牌型频率做分段，再按同类型内的大小在段内线性插值。
- * 机器人靠它算胜率，客户端靠它显示"牌力"；散牌与对子只占低频长尾。
+ * **带宽 = 该牌型在这一档的发牌概率，累计而成**，所以这张表不手写：它直接由
+ * `ZJH_DEAL_PROFILES[mode]` 按牌型 1→6 累加得到。手抄两份的代价是
+ * 调完发牌分布忘了改带，机器人的先验（`range.ts` 的桶质量 = 带宽）就会和真实
+ * 发牌对不上，而这种错不会有任何一条测试自己报出来。
+ *
+ * 标准档：1 散牌 [0, .60]、2 对子 [.60, .74]、3 顺子 [.74, .84]、
+ * 4 金花 [.84, .96]、5 顺金 [.96, .978]、6 豹子 [.978, 1]。
+ * 娱乐增强档：[0, .35]、[.35, .46]、[.46, .66]、[.66, .90]、[.90, .945]、[.945, 1]。
+ *
+ * **一桌只有一档**：分位是「打赢这桌上随机一手牌」的比例，混着两档算出来的数
+ * 谁也不代表。所以房间内的每一次调用都要把 `state.settings.dealMode` 带上。
  */
-const CATEGORY_BANDS: Record<number, [number, number]> = {
-  1: [0.0, 0.05], // 散牌 5%
-  2: [0.05, 0.08], // 对子 3%
-  3: [0.08, 0.37], // 顺子 29%
-  4: [0.37, 0.75], // 金花 38%
-  5: [0.75, 0.87], // 顺金 12%
-  6: [0.87, 1.0], // 豹子 13%
-};
+const bandCache = new Map<DealMode, Record<number, [number, number]>>();
 
-export function handPercentile(hand: Card[]): number {
+export function categoryBands(mode: DealMode = 'standard'): Record<number, [number, number]> {
+  const key: DealMode = isDealMode(mode) ? mode : 'standard';
+  const hit = bandCache.get(key);
+  if (hit) return hit;
+  const dist = dealProfile(key);
+  const perMille: Record<number, number> = {
+    1: dist.highCard,
+    2: dist.pair,
+    3: dist.straight,
+    4: dist.flush,
+    5: dist.straightFlush,
+    6: dist.trips,
+  };
+  const out: Record<number, [number, number]> = {};
+  let cum = 0;
+  for (const category of [1, 2, 3, 4, 5, 6]) {
+    const lo = cum / 1000;
+    cum += perMille[category];
+    out[category] = [lo, cum / 1000];
+  }
+  out[6][1] = 1; // 收尾钉死在 1，别让浮点把最强的一手牌算成 0.9999
+  bandCache.set(key, out);
+  return out;
+}
+
+/**
+ * 标准档的带。**只给「只知道默认档」的旧调用兼容用**；房间里的调用一律走
+ * `categoryBands(state.settings.dealMode)`。
+ */
+export const CATEGORY_BANDS: Record<number, [number, number]> = categoryBands('standard');
+
+export function handPercentile(hand: Card[], mode: DealMode = 'standard'): number {
   const e = evaluateHand(hand);
-  const [lo, hi] = CATEGORY_BANDS[e.category];
+  const [lo, hi] = categoryBands(mode)[e.category];
   // 段内位置：把 tiebreak 归一化到 0–1
   let pos: number;
   switch (e.category) {
@@ -569,6 +776,8 @@ export function createInitialRoom(code: string, host: PlayerState): RoomState {
 export function migrateRoom(state: RoomState): RoomState {
   // 老快照是多游戏框架之前存的，没有 kind —— 那时候只有炸金花一种房间（DESIGN 2.6）
   state.kind ??= 'zjh';
+  // 房主字段缺失过一版；空串是「暂时没有房主」的合法取值，下一个真人进来/回来就接手
+  state.hostId ??= '';
   state.settings = { ...DEFAULT_SETTINGS, ...(state.settings ?? {}) };
   // 初始/重置筹码与下注档位是全服经济规则，不是房主可调整的房规；旧房间恢复后也必须升级。
   state.settings.startingChips = DEFAULT_SETTINGS.startingChips;
@@ -576,6 +785,10 @@ export function migrateRoom(state: RoomState): RoomState {
   state.settings.betOptions = [...DEFAULT_SETTINGS.betOptions];
   // 旧存档里存着 8 轮封顶。封顶与否是玩法规则不是房主偏好，恢复时统一到当前默认（不封顶）。
   state.settings.maxRounds = DEFAULT_SETTINGS.maxRounds;
+  // 发牌档位是房主偏好，恢复时保留；但**上线前的旧快照没有这个字段**，
+  // 而 undefined 会让 categoryBands 退回默认档、机器人的桶却按房间里的值走 ——
+  // 与其让两边偷偷对不上，不如在这里一次性钉死成 standard（脏值同理）。
+  if (!isDealMode(state.settings.dealMode)) state.settings.dealMode = DEFAULT_SETTINGS.dealMode;
   state.economyVersion = ZJH_ECONOMY_VERSION;
   // 进行中的旧牌局不在半路改变当前单价；大厅和结算阶段直接显示新底注，下一局自然按新档位开。
   if (state.phase !== 'playing') state.betUnit = DEFAULT_SETTINGS.betOptions[0];
@@ -594,7 +807,16 @@ export function migrateRoom(state: RoomState): RoomState {
     p.granted ??= 0;
     p.bared ??= false;
     p.online ??= false;
-    p.handActions ??= [];
+    /*
+     * `allIn` 是「全押跟」上线之后才有的字段，老快照里一律缺失。
+     * 保守地按现场推断：还在局里（active）却一分钱都没有的人，就是已经推光了的人 ——
+     * 老版本里这种状态只在梭哈表态被夹到全部筹码时出现过。其余一律 false。
+     * 缺了这个默认值，老房间恢复后会被当成「还能出资」，一路要到他头上然后卡死。
+     */
+    p.allIn ??= p.status === 'active' && (p.chips ?? 0) <= 0;
+    // 旧快照里 handActions 是 string[]。老房间可能正打到一半，不能崩也不能丢：
+    // 一律按闷牌补 looked=false（信息量最低的保守解释），单价用快照里当时的价。
+    p.handActions = normalizeHandActions(p.handActions, state.betUnit, state.roundNo);
     // 旧存档里可能带着「激进 / 狡诈」这类风格标签。电脑玩家的打法应该靠观察
     // 摸出来，写在名字后面等于开局就把底牌交了 —— 恢复时一并清掉。
     delete (p as { botStyle?: string }).botStyle;
@@ -609,7 +831,20 @@ export function migrateRoom(state: RoomState): RoomState {
   }
   // base 是「闷牌半价」上线后才有的字段。老快照里存的 amount 就是当时人人同价的那个数，
   // 拿它当基准恢复出来，正在表态的那一局还能按老规则打完，不会中途报价崩掉。
+  /*
+   * 老快照可能多带一个 `paid` 字段（「表态期间弃牌后重算单价」那一版的账本）。
+   * 单价重算这套房规已经废掉了，那个字段现在没有任何意义 —— 不读、不删、不迁移，
+   * 直接无视：正在表态的老房间照着 `base` 就能把这一手打完。
+   */
   if (state.allIn) state.allIn.base ??= state.allIn.amount;
+  // 旧快照的房内笔记（key 是房内 id）一次性并进长期档案，然后就没有 reads 这回事了。
+  if (state.reads) {
+    for (const p of state.players ?? []) {
+      const legacy = state.reads[p.id];
+      if (legacy) mergeLegacyRead(playerMemory(state, p), legacy);
+    }
+    delete state.reads;
+  }
   return state;
 }
 
@@ -666,12 +901,19 @@ function requireHost(state: RoomState, actorId: string) {
  */
 export function transferHost(state: RoomState, departingId?: string) {
   if (departingId && state.hostId !== departingId) return;
-  const humans = state.players.filter((p) => p.id !== departingId && !p.pendingLeave && !p.isBot);
-  const next = humans.find((p) => p.online) ?? humans[0];
+  /*
+   * 只交给**在线**的真人，而且是入座最早的那个（players 就是入座顺序）。
+   *
+   * 以前这里有一句 `?? humans[0]` 的兜底，会把房主交给一个同样离线的人 ——
+   * 那等于把整桌交给一个不在的人：开下一局、加电脑、改房规全要房主点，
+   * 于是房间卡死，只能等那个人自己回来。没有在线真人时宁可空着，
+   * 谁先回来谁接手（`claimHostIfVacant`），也不要挂在离线的人名下。
+   */
+  const next = state.players.find((p) => p.id !== departingId && !p.pendingLeave && !p.isBot && p.online);
   if (next) {
     if (next.id === state.hostId) return;
     state.hostId = next.id;
-    pushLog(state, `${next.name} 成为新房主`);
+    pushLog(state, `房主已转给 ${next.name}`);
   } else {
     state.hostId = '';
   }
@@ -698,40 +940,86 @@ function requireTurn(state: RoomState, actorId: string): PlayerState {
 
 /* ------------------------------------------------------- 打法笔记（全部是公开信息） */
 
-const EMPTY_READ: TableRead = {
-  hands: 0, played: 0, aggressive: 0, passive: 0,
-  pressureFaced: 0, foldsToPressure: 0, showdowns: 0, showdownStrength: 0, bluffsCaught: 0,
-};
-
-export function tableRead(state: RoomState, playerId: string): TableRead {
-  return { ...EMPTY_READ, ...state.reads?.[playerId] };
+/** 长期档案的读写入口。档案挂在 state.memory 上，但按人（不是按座位）索引。 */
+export function playerMemory(state: RoomState, player: PlayerState): BotMemory {
+  state.memory ??= {};
+  const key = memoryKey(player);
+  state.memory[key] ??= emptyMemory(key);
+  return state.memory[key];
 }
 
-function editRead(state: RoomState, playerId: string): TableRead {
-  state.reads ??= {};
-  state.reads[playerId] ??= { ...EMPTY_READ };
-  return state.reads[playerId];
+/** 旧口径的聚合视图。既有代码（含 v2 快照、`credibility`）读的都是这个形状。 */
+export function tableRead(state: RoomState, playerId: string): TableRead {
+  const player = state.players.find((p) => p.id === playerId);
+  if (!player) return toTableRead(undefined);
+  return toTableRead(state.memory?.[memoryKey(player)]);
+}
+
+/**
+ * 条件分桶的原始计数。`foldProbOf` 要的是「他**在这个条件下**跑不跑」，
+ * 聚合视图（`tableRead`）把条件都拌在一起了，答不了这个问题。
+ */
+export function tableBuckets(state: RoomState, playerId: string): Record<string, MemoryBucket> {
+  const player = state.players.find((p) => p.id === playerId);
+  if (!player) return {};
+  return state.memory?.[memoryKey(player)]?.buckets ?? {};
+}
+
+/** 这一步落在哪个条件格子里：闷/看 × 单价档位 × 是否三人以上。 */
+function conditionKey(state: RoomState, actor: PlayerState): string {
+  const multiway = state.players.filter((p) => p.status === 'active').length >= 3;
+  return bucketKey(actor.looked, unitTier(state.betUnit, state.settings), multiway);
 }
 
 /**
  * 记下一个动作。**必须在动作真正生效之前调用** —— 「他是在面对加注的情况下弃的牌」
  * 这个信息，等牌局状态改完就找不回来了。
  */
-function noteAction(state: RoomState, actor: PlayerState, kind: string) {
+/**
+ * `spentMs`：他在这一步上花掉的毫秒数（设计文档 §4.8，S17 读用时的唯一来源）。
+ * 机器人由调度层把 `BotAction.thinkMs` 原样传进来 —— 服务端本来就是按它排延迟的，
+ * 而自对弈不排延迟，按墙钟算会全是 0。真人不传，按 `turnDeadline` 回推。
+ */
+function noteAction(state: RoomState, actor: PlayerState, kind: HandActionKind, spentMs?: number) {
   if (state.phase !== 'playing' || actor.status !== 'active') return;
-  const read = editRead(state, actor.id);
+  const read = playerMemory(state, actor);
+  read.handStart ??= { ...toTableRead(read), recent: undefined, publicStats: undefined };
+  const bucket = editBucket(read, conditionKey(state, actor));
   // 「有人加注过或者有人梭哈」= 他这一步是顶着压力做的
   const underPressure = !!state.allIn
     || state.betUnit > state.settings.betOptions[0]
-    || state.players.some((p) => p.id !== actor.id && p.status === 'active' && p.handActions?.includes('raise'));
+    || state.players.some((p) => p.id !== actor.id && p.status === 'active'
+      && p.handActions?.some((e) => e.kind === 'raise'));
 
   if (kind !== 'look') {
-    actor.handActions = [...(actor.handActions ?? []), kind];
-    if (underPressure) read.pressureFaced += 1;
+    // 事件流记的是**做这个动作当时**的处境，之后再怎么升档都不改写历史。
+    const turnMs = state.settings.turnSeconds * 1000;
+    const byClock = state.turnDeadline != null ? Date.now() - (state.turnDeadline - turnMs) : 0;
+    const spent = Math.max(0, Math.min(turnMs, spentMs ?? byClock));
+    actor.handActions = [...(actor.handActions ?? []), {
+      kind, looked: actor.looked, unit: state.betUnit, roundNo: state.roundNo, at: eventTime(),
+      msSpent: spent,
+    }];
+    read.publicStats ??= emptyPublicStats();
+    observePublic(read.publicStats, actor.handActions.at(-1)!);
+    if (underPressure) { read.pressureFaced += 1; bucket.pressureFaced += 1; }
+  }
+  // 面对别人挑起来的梭哈，他到底接不接 —— 发起端唯一能用的跨局统计（§4.6）。
+  // 必须在这里记：`doCall` / `doFold` 一执行，`state.allIn` 就可能被清掉了。
+  if (state.allIn && actor.id !== state.allIn.initiatorId && (kind === 'call' || kind === 'fold')) {
+    read.allInFaced = (read.allInFaced ?? 0) + 1;
+    if (kind === 'call') read.allInTaken = (read.allInTaken ?? 0) + 1;
   }
   if (kind === 'raise' || kind === 'all_in' || kind === 'compare') read.aggressive += 1;
   else if (kind === 'call') read.passive += 1;
-  else if (kind === 'fold' && underPressure) read.foldsToPressure += 1;
+  else if (kind === 'fold' && underPressure) { read.foldsToPressure += 1; bucket.foldsToPressure += 1; }
+
+  if (kind === 'call') bucket.call += 1;
+  else if (kind === 'raise') bucket.raise += 1;
+  else if (kind === 'compare') bucket.compare += 1;
+  else if (kind === 'all_in') bucket.allIn += 1;
+  else if (kind === 'fold') bucket.fold += 1;
+  read.updatedAt = Date.now();
 }
 
 /**
@@ -743,25 +1031,165 @@ function noteRoundResult(state: RoomState) {
   if (!result) return;
   for (const p of state.players) {
     if (p.bet <= 0) continue;
-    const read = editRead(state, p.id);
+    const read = playerMemory(state, p);
     read.hands += 1;
     // 「下过场」= 底注之外还投过钱，或者至少看了牌打下去
     if (p.bet > state.settings.ante || (p.handActions?.length ?? 0) > 0) read.played += 1;
     if (result.revealed.includes(p.id) && result.hands[p.id]?.length === 3) {
-      const strength = handPercentile(result.hands[p.id]);
+      const strength = handPercentile(result.hands[p.id], state.settings.dealMode);
       read.showdowns += 1;
       read.showdownStrength += strength;
+      // 牌力也要落回条件格子：「他在 10 万档上加注时亮出来的牌一般多硬」才是有用的统计。
+      const multiway = state.players.filter((x) => x.bet > 0).length >= 3;
+      const seenBuckets = new Set(
+        (p.handActions ?? []).map((e) => bucketKey(e.looked, unitTier(e.unit, state.settings), multiway)),
+      );
+      for (const key of seenBuckets) {
+        const bucket = editBucket(read, key);
+        bucket.showdowns += 1;
+        bucket.showdownStrength += strength;
+      }
       // 亮出来的牌很烂却一路打到摊牌 —— 这个人是敢吹的
-      if (strength < 0.42 && read.aggressive > 0) read.bluffsCaught += 1;
+      if (strength < 0.42 && p.handActions?.some(e => e.kind === 'raise' || e.kind === 'all_in')) read.bluffsCaught += 1;
     }
+    const recent = toTableRead(undefined);
+    for (const k of ['hands', 'played', 'aggressive', 'passive', 'pressureFaced', 'foldsToPressure', 'showdowns', 'showdownStrength', 'bluffsCaught'] as const) {
+      recent[k] = read[k] - (read.handStart?.[k] ?? (k === 'hands' ? read[k] - 1 : read[k]));
+    }
+    read.recent = [...(read.recent ?? []), { at: Date.now(), read: recent }].slice(-3);
+    delete read.handStart;
+    read.updatedAt = Date.now();
   }
   noteTilt(state, result);
+  settleMinds(state, result);
+}
+
+/**
+ * 每局结束时给每台机器人**结一次心理的账**（设计文档 §4.9.1 / §4.9.5）。
+ *
+ * 这一步是情绪唯一的入口：赢了多少、亮没亮牌、事前觉得自己该不该赢、是谁把我吃掉的，
+ * 折成一条通用评价交给 `shared/mind/` 的 `settle()`，由它去衰减、耦合、点规律
+ * （R1 损失厌恶、R5/R6 连输连赢、R7 bad beat、R8 冒进被抓、R10 懊悔、R13 无聊、
+ * R14 面子、R18 归因、R30 意志力回复）。这里**不做任何情绪计算**，只做翻译。
+ *
+ * 旧的 `p.tilt` 一行没动：它是 `tests/fixtures/zjh-bot-v2.ts` 那个冻结对照组读的东西，
+ * 动了它竞技场就没有基准了。新脑不读 `p.tilt`。
+ */
+function settleMinds(state: RoomState, result: RoundResult) {
+  const totalPot = result.deltas.reduce((sum, d) => sum + d.bet, 0);
+  for (const p of state.players) {
+    if (!p.isBot) continue;
+    if (p.bet <= 0 && p.status !== 'folded') continue;
+    const mem = playerMemory(state, p);
+    const traits = personaFor(p).traits;
+    const delta = result.deltas.find((d) => d.id === p.id)?.delta ?? 0;
+    const won = result.winnerId === p.id;
+    const exposed = result.revealed.includes(p.id);
+    const withdrew = p.status === 'folded';
+    const felt = mem.felt ?? 0.5;
+    /*
+     * 归因对象（`personas.md`「待集成」#14）。原来一律记给「这一手的赢家」，
+     * 但把他比掉/梭掉的那个人后面可能又输给了第三个人 —— 实测两者只重合 62.5%，
+     * 也就是三分之一的仇记错了人，「谁比掉他他找谁」这句人设就落不了地。
+     * 现在优先用结算带出来的 `knockedOutBy`（比牌赢他的人 / 他接下那手梭哈的发起人），
+     * 只有主动弃牌、以及封顶开牌这种「不是被谁打下去」的局面才回落到赢家。
+     */
+    const by = won ? undefined : (result.knockedOutBy[p.id] ?? result.winnerId);
+    const winnerHand = result.hands[result.winnerId];
+    // 归因对象最后亮出来的牌（他可能不是赢家，比如比掉我之后自己又输了）
+    const byHand = by ? result.hands[by] : undefined;
+    const myHand = result.hands[p.id];
+    // `settle` 原地改 mind 并返回一条痕迹，所以先取出来再写回去
+    const mind = readMind(mem.mind, traits);
+    settle(mind, traits, {
+      gain: delta,
+      balance: p.chips,
+      expected: felt,
+      by: by ? socialKey(state.players, by) : undefined,
+      exposed,
+      withdrew,
+      // 退出之后才发现本来能赢（R10 懊悔）—— 只有牌都亮出来时才知道
+      regretted: withdrew && !!myHand && !!winnerHand && myHand.length === 3 && winnerHand.length === 3
+        && compareHands(myHand, winnerHand) > 0,
+      /*
+       * 诈唬被抓（R8，§4.9.8 原话「自己诈唬被比牌/跟注揭穿」）。
+       *
+       * 原来这里写的是 `exposed && delta < 0 && felt >= 0.6`，条件是
+       * 「我**觉得自己很强**、亮了牌、还是输了」—— 那是 R7 bad beat 的定义
+       * （R7 分支就在 `regularities.ts` 隔壁，用的正是 `expected >= 0.5`），
+       * 不是 R8。真正的诈唬是**拿着烂牌施压**，`felt` 恰恰很低，
+       * 于是 R8 在诈唬这条路上一次都点不着：老王卡上「被抓两次后一段时间不敢演」
+       * 永远没有输入（personas.md 待集成 #3）。
+       *
+       * 现在按原话三件事同时成立才算：我这一手**主动施过压**（加注/梭哈）、
+       * 牌**摊到了桌面上**、而且那手牌本来就不够格（落在 `categoryBands` 的散牌档）。
+       * 「被比牌揭穿」和「被跟注揭穿」的区别在对手那一侧，这里只看我自己诈没诈。
+       */
+      overreached: exposed && delta < 0
+        && !!p.handActions?.some((e) => e.kind === 'raise' || e.kind === 'all_in')
+        && !!myHand && myHand.length === 3
+        && handPercentile(myHand, state.settings.dealMode)
+          < categoryBands(state.settings.dealMode)[2][0],
+      // 被同一个人用压力逼退（R14 面子的计数）
+      pressuredOut: withdrew && !won,
+      /*
+       * 被诈成功、而且**事后知道了**（R9）。撤了、对方最后把牌摆上了桌面、
+       * 那手牌还是散牌 —— 这三件事同时成立才叫「被诈了还看见了」。
+       * 没摊牌就不知道：真实牌桌上不战而胜的人没有义务亮牌，情绪上也就不该有反应。
+       */
+      bluffedOut: withdrew && !won && !!byHand && byHand.length === 3
+        && handPercentile(byHand, state.settings.dealMode) < categoryBands(state.settings.dealMode)[1][1],
+      scale: totalPot,
+    });
+    mem.mind = mind;
+    mem.updatedAt = Date.now();
+
+    /*
+     * 表情（§6.3 S18：「我赢下 40 万的池 / 被梭哈掀掉 / 看到有人梭哈」→ 🔥 / 😭 / 😱）。
+     *
+     * 放在这里而不是服务端循环里，是因为「这一局我是赢是输、输了多少」只有结算
+     * 这一刻知道得最全；而且这一段每局每人恰好跑一次，不需要另设去重。
+     * 「看到有人梭哈 😱」是局中的事，走非回合那条路（`decideOffTurn`）。
+     *
+     * 三件事都由人物卡说了算，服务端不做任何裁量：
+     *   - 发不发：`emotes.rate` × 这一下有多大（`emoteFor`）；
+     *   - 发哪张：`emotes.favourites`；
+     *   - 发几个：`emotes.cap`（`p.emoted` 每局清零）。
+     *
+     * `target` 落在**把我打下去的那个人**头上（`knockedOutBy`，见上面的 `by`），
+     * 赢家则落在他心里最恨的那个人头上 —— 阿彪卡上的「表情针对仇人 😂」
+     * （`docs/zjh/personas.md`「待集成」#10）就是靠这两条落地的。
+     */
+    if ((p.emoted ?? 0) < personaFor(p).emotes.cap) {
+      const stake = Math.max(1, p.chips + Math.abs(delta));
+      const face = won
+        ? emoteFor(personaFor(p), 'won-big', totalPot / stake, () => Math.random(), emotionChannels(mind, traits).showoff)
+        : (withdrew ? null
+          : emoteFor(personaFor(p), 'busted', Math.abs(delta) / stake, () => Math.random(), emotionChannels(mind, traits).showoff));
+      if (face) {
+        const target = won ? topRevenge(state, mind, p.id) : by;
+        p.emote = { id: face, at: Date.now(), target };
+        p.emoted = (p.emoted ?? 0) + 1;
+      }
+    }
+  }
+}
+
+/** 他心里最恨、而且**人还在这张桌上**的那个（表情的落点，`personas.md` 待集成 #10）。 */
+function topRevenge(state: RoomState, mind: MindState, selfId: string): string | undefined {
+  let best: string | undefined; let top = 0;
+  for (const p of state.players) {
+    if (p.id === selfId) continue;
+    const g = mind.revenge[memoryKey(p)] ?? mind.revenge[p.id] ?? 0;
+    if (g > top) { top = g; best = p.id; }
+  }
+  return top > 0.05 ? best : undefined;
 }
 
 /**
  * 情绪结账。真人输一大笔之后会想追回来，而且越是刚才「牌不差还是输了」越上头；
  * 刚赢一大笔的人会稍微放开一点打，但远不如输钱的反应强烈。
- * 有耐心的人格上头得轻，这样六台电脑的情绪曲线不会整齐划一。
+ * 卡上 `tiltGain` 小的人上头得轻，这样一桌电脑的情绪曲线不会整齐划一。
  */
 function noteTilt(state: RoomState, result: RoundResult) {
   for (const p of state.players) {
@@ -771,7 +1199,11 @@ function noteTilt(state: RoomState, result: RoundResult) {
     const delta = result.deltas.find((d) => d.id === p.id)?.delta ?? 0;
     const stake = Math.max(1, p.chips + Math.abs(delta));
     const share = Math.abs(delta) / stake;
-    const temper = 1 - botPersonality(p).patience;
+    // 「这个人上头得多重」写在他的人物卡上（§4.9.6 `emotion.tiltGain`：
+    // 跟注站 0.10、岩石 0.15、常人 0.85、赌徒 1.50）。P2 这一行读的是过渡表的
+    // `1 - patience`，常人档大约落在 0.40；这里按常人卡归一，量纲原样不动，
+    // 只是把「谁上头得重」的裁量权从已删掉的 7 维表交还给卡。
+    const temper = 0.40 * tiltFactor(personaFor(p));
     if (delta < 0 && share >= 0.12) {
       // 亮过牌还输了，比默默弃牌难受得多 —— 那是「我牌不差居然还输」
       const stung = result.revealed.includes(p.id) ? 1.6 : 1;
@@ -795,48 +1227,47 @@ export function compareCost(state: { betUnit: number }, player: { looked: boolea
 }
 
 /**
- * 梭哈的**闷牌单价**：在保证每个还在局的人都掏得起自己那一份的前提下，
- * 能取到的最大闷牌价。每家实付 `base * (looked ? 2 : 1)`。
+ * 梭哈的**闷牌单价**，由**发起人自己的身家**定 —— 主流玩法：梭哈 = 全押。
  *
- * 用最短的一家封顶，是为了让所有人都跟得起 —— 梭哈会把全部在局玩家拉进底池然后开牌，
- * 如果金额高过某人的身家，那个人就成了被迫破产，不公平。
- * 但「跟得起」要按各自的倍率算：看牌的人一份要掏两倍，所以他能撑住的闷牌价只有 chips/2。
- * 拿 floor(chips / 倍率) 取最小，才是真正人人掏得起的那条线。
+ * 发起人把全部筹码推出去，`base` 是把这笔钱换算回闷牌口径的结果：闷牌的人
+ * 一份就是全部身家；看牌的人一份要掏两份，所以他的闷牌单价是身家的一半。
+ * 用 `ceil` 而不是 `floor`：身家是奇数时向上取整，`base × 2` 才盖得住他的全部筹码，
+ * 发起人真的推光（`pay` 会夹到 chips，不会多扣）。
+ *
+ * **不再按「桌上最短的一家」封顶**。那套房规下，台面 10 万、甲 100 万 / 乙 1 万时
+ * 甲跟注要 10 万、梭哈却只付 1 万还能逼全桌表态 —— 梭哈比跟注便宜，
+ * 荒唐到没法用补丁救。别人接不接得起是别人的事：掏不动就全押接，边池分层。
  */
-export function allInBase(state: { players: { status: PlayerStatus; chips: number; looked: boolean }[] }): number {
-  const caps = state.players
-    .filter((p) => p.status === 'active')
-    .map((p) => Math.floor(p.chips / (p.looked ? 2 : 1)));
-  return caps.length ? Math.max(0, Math.min(...caps)) : 0;
+export function allInBase(
+  _state: unknown,
+  player: { looked: boolean; chips: number },
+): number {
+  return Math.ceil(player.chips / (player.looked ? 2 : 1));
 }
 
 /**
- * 某个玩家梭哈要掏多少 —— 闷牌一份、看牌两份，和 callCost/compareCost 同一套比例。
- * 梭哈过去是全场同价，那是这套定价里唯一的例外，现在补上了。
+ * 发起人梭哈要掏多少 —— **他的全部筹码**，一分不留。
+ *
+ * 参数必须是**发起人**：这个函数回答的是「我梭哈要押多少」，不是「我接梭哈要付多少」。
+ * 接受价永远读 `state.allIn.base × 自己的倍率`（见 doCall / legalActions）。
  */
 export function allInCost(
-  state: { players: { status: PlayerStatus; chips: number; looked: boolean }[] },
-  player: { looked: boolean },
+  _state: unknown,
+  player: { looked: boolean; chips: number },
 ): number {
-  return allInBase(state) * (player.looked ? 2 : 1);
+  return player.chips;
 }
 
 /**
- * 梭哈什么时候可用。两个条件满足其一即可：
- *  1. 牌局已经打过设定的轮数（默认第 3 轮起），前面的下注博弈已经走完；
- *  2. 场上有人已经跟不起了 —— 这时候梭哈本来就是自然的收场方式，
- *     没必要逼那个人干等到第 3 轮。
+ * 梭哈什么时候可用：**只看轮次** —— 牌局打过设定的轮数（默认第 3 轮起），
+ * 前面的下注博弈已经走完，才允许有人掀桌。
+ *
+ * 以前还有第二条「场上有人跟不起就提前解锁」。那是为了给跟不起的人一条出路，
+ * 可他现在本来就有出路：跟注 / 比牌都会被 `pay` 夹到全部筹码打出去（「全押跟」）。
+ * 为了一个人的出路把**全桌**的梭哈提前放开，是拿房规换便利 —— 删掉。
  */
-export function canAllInNow(state: {
-  roundNo: number;
-  betUnit: number;
-  players: { status: PlayerStatus; chips: number; looked: boolean }[];
-  settings: { allInFromRound: number };
-}): boolean {
-  if (state.roundNo >= (state.settings.allInFromRound ?? 3)) return true;
-  return state.players.some(
-    (p) => p.status === 'active' && p.chips <= state.betUnit * (p.looked ? 2 : 1),
-  );
+export function canAllInNow(state: { roundNo: number; settings: { allInFromRound: number } }): boolean {
+  return state.roundNo >= (state.settings.allInFromRound ?? 3);
 }
 
 export function canCompareNow(state: {
@@ -848,11 +1279,55 @@ export function canCompareNow(state: {
   return active === 2 || state.turnCount >= state.compareUnlockAt;
 }
 
-function pay(state: RoomState, p: PlayerState, amount: number) {
-  if (amount <= 0 || p.chips < amount) throw new GameError('积分不足，当前只能弃牌或梭哈');
-  p.chips -= amount;
-  p.bet += amount;
-  state.pot += amount;
+/**
+ * 出资。**钱不够就把剩下的全推出去**（「全押跟」），返回实际掏了多少。
+ *
+ * 以前这里直接抛「积分不足，当前只能弃牌或梭哈」，于是台面单价一涨过某人的身家，
+ * 他手上还有钱、牌也还在，却只剩弃牌一个按钮 —— 这正是真人报上来的那个「逻辑混乱」。
+ * 现在动作类型不变（还是跟注 / 比牌 / 接梭哈），只是金额封顶到他的全部筹码，
+ * 推光之后标记 `allIn`，往后轮到他自动跳过，结算按边池分层。
+ */
+function pay(state: RoomState, p: PlayerState, amount: number): number {
+  const paid = Math.max(0, Math.min(amount, p.chips));
+  p.chips -= paid;
+  p.bet += paid;
+  state.pot += paid;
+  if (p.chips <= 0) p.allIn = true;
+  return paid;
+}
+
+/** 出资文案：短付的那一口要明写成「全押」，别让人以为自己按错了 */
+function payLabel(verb: string, paid: number, asked: number): string {
+  return paid < asked ? `全押${verb} ${paid}` : `${verb} ${paid}`;
+}
+
+/**
+ * 下一个**还能出资**的行动者。已经推光的人自动跳过：他不能再掏钱，
+ * 停在他头上只会让全桌等一个注定超时弃牌的人。
+ */
+function nextActorSeat(state: RoomState, fromSeat: number): number | null {
+  const M = state.settings.maxPlayers;
+  for (let offset = 1; offset <= M; offset++) {
+    const seat = (fromSeat + offset + M) % M;
+    const p = state.players.find((x) => x.seat === seat && !x.pendingLeave && x.status === 'active');
+    if (p && p.chips > 0) return seat;
+  }
+  return null;
+}
+
+/**
+ * 还有没有下注可打？没弃牌的人里除了至多一人之外都推光了，就没有了 ——
+ * 剩下那一个人再往里扔钱也没人陪，直接摊牌，不要让谁干等。
+ */
+function noMoreBetting(state: RoomState): boolean {
+  const active = activePlayers(state);
+  if (active.length < 2) return false;
+  return active.filter((p) => p.chips > 0).length <= 1;
+}
+
+/** 摊牌的顺序锚点：优先当前行动者，其次场上第一个还在局的人 */
+function showdownAnchor(state: RoomState): PlayerState | null {
+  return currentPlayer(state) ?? activePlayers(state)[0] ?? null;
 }
 
 function touchDeadline(state: RoomState) {
@@ -863,15 +1338,57 @@ function touchDeadline(state: RoomState) {
 
 /* ----------------------------------------------------------------- 结算 */
 
-function finishRound(state: RoomState, winner: PlayerState, reason: string, revealed: PlayerState[]) {
-  const won = state.pot;
-  winner.chips += won;
+/**
+ * 按**边池**把底池分掉，返回每个人分到多少。
+ *
+ * 分层的依据是每个人本局的累计出资 `bet`：从低到高切成若干层，
+ * 每一层的钱 =（层厚 × 对这一层有出资的人数），只在「对该层有出资**且**还没弃牌」
+ * 的人里比牌。于是一个只押得起 100 的人，赢也只赢得到 100 那一层，
+ * 押到 700 的两家在更高的层里自己分胜负 —— 短筹码不会白拿别人的钱，
+ * 也不会因为跟不起就把已经押进去的钱全送人。
+ *
+ * `ranking` 是还在局里的人**按牌力从大到小**排好的名次；弃牌和被比掉的人不在里面，
+ * 所以他们自动不参与任何一层（任务书：比牌淘汰的人不参与后续任何层）。
+ */
+function splitSidePots(state: RoomState, ranking: PlayerState[]): Map<string, number> {
+  const gains = new Map<string, number>();
+  const add = (id: string, n: number) => gains.set(id, (gains.get(id) ?? 0) + n);
+  const lines = [...new Set(state.players.filter((p) => p.bet > 0).map((p) => p.bet))].sort((a, b) => a - b);
+  let floorLine = 0;
+  let orphan = 0;
+  for (const line of lines) {
+    const thickness = line - floorLine;
+    const layer = thickness * state.players.filter((p) => p.bet >= line).length;
+    // ranking 已按牌力排好，第一个够得着这一层的人就是这一层的赢家
+    const taker = ranking.find((p) => p.bet >= line);
+    if (taker) add(taker.id, layer);
+    // 这一层只有已经弃牌的人出过资（比如全场都弃、赢家押得最少）。
+    // 炸金花里弃掉的钱本来就归赢家，保持现状：并进牌面赢家那一份。
+    else orphan += layer;
+    floorLine = line;
+  }
+  if (orphan > 0 && ranking.length) add(ranking[0].id, orphan);
+  return gains;
+}
+
+/**
+ * 收锅。`ranking` 是还在局里的人按牌力从大到小排好的名次，第一个是牌面赢家。
+ * 底池按边池分层发放，所以名次靠后的人也可能拿到他自己那几层。
+ */
+function finishRound(state: RoomState, ranking: PlayerState[], reason: string, revealed: PlayerState[]) {
+  const winner = ranking[0];
+  const gains = splitSidePots(state, ranking);
+  const won = gains.get(winner.id) ?? 0;
+  for (const [id, amount] of gains) {
+    const p = state.players.find((x) => x.id === id);
+    if (p) p.chips += amount;
+  }
   winner.wins += 1;
-  // 先把每个人这一局的盈亏结出来：投入是 bet，赢家再把底池收回去
+  // 先把每个人这一局的盈亏结出来：投入是 bet，各自再把分到的池子收回去
   const deltas = state.players
-    .filter((p) => p.bet > 0)
+    .filter((p) => p.bet > 0 || (gains.get(p.id) ?? 0) > 0)
     .map((p) => {
-      const delta = (p.id === winner.id ? won : 0) - p.bet;
+      const delta = (gains.get(p.id) ?? 0) - p.bet;
       p.net += delta;
       return { id: p.id, name: p.name, avatar: p.avatar, delta, bet: p.bet, net: p.net };
     })
@@ -895,9 +1412,20 @@ function finishRound(state: RoomState, winner: PlayerState, reason: string, reve
     hands: Object.fromEntries(
       state.players.filter((p) => revealIds.includes(p.id) && p.hand.length === 3).map((p) => [p.id, p.hand.map((c) => ({ ...c }))]),
     ),
+    knockedOutBy: Object.fromEntries(
+      state.players
+        .filter((p) => p.id !== winner.id && p.knockedOutBy && p.knockedOutBy !== p.id)
+        .map((p) => [p.id, p.knockedOutBy as string]),
+    ),
   };
   noteRoundResult(state);
   pushLog(state, `${winner.name} 赢得 ${won.toLocaleString('zh-CN')} 积分`);
+  // 边池：牌面赢家押得少、够不着高层时，那几层归名次靠后的人。不写出来没人看得懂账。
+  for (const [id, amount] of gains) {
+    if (id === winner.id || amount <= 0) continue;
+    const p = state.players.find((x) => x.id === id);
+    if (p) pushLog(state, `${p.name} 赢得边池 ${amount.toLocaleString('zh-CN')} 积分`);
+  }
 }
 
 /**
@@ -910,36 +1438,70 @@ function finishRound(state: RoomState, winner: PlayerState, reason: string, reve
 function maybeFinish(state: RoomState, reason = '其他玩家均已弃牌'): boolean {
   const active = activePlayers(state);
   if (active.length !== 1) return false;
-  finishRound(state, active[0], reason, []);
+  finishRound(state, [active[0]], reason, []);
   return true;
 }
 
-/** 封顶/梭哈触发的全员开牌 */
-function forceShowdown(state: RoomState, initiator: PlayerState, reason: string) {
+/**
+ * 封顶/梭哈触发的全员开牌。
+ *
+ * `byInitiator` = 这一下开牌是**发起人把大家逼上桌面**的（梭哈），不是规则到点了
+ * （封顶、没人出得起钱）。只有前者才谈得上「被谁打下去」，见 `knockedOutBy`。
+ */
+function forceShowdown(state: RoomState, initiator: PlayerState, reason: string, byInitiator = false) {
   const active = activePlayers(state).sort((a, b) => {
     const M = state.settings.maxPlayers;
     return ((a.seat - initiator.seat + M) % M) - ((b.seat - initiator.seat + M) % M);
   });
   if (!active.length) throw new GameError('没有可参与开牌的玩家');
-  // 依次强制比牌；完全同牌时后手胜，与普通比牌"主动方负"的口径一致。
-  let winner = active[0];
-  for (const target of active.slice(1)) {
-    if (compareHands(winner.hand, target.hand, state.settings.special235) <= 0) winner = target;
+  /*
+   * 排出完整名次，而不是只挑一个赢家 —— 有边池之后，第二名、第三名也可能各自
+   * 拿走一层。比较口径和以前一样：完全同牌时后手胜（和普通比牌「主动方负」一致），
+   * 所以 a 不严格大于 b 时就把 a 排在后面。
+   */
+  const ranking: PlayerState[] = [];
+  const pool = [...active];
+  while (pool.length) {
+    let best = 0;
+    for (let i = 1; i < pool.length; i++) {
+      if (compareHands(pool[best].hand, pool[i].hand, state.settings.special235) <= 0) best = i;
+    }
+    ranking.push(pool.splice(best, 1)[0]);
   }
+  const winner = ranking[0];
+  /*
+   * 「被梭掉」的归因（`personas.md`「待集成」#14）：梭哈开牌里还留在场上的人，
+   * 要么是发起人自己，要么是**接了他这一梭**的人。所以输家记的是那个把他逼上桌面
+   * 的人，而不是最后收池的人 —— 这两者常常不是一个人（发起人自己也可能输）。
+   * 封顶开牌（没有 `state.allIn`）不是被谁打下去的，留空回落到赢家。
+   */
+  const shover = byInitiator ? initiator.id : undefined;
   for (const p of active) {
     // 开牌是把牌摆到桌面上定胜负，赢的输的都不是自己退出的，结算时一律公开
     p.bared = true;
     if (p.id !== winner.id) {
-      p.status = 'folded';
       p.lastAction = `开牌负于 ${winner.name}`;
+      if (shover && shover !== p.id) p.knockedOutBy ??= shover;
     }
   }
-  finishRound(state, winner, reason, active);
+  // 名次先定下来再改状态：结算要按名次分边池，提前把输家标成 folded 会让他们退出所有层
+  finishRound(state, ranking, reason, active);
+  for (const p of active) if (p.id !== winner.id) p.status = 'folded';
 }
 
 function advanceTurn(state: RoomState, fromSeat: number) {
   if (maybeFinish(state)) return;
-  const next = nextOccupiedSeat(state, fromSeat, true);
+  // 没人还能出资了就别再往下轮：剩下那一个人再加注也没人陪，直接开牌。
+  // 梭哈表态期间不走这条捷径 —— 「接不接」是当事人自己的选择（任务书：梭哈现有规则不改），
+  // 推光了的人由 advanceAllIn 自动算作留下，那边会收场。
+  if (!state.allIn && noMoreBetting(state)) {
+    const anchor = showdownAnchor(state);
+    if (anchor) {
+      forceShowdown(state, anchor, '已无人能继续出资，直接开牌');
+      return;
+    }
+  }
+  const next = nextActorSeat(state, fromSeat);
   if (next == null) throw new GameError('无法找到下一位玩家');
 
   const M = state.settings.maxPlayers;
@@ -982,8 +1544,8 @@ function advanceTurn(state: RoomState, fromSeat: number) {
          * 档位已经用完，但牌局还没结束 —— 这里就是「不封顶」的收敛保证。
          *
          * 每两轮把单价翻一倍。筹码是有限的，翻倍是几何增长，所以任何人最多再撑
-         * 几轮就会被顶到「跟不起」，那时 canAllInNow 放行、决策层只剩梭哈或弃牌，
-         * 牌局必然收口。不用数轮数，让钱去逼出胜负。
+         * 几轮就会被顶到「跟不起」，那一口跟出去就是全押（`pay` 夹到全部筹码），
+         * 人一个个推光，牌局必然收口。不用数轮数，让钱去逼出胜负。
          */
         state.betUnit *= 2;
         pushLog(state, `第 ${state.roundNo} 轮，底注翻倍至 ${state.betUnit.toLocaleString('zh-CN')}`);
@@ -1015,7 +1577,7 @@ export function startRound(state: RoomState, actorId: string | null) {
     }
   }
 
-  const hands = dealWeightedHands(entrants.length);
+  const hands = dealWeightedHands(entrants.length, undefined, state.settings.dealMode);
   state.handNo += 1;
   state.phase = 'playing';
   state.pot = 0;
@@ -1030,6 +1592,9 @@ export function startRound(state: RoomState, actorId: string | null) {
   for (const p of seated) {
     p.looked = false;
     p.bared = false;
+    p.knockedOutBy = undefined;
+    p.emoted = 0;
+    p.allIn = false;
     p.bet = 0;
     p.hand = [];
     p.lastAction = undefined;
@@ -1088,23 +1653,21 @@ function doCall(state: RoomState, actorId: string) {
     // 有可能超过他的身家（base 是按他闷牌时算出来的）。这时把实付夹到他的全部筹码：
     // 「看牌把自己的价翻倍了」就该推光筹码，这本来就是 all-in 的本义，
     // 比给他一个点下去只会报错的按钮好。
-    const amount = Math.min(price, p.chips);
-    pay(state, p, amount);
-    p.lastAction = `接梭哈 ${amount}`;
-    pushLog(state, `${p.name} 接下 ${state.allIn.initiatorName} 的梭哈`);
+    const paid = pay(state, p, price);
+    p.lastAction = payLabel('接梭哈', paid, price);
+    pushLog(state, `${p.name} ${paid < price ? '全押' : ''}接下 ${state.allIn.initiatorName} 的梭哈`);
     state.allIn.accepted.push(p.id);
     state.allIn.pending = state.allIn.pending.filter((id) => id !== p.id);
     advanceAllIn(state);
     return;
   }
   const cost = callCost(state, p);
-  pay(state, p, cost);
-  p.lastAction = `跟 ${cost}`;
-  pushLog(state, `${p.name} 跟注 ${cost}`);
-  if (p.chips === 0) {
-    forceShowdown(state, p, '积分打空，封顶开牌');
-    return;
-  }
+  if (p.chips <= 0) throw new GameError('你已经全押，本局不需要再出资');
+  const paid = pay(state, p, cost);
+  p.lastAction = payLabel('跟', paid, cost);
+  pushLog(state, `${p.name} ${paid < cost ? `全押跟 ${paid}` : `跟注 ${paid}`}`);
+  // 打空的人不再收锅：他还在局里等结算，牌局交给还有钱的人继续打。
+  // 真的没人能出资了，advanceTurn 里的 noMoreBetting 会直接开牌。
   advanceTurn(state, p.seat);
 }
 
@@ -1121,28 +1684,31 @@ function doRaise(state: RoomState, actorId: string, newUnit: number) {
   advanceTurn(state, p.seat);
 }
 
+/**
+ * 梭哈 = **全押**。发起人把自己全部筹码推出去，不看别人有多少钱。
+ *
+ * 一条硬规则托着这件事：**梭哈永远不该比跟注便宜**。所以钱不够跟注的人
+ * 根本没有梭哈 —— 他的出路是全押跟、全押比牌或者弃牌（`pay` 会夹到全部筹码，
+ * 结算走边池），而不是用一个比跟注还小的数把全桌拖进表态。
+ */
 function doAllIn(state: RoomState, actorId: string) {
   const p = requireTurn(state, actorId);
   if (state.allIn) throw new GameError('已经有人梭哈了');
   const active = activePlayers(state);
   if (active.length < 2) throw new GameError('没有可以开牌的对手');
   if (p.chips <= 0) throw new GameError('没有可梭哈的积分');
-
-  // 跟不起的人任何时候都能梭哈脱身；主动梭哈则要等牌局打开几轮，
-  // 否则一上来就有人掀桌，前两轮的下注博弈就没意义了。
-  const forced = p.chips <= callCost(state, p);
-  if (!forced && !canAllInNow(state)) {
+  if (p.chips <= callCost(state, p)) {
+    throw new GameError('筹码不够跟注，只能全押跟、全押比牌或弃牌');
+  }
+  if (!canAllInNow(state)) {
     throw new GameError(`第 ${state.settings.allInFromRound} 轮起才能主动梭哈`);
   }
 
-  const base = allInBase(state);
-  if (base <= 0) throw new GameError('没有可梭哈的积分');
-  const amount = base * (p.looked ? 2 : 1);
-
-  // 发起人先按自己的倍率把钱押上，然后按行动顺序问其他人接不接。
-  // base 是按各家倍率封顶算出来的，所以每个人都掏得起自己那一份 —— 但掏不掏是他自己的选择。
-  pay(state, p, amount);
-  p.lastAction = `梭哈 ${amount}`;
+  // 全部身家押上；base 是把它换算回闷牌口径的单价，之后不再变。
+  const amount = p.chips;
+  const base = allInBase(state, p);
+  const paid = pay(state, p, amount);
+  p.lastAction = `梭哈 ${paid}`;
   const M = state.settings.maxPlayers;
   const order = active
     .filter((q) => q.id !== p.id)
@@ -1151,11 +1717,11 @@ function doAllIn(state: RoomState, actorId: string) {
     initiatorId: p.id,
     initiatorName: p.name,
     base,
-    amount,
+    amount: paid,
     pending: order.map((q) => q.id),
     accepted: [p.id],
   };
-  pushLog(state, `${p.name} 梭哈 ${amount}，等其他人表态`);
+  pushLog(state, `${p.name} 梭哈 ${paid}，等其他人表态`);
   advanceAllIn(state);
 }
 
@@ -1169,6 +1735,17 @@ function advanceAllIn(state: RoomState) {
   const stillIn = (id: string) => state.players.find((x) => x.id === id)?.status === 'active';
   pendingAllIn.pending = pendingAllIn.pending.filter(stillIn);
   pendingAllIn.accepted = pendingAllIn.accepted.filter(stillIn);
+  /*
+   * 已经推光的人不用（也没法）再表态：他一分钱都掏不出来，问他「接不接」只有
+   * 「弃牌」一个可点，等于因为没钱把他赶出一局他本来有权留下的牌。
+   * 直接算作留在局里等结算 —— 他能争到的只有自己出资覆盖的那几层边池。
+   */
+  for (const id of [...pendingAllIn.pending]) {
+    const q = state.players.find((x) => x.id === id);
+    if (!q || q.chips > 0) continue;
+    pendingAllIn.pending = pendingAllIn.pending.filter((x) => x !== id);
+    if (!pendingAllIn.accepted.includes(id)) pendingAllIn.accepted.push(id);
+  }
 
   if (pendingAllIn.pending.length) {
     const next = playerById(state, pendingAllIn.pending[0]);
@@ -1182,9 +1759,11 @@ function advanceAllIn(state: RoomState) {
   if (!initiator) return;
   // 有人接就开牌比大小；一个都没人接，发起人直接收锅且不亮牌
   if (pendingAllIn.accepted.length >= 2) {
-    forceShowdown(state, initiator, '梭哈开牌');
+    // 梭哈开牌：`state.allIn` 上面刚被清掉，所以「是谁把他们逼上桌面的」
+    // 必须显式传进去，不能在 forceShowdown 里回头去读它（读到的永远是 undefined）。
+    forceShowdown(state, initiator, '梭哈开牌', true);
   } else {
-    finishRound(state, initiator, '无人接梭哈', []);
+    finishRound(state, [initiator], '无人接梭哈', []);
   }
 }
 
@@ -1208,8 +1787,25 @@ function doFold(state: RoomState, actorId: string, note = '弃牌') {
     return;
   }
   if (state.allIn) {
+    /*
+     * 少一个人**不影响单价**。梭哈价是发起人的全部身家，从头到尾就是那个数 ——
+     * 谁走谁留都改不了他押了多少。以前这里会按剩下的人重算（`rebaseAllIn`），
+     * 那是「按最短一家封顶」那套房规的补丁，房规废了，补丁也一并拆掉。
+     */
     advanceAllIn(state);
     return;
+  }
+  /*
+   * 弃牌的人不一定是当前行动者（弃牌不占行动权）。他一走，桌上可能就只剩
+   * 一个还有钱的人和若干已经全押的人 —— 这时候没有下注可打了，得当场开牌，
+   * 不能等到「轮到谁」才发现，否则牌局停在一个永远不会到来的回合上。
+   */
+  if (noMoreBetting(state)) {
+    const anchor = showdownAnchor(state);
+    if (anchor) {
+      forceShowdown(state, anchor, '已无人能继续出资，直接开牌');
+      return;
+    }
   }
   if (wasTurn) advanceTurn(state, p.seat);
 }
@@ -1221,7 +1817,8 @@ function doCompare(state: RoomState, actorId: string, targetId: string) {
   const target = playerById(state, targetId);
   if (target.id === p.id || target.status !== 'active') throw new GameError('比牌对象无效');
   const cost = compareCost(state, p);
-  pay(state, p, cost);
+  if (p.chips <= 0) throw new GameError('你已经全押，本局不需要再出资');
+  const paid = pay(state, p, cost);
   // 比牌 = 两个人把牌亮给对方看。双方互相可见，其他人看不到。
   markSeen(state, p.id, target.id);
   markSeen(state, target.id, p.id);
@@ -1231,17 +1828,17 @@ function doCompare(state: RoomState, actorId: string, targetId: string) {
   loser.status = 'folded';
   loser.lastAction = `比牌负于 ${winner.name}`;
   winner.lastAction = `比牌胜 ${loser.name}`;
+  if (paid < cost) p.lastAction = `全押比牌 ${paid}`;
   // 比过牌的两个人都是「牌面上定过输赢」的，本局无论最后怎么结束都要摊给全场。
   // 局还没结束的中途，双方的牌仍然只有当事人互相看得到（走 seen），
   // 旁观者要等到结算才看得见 —— 那才是真实牌桌上的规矩。
   winner.bared = true;
   loser.bared = true;
-  pushLog(state, `${p.name} 与 ${target.name} 比牌，${loser.name} 出局`);
+  // 「谁比掉他他找谁」：把「是这个人把我打下去的」记在输家身上，随结算带给情绪层。
+  loser.knockedOutBy = winner.id;
+  pushLog(state, `${p.name} ${paid < cost ? `全押 ${paid} ` : ''}与 ${target.name} 比牌，${loser.name} 出局`);
   if (maybeFinish(state, '比牌决出胜负')) return;
-  if (p.status === 'active' && p.chips === 0) {
-    forceShowdown(state, p, '比牌后积分打空，封顶开牌');
-    return;
-  }
+  // 比牌费把自己掏空了也不立刻收锅：人还在局里，交给 advanceTurn 判断还有没有下注可打
   advanceTurn(state, p.seat);
 }
 
@@ -1259,8 +1856,15 @@ export type GameCommand =
   | { type: 'remove_player'; targetId: string }
   | { type: 'top_up' }
   | { type: 'new_round' }
-  | { type: 'settings'; turnSeconds?: number; allInFromRound?: number; maxRounds?: number; autoContinue?: boolean }
-  | { type: 'emote'; id: string }
+  | {
+      type: 'settings';
+      turnSeconds?: number;
+      allInFromRound?: number;
+      maxRounds?: number;
+      autoContinue?: boolean;
+      dealMode?: DealMode;
+    }
+  | { type: 'emote'; id: string; target?: string }
   | { type: 'leave' };
 
 export const COMMAND_TYPES = new Set<GameCommand['type']>([
@@ -1268,7 +1872,13 @@ export const COMMAND_TYPES = new Set<GameCommand['type']>([
   'add_bot', 'remove_player', 'top_up', 'new_round', 'emote', 'leave', 'settings',
 ]);
 
-export function applyCommand(state: RoomState, actorId: string, command: GameCommand): void {
+export function applyCommand(
+  state: RoomState,
+  actorId: string,
+  command: GameCommand,
+  /** 这一步他想了多久（毫秒）。机器人传 `BotAction.thinkMs`；真人省略，按时限回推。 */
+  spentMs?: number,
+): void {
   const actor = playerById(state, actorId);
   switch (command.type) {
     case 'ready': {
@@ -1292,12 +1902,12 @@ export function applyCommand(state: RoomState, actorId: string, command: GameCom
     }
     case 'start': return startRound(state, actorId);
     // 笔记要在动作生效**之前**记：一旦状态改完，「他是顶着一次加注弃的牌」就找不回来了。
-    case 'look': noteAction(state, actor, 'look'); return doLook(state, actorId);
-    case 'call': noteAction(state, actor, 'call'); return doCall(state, actorId);
-    case 'all_in': noteAction(state, actor, 'all_in'); return doAllIn(state, actorId);
-    case 'raise': noteAction(state, actor, 'raise'); return doRaise(state, actorId, command.unit);
-    case 'fold': noteAction(state, actor, 'fold'); return doFold(state, actorId);
-    case 'compare': noteAction(state, actor, 'compare'); return doCompare(state, actorId, command.targetId);
+    case 'look': noteAction(state, actor, 'look', spentMs); return doLook(state, actorId);
+    case 'call': noteAction(state, actor, 'call', spentMs); return doCall(state, actorId);
+    case 'all_in': noteAction(state, actor, 'all_in', spentMs); return doAllIn(state, actorId);
+    case 'raise': noteAction(state, actor, 'raise', spentMs); return doRaise(state, actorId, command.unit);
+    case 'fold': noteAction(state, actor, 'fold', spentMs); return doFold(state, actorId);
+    case 'compare': noteAction(state, actor, 'compare', spentMs); return doCompare(state, actorId, command.targetId);
     case 'settings': {
       requireHost(state, actorId);
       if (state.phase === 'playing') throw new GameError('牌局进行中不能改房规');
@@ -1321,12 +1931,30 @@ export function applyCommand(state: RoomState, actorId: string, command: GameCom
         state.settings.autoContinue = command.autoContinue;
         changed.push(command.autoContinue ? '自动续局开' : '自动续局关');
       }
+      /**
+       * 发牌档位。三个入口（网页 / 命令行 / MCP）共用这一段：取值在这里校验，
+       * 切换的日志也在这里写，谁改的都会在房间日志里留下同一句话。
+       *
+       * 上面那道 `phase === 'playing'` 的闸门已经保证了「下一局生效」：
+       * 正在打的这一局不会有人的手牌被换掉。
+       */
+      if (command.dealMode !== undefined) {
+        if (!isDealMode(command.dealMode)) throw new GameError('发牌档位只能是 standard 或 party');
+        if (command.dealMode !== state.settings.dealMode) {
+          state.settings.dealMode = command.dealMode;
+          pushLog(state, `已切换到${DEAL_MODE_LABEL[command.dealMode]}发牌，下一局生效`);
+        }
+      }
       if (changed.length) pushLog(state, `房规调整：${changed.join('、')}`);
       return;
     }
     case 'emote': {
       if (!EMOTES.includes(command.id)) throw new GameError('无效的表情');
-      actor.emote = { id: command.id, at: Date.now() };
+      if (command.target && !state.players.some(p => p.id === command.target && p.id !== actorId)) {
+        throw new GameError('表情对象不在牌桌上');
+      }
+      actor.emote = { id: command.id, at: Date.now(), target: command.target };
+      actor.emoted = (actor.emoted ?? 0) + 1;
       return;
     }
     case 'add_bot': {
@@ -1336,7 +1964,8 @@ export function applyCommand(state: RoomState, actorId: string, command: GameCom
       const used = new Set(state.players.map((p) => p.seat));
       let seat = 0;
       while (used.has(seat)) seat++;
-      // 每桌从六种人格里随机抽不重复的角色；最多五个机器人，所以狡诈型等风格不会总被固定顺序挤掉。
+      // 每桌从名册的八个人里随机抽不重复的角色；一桌最多五个机器人，
+      // 名字多于座位，所以排在后面的人（小雨、阿彪）不会被固定顺序挤掉。
       const available = BOT_NAMES
         .map((name, index) => ({ name, index }))
         .filter(({ name }) => !state.players.some((p) => p.name === name));
@@ -1458,6 +2087,8 @@ export function resetToLobby(state: RoomState) {
     p.status = 'waiting';
     p.looked = false;
     p.bared = false;
+    p.knockedOutBy = undefined;
+    p.emoted = 0;
     p.hand = [];
     p.bet = 0;
     // 上一局打完继续留在座位上的人默认还在局 —— 每一局都要重新点准备是最烦的一步。
@@ -1488,643 +2119,6 @@ export function timeoutCurrentPlayer(state: RoomState): boolean {
   return true;
 }
 
-/* ------------------------------------------------------------- 机器人 AI */
-
-export interface BotPersonality {
-  /** 主动加注、比牌和价值梭哈的倾向 */
-  aggression: number;
-  /** 在边缘赔率下继续游戏的宽松程度 */
-  looseness: number;
-  /** 合适局面下诈唬的频率 */
-  bluffRate: number;
-  /** 愿意为了获取信息而看牌、避开高波动的程度 */
-  patience: number;
-  /** 愿意用有效筹码承受波动的程度 */
-  riskTolerance: number;
-  /** 强牌慢打、弱牌代表强牌的混合程度 */
-  deception: number;
-  /** 根据桌况偏离基础性格的幅度 */
-  adaptability: number;
-}
-
-const BOT_PERSONALITIES: Record<string, BotPersonality> = {
-  阿凯: { aggression: 0.78, looseness: 0.58, bluffRate: 0.10, patience: 0.38, riskTolerance: 0.72, deception: 0.42, adaptability: 0.66 },
-  老陈: { aggression: 0.36, looseness: 0.34, bluffRate: 0.03, patience: 0.86, riskTolerance: 0.32, deception: 0.35, adaptability: 0.48 },
-  小北: { aggression: 0.58, looseness: 0.72, bluffRate: 0.09, patience: 0.50, riskTolerance: 0.58, deception: 0.55, adaptability: 0.72 },
-  阿杰: { aggression: 0.72, looseness: 0.46, bluffRate: 0.07, patience: 0.44, riskTolerance: 0.75, deception: 0.46, adaptability: 0.62 },
-  小林: { aggression: 0.48, looseness: 0.40, bluffRate: 0.04, patience: 0.78, riskTolerance: 0.44, deception: 0.38, adaptability: 0.82 },
-  老王: { aggression: 0.64, looseness: 0.56, bluffRate: 0.16, patience: 0.58, riskTolerance: 0.64, deception: 0.88, adaptability: 0.86 },
-};
-
-/**
- * 性格跟着机器人身份走，不会每一步随机换人格。预置机器人各有明显风格，
- * 额外创建的机器人则从 id 稳定派生一套均衡参数。
- */
-export function botPersonality(bot: Pick<PlayerState, 'id' | 'name'>): BotPersonality {
-  const preset = BOT_PERSONALITIES[bot.name];
-  if (preset) return { ...preset };
-  const trait = (name: string) => pseudoRandom(`${bot.id}:personality:${name}`);
-  return {
-    aggression: 0.35 + trait('aggression') * 0.45,
-    looseness: 0.30 + trait('looseness') * 0.45,
-    bluffRate: 0.03 + trait('bluff') * 0.13,
-    patience: 0.35 + trait('patience') * 0.50,
-    riskTolerance: 0.30 + trait('risk') * 0.48,
-    deception: 0.30 + trait('deception') * 0.58,
-    adaptability: 0.40 + trait('adaptability') * 0.48,
-  };
-}
-
-interface BotOpponentView {
-  id: string;
-  seat: number;
-  chips: number;
-  looked: boolean;
-  bet: number;
-  wins: number;
-  lastAction?: string;
-  /** 本局的完整动作序列 */
-  actions: string[];
-  /** 跨局累积的公开笔记 */
-  read: TableRead;
-}
-
-const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
-
-/** 这里只提取公开字段，刻意没有 hand；后面的决策代码拿不到对手暗牌。 */
-function botOpponentViews(state: RoomState, bot: PlayerState): BotOpponentView[] {
-  return state.players
-    .filter((p) => p.id !== bot.id && p.status === 'active')
-    .map((p) => ({
-      id: p.id,
-      seat: p.seat,
-      chips: p.chips,
-      looked: p.looked,
-      bet: p.bet,
-      wins: p.wins,
-      lastAction: p.lastAction,
-      actions: [...(p.handActions ?? [])],
-      read: tableRead(state, p.id),
-    }));
-}
-
-/**
- * 这一局他讲了个什么故事。
- *
- * 只看最后一个动作是读不懂牌的：「连加两手」和「加了一手之后缩回去只跟」
- * 是完全相反的两个意思，可最后一个动作都是「跟」。人读牌读的是整串动作，
- * 尤其是**节奏的变化** —— 突然发力和突然刹车，都是信息。
- */
-function storyHeat(actions: string[]): number {
-  if (!actions.length) return 0.08;
-  const count = (kind: string) => actions.filter((a) => a === kind).length;
-  const raises = count('raise');
-  const calls = count('call');
-  const last = actions[actions.length - 1];
-
-  if (count('all_in')) return 0.95;
-  // 连续发力：加了不止一次，几乎不可能是空气
-  if (raises >= 2) return 0.88;
-  if (raises === 1) {
-    // 加完之后又只跟 —— 踩了刹车，这是变弱的信号，比一直没动过还可疑
-    const braked = actions.indexOf('raise') < actions.lastIndexOf('call');
-    return braked ? 0.44 : 0.70;
-  }
-  // 比过牌还站着，说明他手上真有东西 —— 这是被牌面证明过的强度
-  if (count('compare')) return 0.66;
-  if (calls >= 3) return 0.40;
-  if (calls === 2) return 0.32;
-  if (calls === 1) return 0.24;
-  return last === 'look' ? 0.15 : 0.10;
-}
-
-/**
- * 这个人的凶悍值多少钱。
- *
- * 同一个加注，从一整晚只打过三把牌的紧手嘴里说出来，和从每手都加的疯子嘴里说出来，
- * 完全不是一回事。真人靠的就是这个 —— 记住谁老实、谁爱吹，然后据此打折或者加价。
- * 样本不够时按常人算，不瞎猜。
- */
-function credibility(read: TableRead): number {
-  if (read.hands < 3) return 1;
-  const acts = read.aggressive + read.passive;
-  const aggressionRate = acts >= 6 ? read.aggressive / acts : 0.35;
-  // 他愿意亮出来的牌一般有多硬。0.6 是这套牌型分布下的常态基准。
-  const showdownStrength = read.showdowns >= 2 ? read.showdownStrength / read.showdowns : 0.6;
-  const caught = Math.min(0.25, read.bluffsCaught * 0.09);
-  return clamp01(1.15 - aggressionRate * 0.75 + (showdownStrength - 0.6) * 0.5 - caught);
-}
-
-/** 一个对手当下有多可怕：他讲的故事 × 他这个人的可信度。 */
-function opponentThreat(view: BotOpponentView): number {
-  return clamp01(storyHeat(view.actions) * credibility(view.read));
-}
-
-/**
- * 偷池成功率：一加注就把所有人吓走的概率。
- *
- * 人不是随机诈唬的，是**挑人**诈唬 —— 桌上都是一加就跑的人才值得去偷，
- * 有一个说什么都要跟的站在那里，这个池子就偷不动。所以要连乘，不是取平均。
- */
-function foldEquity(opponents: BotOpponentView[]): number {
-  if (!opponents.length) return 1;
-  return opponents.reduce((product, o) => {
-    const r = o.read;
-    // 还没看够这个人的时候按常人算 0.5：炸金花绝大多数手牌是散牌，面对加注
-    // 跑掉本来就是多数派。之前这里写 0.42，两家对手一乘只剩 0.17，刚好卡在
-    // 诈唬门槛下面 —— 实测九百多次加注里只有一次诈唬，等于这套牌桌上没人吹牛。
-    const folds = r.pressureFaced >= 3 ? clamp01(r.foldsToPressure / r.pressureFaced) : 0.5;
-    return product * clamp01(0.12 + folds * 0.82);
-  }, 1);
-}
-
-function tablePressure(state: RoomState, opponents: BotOpponentView[]): number {
-  if (!opponents.length) return 0;
-  const actionPressure = opponents.reduce((sum, p) => sum + opponentThreat(p), 0) / opponents.length;
-  const commitment = opponents.reduce(
-    (sum, p) => sum + Math.min(1, p.bet / Math.max(state.settings.ante, state.pot)),
-    0,
-  ) / opponents.length;
-  const looked = opponents.filter((p) => p.looked).length / opponents.length;
-  /**
-   * 底注被抬到了什么价位，本身就是桌上最响的一个信号。
-   *
-   * 只统计「谁做过什么动作」会漏掉这一层：一手牌从开局底注打到几十倍，
-   * 哪怕这一轮大家都只是平跟，场面也早就不是开局那个场面了。
-   * 翻到十六倍算满档（log2 除以 4），再往上就是同一个「已经在开火」的量级。
-   */
-  const escalation = clamp01(
-    Math.log2(Math.max(1, state.betUnit) / Math.max(1, state.settings.betOptions[0])) / 4,
-  );
-  return clamp01(actionPressure * 0.46 + commitment * 0.22 + looked * 0.12 + escalation * 0.20);
-}
-
-/** 每个公开局面上的随机量是确定的：可复测，也不会因为改了对手暗牌而改变。 */
-function botRoll(state: RoomState, bot: PlayerState, purpose: string): number {
-  return pseudoRandom(`${bot.id}:${state.handNo}:${state.roundNo}:${state.turnCount}:${state.actionSeq}:${purpose}`);
-}
-
-/**
- * 基础性格只是长期倾向，临场会切换档位：高压/短码收紧，后位单挑或大筹码领先时施压，
- * 后段则减少试探。adaptability 决定偏离基础人格能有多远。
- */
-function adaptPersonality(
-  base: BotPersonality,
-  state: RoomState,
-  bot: PlayerState,
-  opponents: BotOpponentView[],
-  pressure: number,
-  position: number,
-  costFraction: number,
-): BotPersonality {
-  const p = { ...base };
-  const shift = base.adaptability;
-  const averageOpponentStack = opponents.length
-    ? opponents.reduce((sum, opponent) => sum + opponent.chips, 0) / opponents.length
-    : bot.chips;
-
-  if (pressure >= 0.58 || costFraction >= 0.12) {
-    // 防守档：对手持续施压或一口价已伤到身家时，连激进型也会收紧范围。
-    p.aggression -= 0.18 * shift;
-    p.looseness -= 0.22 * shift;
-    p.bluffRate *= 1 - 0.72 * shift;
-    p.riskTolerance -= 0.16 * shift;
-    p.patience += 0.12 * shift;
-  } else if (opponents.length <= 2 && position >= 0.5 && pressure < 0.34) {
-    // 偷池档：人少、后位、没人表现强势时，稳健型也会扩大施压与诈唬频率。
-    p.aggression += 0.16 * shift;
-    p.looseness += 0.10 * shift;
-    p.bluffRate *= 1 + 0.85 * shift;
-    p.riskTolerance += 0.08 * shift;
-  }
-
-  if (bot.chips >= averageOpponentStack * 1.35 && state.pot <= bot.chips * 0.45) {
-    // 大筹码档：利用覆盖优势，但仍受底池赔率约束，不做无脑碾压。
-    p.aggression += 0.12 * shift;
-    p.bluffRate *= 1 + 0.35 * shift;
-    p.riskTolerance += 0.06 * shift;
-  }
-
-  if (state.roundNo >= 4) {
-    // 收口档：后段减少试探和慢吞吞的边缘跟注，更明确地做价值或退出。
-    p.aggression += 0.08 * shift;
-    p.looseness -= 0.08 * shift;
-    p.patience -= 0.10 * shift;
-  }
-
-  /**
-   * 情绪档。
-   *
-   * 输了一大笔之后想追回来 —— 起手放宽、加注变凶、诈唬变多、耐心变差，
-   * 这是真人牌桌上最普遍也最贵的一个漏洞，电脑玩家有它才像人。
-   * 赢麻了的人则是另一种松：敢下注，但不会去追不该追的注。
-   * 情绪不受 adaptability 约束：上头本来就是绕过理性的东西。
-   */
-  const tilt = bot.tilt ?? 0;
-  if (tilt > 0.02) {
-    p.aggression += 0.24 * tilt;
-    p.looseness += 0.30 * tilt;
-    p.bluffRate *= 1 + 1.1 * tilt;
-    p.patience -= 0.22 * tilt;
-    p.riskTolerance += 0.20 * tilt;
-  } else if (tilt < -0.02) {
-    // 缩着打：刚被抓到吹牛之后，人会有一阵子只用真牌说话。
-    p.aggression += 0.18 * tilt;
-    p.bluffRate *= Math.max(0, 1 + 1.3 * tilt);
-    p.looseness += 0.16 * tilt;
-  }
-
-  return {
-    ...p,
-    aggression: clamp01(p.aggression),
-    looseness: clamp01(p.looseness),
-    bluffRate: clamp01(p.bluffRate),
-    patience: clamp01(p.patience),
-    riskTolerance: clamp01(p.riskTolerance),
-  };
-}
-
-/**
- * 真正会陪你走到开牌的人数。
- *
- * 炸金花绝大多数底池是靠别人弃牌收掉的，六个人坐着不等于六个人跟你比大小。
- * 按在座人数直接做指数，会把胜率压到荒谬的低位（中等金花在六人桌上只剩 5%），
- * 于是所有机器人第一轮集体弃牌 —— 这就是「电脑一直弃牌、每局都打不起来」的来源。
- * 这里按「第一家一定要过，后面每多一家只有约一半真会跟到底」折算。
- */
-function effectiveField(opponentCount: number): number {
-  return 1 + Math.max(0, opponentCount - 1) * 0.5;
-}
-
-/** 下注阶段的胜率：牌力是「打赢一家」的概率，按有效对手数放大。 */
-function winEquity(singleOpponentPercentile: number, opponentCount: number): number {
-  return Math.pow(clamp01(singleOpponentPercentile), effectiveField(opponentCount));
-}
-
-/** 摊牌已成定局（梭哈接受之后）时，所有人都真的要比，不能再打折。 */
-function showdownEquity(singleOpponentPercentile: number, opponentCount: number): number {
-  return Math.pow(clamp01(singleOpponentPercentile), Math.max(1, opponentCount));
-}
-
-/**
- * 闷牌时的先验胜率。
- *
- * **不能拿 0.5 当牌力再去做指数**：0.5^5 只有 3%，低于任何底池赔率，闷着的机器人
- * 必然弃牌，而闷牌恰恰是最便宜的一档价 —— 这是弃牌率失控的另一半原因。
- * 一手完全未知的牌拿下底池的概率就是「这一桌里最好的那家是我」= 1/(有效家数)。
- */
-function blindEquity(opponentCount: number): number {
-  return 1 / (1 + effectiveField(opponentCount));
-}
-
-/** 比牌只按公开投入、动作强度和座次挑目标，不使用目标的 hand。 */
-function compareTarget(
-  state: RoomState,
-  bot: PlayerState,
-  opponents: BotOpponentView[],
-): BotOpponentView | undefined {
-  const M = state.settings.maxPlayers;
-  return [...opponents].sort((a, b) => {
-    const score = (p: BotOpponentView) =>
-      opponentThreat(p) * 2
-      + p.bet / Math.max(1, state.pot)
-      + (p.looked ? 0.18 : 0)
-      + Math.min(0.12, p.wins * 0.005);
-    const byThreat = score(b) - score(a);
-    if (Math.abs(byThreat) > 1e-9) return byThreat;
-    return ((a.seat - bot.seat + M) % M) - ((b.seat - bot.seat + M) % M);
-  })[0];
-}
-
-/** 一步决策：动作本身，加上「他该想多久」。 */
-export interface BotAction {
-  cmd: GameCommand;
-  /** 服务器按这个毫秒数排延迟再执行 */
-  thinkMs: number;
-}
-
-/**
- * 该想多久。
- *
- * 真人的用时不是随机的，是跟着**这一步有多难**走的，而且用时本身就是一种信息：
- *  - 早就想好的动作秒出 —— 看牌、闷牌跟个底注，手比脑子快；
- *  - 常规决策一秒上下；
- *  - 真正接近的边缘局面会「下潜」，盯着底池算三四秒，这是最像人的一处；
- *  - 上头的人出手更快 —— 情绪本来就是绕过思考的；
- *  - 还有人会演：拿着大牌故意拖一拖装犹豫，或者反过来秒跟装作无所谓。
- *    这一层由 deception 决定，所以同一个局面在不同电脑手里节奏不一样。
- *
- * 上限压在行动时限的一半，绝不能把真人晾到超时。
- */
-function thinkTime(
-  state: RoomState,
-  bot: PlayerState,
-  cmd: GameCommand,
-  hardness: number,
-  personality: BotPersonality,
-): number {
-  const cap = Math.max(700, state.settings.turnSeconds * 1000 / 2 - 200);
-  const jitter = botRoll(state, bot, `think:${cmd.type}`);
-  if (cmd.type === 'look') return Math.round(260 + jitter * 260);
-
-  // 难度 0 → 秒出；难度 1 → 下潜。指数让中间地带不至于全都拖成三秒。
-  let ms = 380 + Math.pow(clamp01(hardness), 1.35) * 3200;
-
-  const theatre = botRoll(state, bot, `theatre:${cmd.type}`);
-  if (theatre < personality.deception * 0.28) ms *= 1.9;            // 装犹豫
-  else if (theatre > 1 - personality.deception * 0.18) ms *= 0.35;  // 秒跟装弱
-
-  const tilt = bot.tilt ?? 0;
-  if (tilt > 0.2) ms *= 1 - Math.min(0.45, tilt * 0.5);             // 上头就不想了
-
-  return Math.round(Math.min(cap, Math.max(240, ms * (0.80 + jitter * 0.45))));
-}
-
-/** 边缘程度：离「跟或弃」的分界线越近，人想得越久。0.14 之内算真正难受的区间。 */
-function hardnessFromMargin(margin: number): number {
-  return clamp01(1 - Math.abs(margin) / 0.14);
-}
-
-/**
- * 给一个机器人算出下一步。纯函数，不改状态 —— 服务器拿到结果后带延迟执行，
- * 这样电脑玩家看起来像在思考，而不是在人类点完的瞬间全部行动完毕。
- *
- * 信息边界在进入决策层前就强制执行：对手 hand 永远清空，机器人没看牌时自己的
- * hand 也清空。以后即使有人误写了读取暗牌的策略，拿到的也只会是空数组。
- */
-export function botDecision(state: RoomState, bot: PlayerState): GameCommand {
-  return botAction(state, bot).cmd;
-}
-
-/** 和 botDecision 同一套判断，额外给出该「想」多久。信息边界在这里统一执行。 */
-export function botAction(state: RoomState, bot: PlayerState): BotAction {
-  const players = state.players.map((p) => ({
-    ...p,
-    hand: p.id === bot.id && bot.looked ? p.hand : [],
-  }));
-  const visibleState: RoomState = {
-    ...state,
-    players,
-    // 机器人只会在 playing 阶段行动；显式清掉可能含历史摊牌的结果与定向可见表。
-    result: undefined,
-    seen: {},
-  };
-  const visibleBot = players.find((p) => p.id === bot.id);
-  if (!visibleBot) throw new GameError('机器人不在当前房间');
-  return decideBot(visibleState, visibleBot);
-}
-
-function decideBot(state: RoomState, bot: PlayerState): BotAction {
-  const opponents = botOpponentViews(state, bot);
-  const opponentCount = Math.max(1, opponents.length);
-  const basePersonality = botPersonality(bot);
-  const pressure = tablePressure(state, opponents);
-  const cost = callCost(state, bot);
-  const costFraction = cost / Math.max(1, bot.chips);
-  const effectiveStack = Math.max(1, Math.min(bot.chips, ...opponents.map((p) => p.chips)));
-  const stackToPot = effectiveStack / Math.max(1, state.pot);
-  const activeCount = opponents.length + 1;
-  const position = activeCount <= 2 ? 1 : (state.turnCount % activeCount) / (activeCount - 1);
-  const personality = adaptPersonality(
-    basePersonality, state, bot, opponents, pressure, position, costFraction,
-  );
-  const act = (cmd: GameCommand, hardness: number): BotAction =>
-    ({ cmd, thinkMs: thinkTime(state, bot, cmd, hardness, personality) });
-
-  // 有人梭哈时只有两条路：接或者弃。先看牌，再按赔率决定。
-  if (state.allIn) {
-    if (!bot.looked) return act({ type: 'look' }, 0);
-    // 上一步已经保证看过牌了，所以这里的价一定是双倍那一档 —— 别拿发起人的实付当自己的价。
-    // 刚才那一下看牌可能把价顶过了身家，接受时服务端会夹到全部筹码，赔率也按这个实付算。
-    if (bot.chips <= 0) return act({ type: 'fold' }, 0);
-    const price = Math.min(state.allIn.base * 2, bot.chips);
-    const showdownOpponents = Math.max(1, state.allIn.accepted.filter((id) => id !== bot.id).length);
-    const strength = handPercentile(bot.hand);
-    const equity = showdownEquity(strength, showdownOpponents);
-    const potOdds = price / Math.max(1, state.pot + price);
-    const riskTax = (1 - personality.riskTolerance) * 0.055 + pressure * 0.035;
-    const temperament = (personality.looseness - 0.5) * 0.045;
-    // 接一个全场开牌的注是整局最重的一步，越接近临界越该想久一点。
-    const margin = equity + temperament - (potOdds + riskTax);
-    // 底线难度 0.3：哪怕账算得很清楚，这一下也不该秒答。
-    const hardness = Math.max(0.3, hardnessFromMargin(margin));
-    return act(margin >= 0 ? { type: 'call' } : { type: 'fold' }, hardness);
-  }
-
-  // 闷牌便宜且能隐藏信息，但注码、对手压力或轮次升高时，理性的玩家会先看牌再决定。
-  if (!bot.looked) {
-    const informationNeed = clamp01(
-      0.18 + personality.patience * 0.48 + pressure * 0.34 + costFraction * 2.2 + (state.roundNo - 1) * 0.25,
-    );
-    if (state.roundNo >= 2 || costFraction >= 0.045 || botRoll(state, bot, 'look') < informationNeed) {
-      return act({ type: 'look' }, 0);
-    }
-  }
-
-  // 看了牌用真实分位；闷着的时候只有先验，不能假装自己拿了一手正中间的牌。
-  const strength = bot.looked ? handPercentile(bot.hand) : 0.5;
-  const equity = bot.looked ? winEquity(strength, opponentCount) : blindEquity(opponentCount);
-  const potOdds = cost / Math.max(1, state.pot + cost);
-  /**
-   * 要多少胜率才值得跟。
-   *
-   * looseness 这一项**必须给足权重**，否则每台电脑都被赔率算式压成同一个人：
-   * 实测六台不同人格的机器人打五百局，攻击性、遇压弃牌率、摊牌牌力三项全部
-   * 一模一样，桌上根本分不出谁是谁。真人牌桌最明显的差别就是松紧 —— 有人什么
-   * 牌都想看看，有人一晚上只打三把 —— 所以这里按 ±0.08 的幅度拉开，
-   * 大到足以盖过边缘局面的胜率差，又不至于让人拿着烂牌去追大注。
-   */
-  const requiredEquity = clamp01(
-    potOdds
-      + pressure * 0.075
-      + costFraction * (1 - personality.riskTolerance) * 0.10
-      - 0.025
-      - (personality.looseness - 0.5) * 0.16
-      - position * 0.022,
-  );
-  // 诈唬要**挑人**，不是掷骰子：桌上站着一个说什么都要跟的人，这个池子就偷不动。
-  // 反过来，一桌都是一加就跑的人，连老实型也会开始伸手 —— 真人就是这么打的。
-  const steal = foldEquity(opponents);
-  /**
-   * 闷牌加注 —— 炸金花里最常见、也最便宜的一记虚张声势。
-   *
-   * 闷着只付一半价，位置又好、场上还没人发力的时候，真人几乎人人都会来这么一手：
-   * 它赌的**不是当场把所有人吓跑**，而是「没人知道我手里是什么」这件事本身值钱，
-   * 顺带把自己塑造成一上来就打的人，后面拿真牌才有人跟。
-   * 所以这一档不受偷池概率约束，只要便宜、有位置、场面没炸就行。
-   */
-  const blindRaise = !bot.looked
-    && position >= 0.4
-    && pressure < 0.34
-    && costFraction < 0.05
-    && botRoll(state, bot, 'blind-raise')
-      < personality.bluffRate * 1.6 + personality.deception * 0.10;
-  /** 看了牌还拿烂牌去加注，那就是真的在偷池子，得先确认这一桌偷得动。 */
-  const stealBluff = bot.looked
-    && position >= 0.5
-    && pressure < 0.34
-    && stackToPot >= 3
-    /**
-     * 只看「偷得动的概率」，不再另外写一条人数上限。
-     *
-     * steal 本身就是所有对手一起弃牌的概率，人越多它自己就掉得越快
-     * （常人一家 0.53，两家 0.28，三家 0.15，四家 0.08），拿它当唯一的闸门，
-     * 「人多不偷、人少常偷」是算出来的结果而不是硬写的规则。
-     * 门槛取 0.14：底池通常有单注的好几倍，一成半的成功率就已经回本，
-     * 何况偷不成手里还有牌。之前那条 opponentCount <= 2 才是真正的死结 ——
-     * 六人桌上几乎凑不齐这个条件，实测上千次加注一次诈唬都没有。
-     */
-    && steal >= 0.14
-    && strength < 0.40
-    && botRoll(state, bot, 'bluff-raise') < personality.bluffRate * (0.5 + steal * 1.4);
-  const plannedBluff = blindRaise || stealBluff;
-
-  if (bot.chips <= cost) {
-    // 跟不起了：用真实梭哈价重算底池赔率，不能只因已经投过钱就追注。
-    const shove = allInCost(state, bot);
-    const shoveOdds = shove / Math.max(1, state.pot + shove);
-    const edge = equity + (personality.looseness - 0.5) * 0.05 - (1 - personality.riskTolerance) * 0.035;
-    const margin = edge - shoveOdds;
-    return act(margin >= 0 ? { type: 'all_in' } : { type: 'fold' }, Math.max(0.25, hardnessFromMargin(margin)));
-  }
-
-  // 牌力、赔率、位置和压力共同决定弃牌；性格只影响边缘局面，不会让弱牌无脑追高注。
-  const decisionNoise = (botRoll(state, bot, 'continue') - 0.5) * 0.035;
-  // 这个差值就是整局最有信息量的一个数：贴着零的时候，人会真的坐在那里算。
-  const callMargin = equity + decisionNoise - requiredEquity;
-  const marginHardness = hardnessFromMargin(callMargin);
-  if (callMargin < 0 && !plannedBluff) return act({ type: 'fold' }, marginHardness);
-
-  // 有虚有实：强牌在前位或已有对手施压时，偶尔只跟一手设陷阱。
-  // 这个模式不对外显示，否则“陷阱”本身就失去意义；下一轮会重新按新局面判断。
-  //
-  // 原来这里还要求 pressure >= 0.16。开局没人动作时 pressure 只有 0.09，
-  // 门槛永远够不到，等于整个慢打模式在最该用它的前两轮是死代码。
-  const slowPlay = bot.looked
-    && strength >= 0.84
-    && stackToPot >= 1.35
-    && botRoll(state, bot, 'slow-play')
-      < personality.deception * (0.22 + pressure * 0.34 + (1 - position) * 0.10);
-
-  /**
-   * 强牌什么时候才该兑现。
-   *
-   * 比牌是把强牌**立刻变现**：只赢到眼下这点底池，还等于把自己的牌力公开。
-   * 人不会拿着豹子在第一个能比牌的回合就点开 —— 那是把一手好牌卖成白菜价。
-   * 老代码只要 canCompareNow 一放行就出手，于是绝大多数大牌都在比牌刚解锁的
-   * 那一回合开牌，桌上看到的就是「电脑一拿豹子就秒开」。
-   *
-   * 现在要三件事同时成立才动手：
-   *  1. **再等一圈**。解锁之后还得让所有人再走一轮，给底池长起来的时间；
-   *  2. **底池值得动手** —— 至少是这一刀成本的 8 倍，否则赢下来也不够本；
-   *  3. 或者局面本身已经不需要养池了：只剩一个对手、打到后段、对面在猛攻。
-   */
-  // 用开局人数当一圈的长度：拿 activeCount 会随着别人弃牌一起缩水，
-  // 「再等一圈」就变成了「再等两三手」，大牌照样在解锁那一轮就开出去。
-  const patientTurn = state.turnCount >= state.compareUnlockAt * 2;
-  const potWorthTaking = state.pot >= compareCost(state, bot) * 8;
-  const readyToCashOut = opponentCount === 1
-    || state.roundNo >= 4
-    || pressure >= 0.55
-    || (patientTurn && potWorthTaking);
-
-  // 越强的牌越沉得住气，而且这份耐心跟着人格走 —— 老实型早点收网，
-  // 狡诈型能一直忍到后段，这样同一手豹子在不同电脑手里打出来不是一个样子。
-  // 人多的时候，第 3 轮之前拿着这一档的牌一律不比 —— 这是硬下限，
-  // 之后才交给人格去决定还能再忍多久。对面真打起来了（pressure 高）另说。
-  // 门槛压到 0.75 —— 那正好是顺金那一档的下沿。写 0.86 只盖得住豹子，
-  // 顺金（0.75~0.87）整档漏在外面，实测三千局里还有 4.5% 的大牌在前两轮就开牌，
-  // 而在牌桌上顺金和豹子一样是要养池的牌，没人拿着它急着变现。
-  const holdingBackMonster = strength >= 0.75
-    && opponentCount >= 2
-    // 只有对面已经打到梭哈那个量级才值得放弃养池直接开牌；普通的一次加注，
-    // 手里有豹子的人该做的是反加，不是把牌亮出来收下这点池子。
-    && pressure < 0.72
-    && (
-      state.roundNo < 3
-      || (state.roundNo < 5 && botRoll(state, bot, 'monster-patience') < 0.45 + personality.deception * 0.40)
-    );
-
-  // 极强牌在低 SPR 或后段主动收口；极少数老练型机器人会在单挑低压力局面诈唬梭哈。
-  if (!slowPlay && canAllInNow(state) && bot.looked) {
-    const shove = allInCost(state, bot);
-    const shoveOdds = shove / Math.max(1, state.pot + shove);
-    const valueShove = strength >= 0.88
-      && equity >= shoveOdds + 0.08
-      && (stackToPot <= 2.6 || state.roundNo >= 5)
-      && botRoll(state, bot, 'value-shove') < 0.22 + personality.aggression * 0.45;
-    const bluffShove = opponentCount === 1
-      && strength < 0.42
-      && pressure < 0.28
-      && stackToPot >= 3
-      // 单挑梭哈诈唬是最贵的一招，只有对面确实吓得走才做
-      && steal >= 0.45
-      && botRoll(state, bot, 'bluff-shove') < personality.bluffRate * 0.22;
-    // 价值梭哈是想好的，诈唬梭哈是硬着头皮上的 —— 后者该慢一点。
-    if (valueShove || bluffShove) return act({ type: 'all_in' }, bluffShove && !valueShove ? 0.8 : 0.45);
-  }
-
-  // 牌很好且开放比牌时，优先挑战公开表现最有威胁、投入最多的人。
-  if (
-    !slowPlay && !holdingBackMonster && readyToCashOut &&
-    canCompareNow(state) && opponents.length > 0 && bot.looked &&
-    bot.chips > compareCost(state, bot) &&
-    strength >= (opponentCount === 1 ? 0.62 : 0.74) &&
-    equity >= compareCost(state, bot) / Math.max(1, state.pot + compareCost(state, bot)) + 0.07 &&
-    botRoll(state, bot, 'compare') < 0.18 + personality.aggression * 0.42
-  ) {
-    const target = compareTarget(state, bot, opponents);
-    // 挑谁比牌是要在几个人之间权衡的，这一步本来就慢
-    if (target) return act({ type: 'compare', targetId: target.id }, 0.55);
-  }
-
-  // 价值加注会按牌力、底池和有效筹码选择 2万/5万/10万，而不是永远只点下一档。
-  const multiplier = bot.looked ? 2 : 1;
-  const affordable = state.settings.betOptions.filter(
-    (unit) => unit > state.betUnit && bot.chips > unit * multiplier,
-  );
-  if (affordable.length) {
-    const valueEdge = equity - requiredEquity;
-    // 强牌被「先别比牌」拦下来之后必须有出口，否则它只会平跟，池永远养不大。
-    // 手多硬才值得加注，这条线**跟着性格走**：凶的人拿一副顺子就敢加，
-    // 稳的人非金花不动手。写死一个 0.66 的话，六台电脑的加注频率会齐刷刷
-    // 落在同一档，桌上就看不出谁凶谁稳了。
-    const raiseFloor = 0.78 - personality.aggression * 0.20;
-    const wantValue = !slowPlay && bot.looked
-      && strength >= raiseFloor
-      && valueEdge >= -0.015
-      && botRoll(state, bot, 'value-raise')
-        < 0.18 + personality.aggression * 0.55 + Math.max(0, valueEdge) + (holdingBackMonster ? 0.30 : 0);
-    const bluffSpot = plannedBluff;
-
-    if (wantValue || bluffSpot) {
-      if (bluffSpot && !wantValue) return act({ type: 'raise', unit: affordable[0] }, 0.7);
-      const stackFraction = strength >= 0.95 ? 0.46 : strength >= 0.87 ? 0.29 : strength >= 0.74 ? 0.18 : 0.11;
-      const targetCost = Math.min(
-        bot.chips * 0.66,
-        Math.max(state.pot * (0.70 + personality.aggression * 0.75), effectiveStack * stackFraction),
-      );
-      const sized = affordable.filter((unit) => unit * multiplier <= targetCost);
-      const unit = sized.length ? sized[sized.length - 1] : affordable[0];
-      // 加多少是个选择题，但方向是笃定的
-      return act({ type: 'raise', unit }, 0.4);
-    }
-  }
-
-  // 闷着跟个底注是不用想的；看过牌之后的边缘跟注才是要掂量的那一种。
-  return act({ type: 'call' }, bot.looked ? marginHardness * 0.8 : 0.05);
-}
-
-/** 小的确定性哈希 → [0,1)，用来给机器人一个稳定的"手气性格" */
-function pseudoRandom(seed: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return ((h >>> 0) % 100000) / 100000;
-}
-
 /* --------------------------------------------------------------- 视图 */
 
 export type PublicPlayer = Omit<PlayerState, 'tokenHash' | 'hand'> & { hand: Card[]; hasHand: boolean };
@@ -2137,10 +2131,19 @@ export function sanitizeRoom(state: RoomState, viewerId: string): PublicRoom {
   const privateIds = new Set(state.seen?.[viewerId] ?? []);
   const visible = (id: string) => publicIds.has(id) || privateIds.has(id);
 
-  // 结算面板同样按观看者裁剪：比牌双方能看到彼此，旁观者只看到公开摊牌的部分
+  /*
+   * 结算面板同样按观看者裁剪：比牌双方能看到彼此，旁观者只看到公开摊牌的部分。
+   * 唯一的加法是**自己那一张**：一局无论怎么结束（别人全弃、比牌、梭哈、摊牌、平局），
+   * 闷着打完的人都该知道自己刚才拿的是什么 —— 那是他自己的牌，从来不是别人的信息。
+   * 只加进这一份给他本人的视图里，`state.result.revealed` 一个字都不改，
+   * 所以别人的载荷里既看不到他的牌，也不会因此多看到任何人的牌。
+   */
   let result = state.result;
   if (result) {
-    const shown = state.players.filter((p) => p.hand.length === 3 && visible(p.id)).map((p) => p.id);
+    const mine = (id: string) => id === viewerId;
+    const shown = state.players
+      .filter((p) => p.hand.length === 3 && (visible(p.id) || mine(p.id)))
+      .map((p) => p.id);
     result = {
       ...result,
       revealed: shown,
@@ -2151,8 +2154,8 @@ export function sanitizeRoom(state: RoomState, viewerId: string): PublicRoom {
   }
 
   // seen 是服务端的记账，没必要下发（它能透露谁和谁比过牌）；
-  // reads 是喂给电脑玩家的打法统计，真人自己看桌子就好，不必多下发一份表。
-  const { seen: _seen, reads: _reads, ...rest } = state;
+  // reads / memory 是喂给电脑玩家的打法统计，真人自己看桌子就好，不必多下发一份表。
+  const { seen: _seen, reads: _reads, memory: _memory, ...rest } = state;
   return {
     ...rest,
     result,
@@ -2166,7 +2169,9 @@ export function sanitizeRoom(state: RoomState, viewerId: string): PublicRoom {
       // 比赢了就白拿一手信息、还继续按半价跟，等于绕开了看牌翻倍那道门槛。
       // 这只放开「自己看自己」；旁观者仍然只走 publicIds/privateIds，中途不会提前泄露。
       const beatenOut = p.bared && p.status === 'folded';
-      const show = (p.id === viewerId && (p.looked || beatenOut)) || visible(p.id);
+      // 局已经结束了，闷牌那道门槛（看不见换半价）也就到期了：把自己那手交还给他
+      const settled = state.phase === 'round_end';
+      const show = (p.id === viewerId && (p.looked || beatenOut || settled)) || visible(p.id);
       return { ...safe, hand: show ? hand.map((c) => ({ ...c })) : [], hasHand: hand.length === 3 };
     }),
   };

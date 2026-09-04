@@ -18,6 +18,7 @@ import {
   timeoutCurrentPlayer, transferHost,
   type GameCommand, type RoomState,
 } from './game.ts';
+import type { BotTrace } from './zjh/bot/trace.ts';
 import type { AnyGameCommand, AnyPublicRoom, GameEvent } from './protocol.ts';
 import {
   applySjCommand, createSjPlayer, createSjRoom, deriveSjEvents, migrateSjRoom, sanitizeSjRoom,
@@ -92,7 +93,16 @@ export interface SeatSeed {
   wins: number;
 }
 
-export interface EngineOpts extends SjEngineOpts {}
+export interface EngineOpts extends SjEngineOpts {
+  /**
+   * 炸金花：这一步的行动者实际花掉的毫秒数（设计文档 §4.8）。
+   *
+   * 机器人由 Hub 传 `BotMove.delay`（就是 `BotAction.thinkMs`，服务端正是按它
+   * 排的延迟）；真人不传，引擎按 `turnDeadline` 回推。落进事件流之后，
+   * `cognition.readsTiming` 的人物卡才读得到 S17 那条弱信号。
+   */
+  spentMs?: number;
+}
 
 /** 一次机器人（或掉线代打）的决定 */
 export interface BotMove {
@@ -100,6 +110,11 @@ export interface BotMove {
   cmd: AnyGameCommand;
   /** 思考时长（毫秒），让机器人别像机器一样瞬发 */
   delay: number;
+  /**
+   * 炸金花：这一步的决策留痕（§4.11.1），由 Hub 落库供事后分析。
+   * 纯旁路 —— 没有它牌局照样打，升级那一侧根本不产生它。
+   */
+  record?: BotTrace;
 }
 
 /**
@@ -137,6 +152,17 @@ const asS = (s: AnyRoomState) => s as SjRoomState;
  */
 function zjhBotDelay(thinkMs: number): number {
   return Math.max(220, Math.round(thinkMs * (0.9 + Math.random() * 0.2)));
+}
+
+/**
+ * 非回合动作的延迟（§4.6）。
+ *
+ * 这一步不是「思考」——散牌看一眼就知道该退，加档的那一下也不用算 ——
+ * 而是**注意到 + 伸手**的时间。所以它和回合内的思考时长无关，是一段固定的短窗口，
+ * 300–900ms：短到还在「他刚才那一下的反应」里，长过 1 秒就变成慢半拍的机器了。
+ */
+export function zjhOffTurnDelay(rng: () => number = Math.random): number {
+  return 300 + Math.floor(rng() * 600);
 }
 
 /**
@@ -232,7 +258,7 @@ function zjhEngine(): GameEngine {
       s.log.push({ seq: s.actionSeq, at: Date.now(), text: `${player.name} 加入房间${suffix}` });
       return player.id;
     },
-    apply: (state, actorId, cmd) => applyCommand(asZ(state), actorId, cmd as GameCommand),
+    apply: (state, actorId, cmd, opts) => applyCommand(asZ(state), actorId, cmd as GameCommand, opts?.spentMs),
     sanitize: (state, viewerId) => sanitizeRoom(asZ(state), viewerId),
     migrate: (state) => migrateRoom(asZ(state)),
     deriveEvents: (before, after, actorId, cmd) =>
@@ -244,13 +270,14 @@ function zjhEngine(): GameEngine {
       if (!cur?.isBot) return null;
       let cmd: GameCommand;
       let thinkMs: number;
+      let record: BotTrace | undefined;
       try {
-        ({ cmd, thinkMs } = botAction(s, cur));
+        ({ cmd, thinkMs, record } = botAction(s, cur));
       } catch {
         cmd = { type: 'fold' };
         thinkMs = 500;
       }
-      return { actorId: cur.id, cmd, delay: zjhBotDelay(thinkMs) };
+      return { actorId: cur.id, cmd, delay: zjhBotDelay(thinkMs), record };
     },
     timeout: (state) => timeoutCurrentPlayer(asZ(state)),
     transferHost: (state, departingId) => transferHost(asZ(state), departingId),

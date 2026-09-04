@@ -118,8 +118,11 @@ server.tool(
     name: z.string().optional().describe('昵称，1–10 字'),
     avatar: z.string().optional().describe(`头像 emoji，可选：${AVATARS.join(' ')}`),
     create: z.boolean().optional().describe('true 表示新开一桌而不是加入'),
+    deal_mode: z.enum(['standard', 'party']).optional().describe(
+      '建房时的发牌档：standard = 标准（大牌约 26%，真实牌局的三倍多，牌型还认得出轻重）；party = 娱乐增强（大牌约 54%，六人桌几乎每两局就撞一次大牌）。默认 standard。仅建房时生效，加入别人的房间时忽略。',
+    ),
   },
-  async ({ url, code, name, avatar, create }) => {
+  async ({ url, code, name, avatar, create, deal_mode }) => {
     try {
       client?.close();
       target = parseTarget(url);
@@ -139,6 +142,8 @@ server.tool(
         });
       } else if (create || !roomCode) {
         await client.createRoom(nick, face, true, acc);
+        // 建好房就是房主。走的是三个入口共用的那个 settings 处理，房间日志里会留痕。
+        if (deal_mode && deal_mode !== 'standard') client.cmd({ type: 'settings', dealMode: deal_mode });
       } else {
         await client.joinRoom(roomCode, nick, face, true, acc);
       }
@@ -189,7 +194,9 @@ server.tool(
 
 server.tool(
   'zjh_act',
-  '在牌局中行动。look 看牌和 fold 弃牌任何时候都能做；其余要轮到你。有人梭哈时只有 accept 和 fold 两个选择。',
+  '在牌局中行动。look 看牌和 fold 弃牌任何时候都能做；其余要轮到你。有人梭哈时只有 accept 和 fold 两个选择。'
+  + 'all_in 是**全押**：把自己全部筹码推出去，其他人按各自倍率（闷牌一份、看牌两份）选接或弃，掏不动就全押接、按边池结算。'
+  + '筹码不够跟注的人没有 all_in，他的选项是 call（会被夹成全押跟）、compare（全押比牌）或 fold。',
   {
     action: z.enum(['look', 'call', 'accept', 'raise', 'fold', 'all_in', 'compare']),
     unit: z.number().optional().describe('raise 时的加注档位，取 legalActions 里给的 unit'),
@@ -207,7 +214,7 @@ server.tool(
         case 'accept':
           return await act({ type: 'call' }, action === 'accept' ? '接受梭哈' : '跟注');
         case 'all_in':
-          return await act({ type: 'all_in' }, '梭哈');
+          return await act({ type: 'all_in' }, '梭哈（全押）');
         case 'raise': {
           const tiers = legalActions(c.room!).filter((a) => a.action === 'raise');
           const pick = unit ?? tiers[0]?.unit;
@@ -234,10 +241,13 @@ server.tool(
     target_seat: z.number().optional().describe('kick 时的座位号'),
     turn_seconds: z.number().optional().describe('settings：每步行动时限，AI 桌建议 60–90'),
     max_rounds: z.number().optional().describe('settings：封顶轮数'),
-    all_in_from_round: z.number().optional().describe('settings：第几轮起可主动梭哈'),
+    all_in_from_round: z.number().optional().describe('settings：第几轮起可梭哈（梭哈＝推光全部筹码；筹码不够跟注的人没有梭哈，只能全押跟/全押比牌/弃牌）'),
     auto_continue: z.boolean().optional().describe('settings：本局结束后自动开下一局'),
+    deal_mode: z.enum(['standard', 'party']).optional().describe(
+      'settings：发牌档，房主专属，下一局生效。standard = 标准（大牌约 26%，真实牌局的三倍多，牌型还认得出轻重）；party = 娱乐增强（大牌约 54%，六人桌几乎每两局就撞一次大牌）',
+    ),
   },
-  async ({ action, target_seat, turn_seconds, max_rounds, all_in_from_round, auto_continue }) => {
+  async ({ action, target_seat, turn_seconds, max_rounds, all_in_from_round, auto_continue, deal_mode }) => {
     try {
       const c = need();
       switch (action) {
@@ -266,6 +276,7 @@ server.tool(
               maxRounds: max_rounds,
               allInFromRound: all_in_from_round,
               autoContinue: auto_continue,
+              dealMode: deal_mode,
             },
             '调整房规',
           );

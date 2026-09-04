@@ -19,11 +19,15 @@ const HOST = process.env.HOST ?? '0.0.0.0';
 // 也不依赖启动时的工作目录。生产环境用 ZJH_DB 指到独立的数据目录。
 const DB_PATH = process.env.ZJH_DB ?? join(HERE, '..', 'zjh.db');
 const CLIENT_DIR = process.env.ZJH_CLIENT ?? join(HERE, 'client');
+// 决策留痕的归档目录（§4.11.2）。默认跟数据库放一块，超期的行归档成 JSONL 再删。
+const TRACE_ARCHIVE_DIR = process.env.ZJH_TRACE_ARCHIVE ?? join(dirname(resolve(DB_PATH)), 'trace-archive');
 /** 在 nginx / Caddy 后面时才信任 X-Forwarded-For */
 const TRUST_PROXY = process.env.ZJH_TRUST_PROXY === '1';
 
 const store = new Store(DB_PATH);
 const hub = new Hub(store);
+// 保留 30 天：启动时扫一次，之后每天一次；扫不动只打日志（§4.11.2）
+hub.trace.startRetention(TRACE_ARCHIVE_DIR);
 
 /* ------------------------------------------------------- 静态资源（全内存） */
 
@@ -281,6 +285,9 @@ function shutdown() {
   // 快照是防抖写的，正常关机时可能还有几秒钟的操作压在定时器里没落盘。
   // 上线重启是家常便饭，绝不能每次都把最后那几步吞掉 —— 先逼着全部写完再走。
   hub.flush();
+  // 留痕是攒着批量写的，关机前把队列里那几行写完再走
+  hub.trace.stop();
+  hub.trace.flush();
   wss.close();
   server.close(() => {
     store.close();

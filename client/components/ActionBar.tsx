@@ -33,15 +33,28 @@ export function ActionBar({
   const comparePrice = cost * 2;
   const active = room.players.filter((p) => p.status === 'active');
   const compareOpen = canCompareNow(room);
-  const canCall = me.chips > cost;
-  // 梭哈也走「闷牌一份、看牌两份」：这里是**我**发起要掏的数。
-  // 单价上限由场上最短的一家决定（按各自倍率折算），所以人人都掏得起自己那份。
+  /*
+   * 钱不够**不是**「只能弃牌」。名义价钱高过身家时，引擎会把这一口夹到全部筹码
+   * 打出去（「全押跟」，见 shared/game.ts 的 `pay`），所以按钮照样能点，
+   * 只是文案要老实写成「全押 X」—— 按下去会推光，这件事必须写在按钮上。
+   */
+  const canCall = me.chips > 0;
+  const callPrice = Math.min(cost, me.chips);
+  const callShove = callPrice < cost;
+  const canCompare = me.chips > 0;
+  const comparePay = Math.min(comparePrice, me.chips);
+  const compareShove = comparePay < comparePrice;
+  // 梭哈 = 全押：我要掏的就是我的全部筹码，和别人有多少钱无关。
   const shovePrice = calcAllIn(room, me);
   const shoveOpen = canAllInNow(room);
-  const shoveForced = me.chips <= cost; // 跟不起时随时可以梭哈脱身
-  const canShove = me.chips > 0 && active.length > 1 && (shoveOpen || shoveForced);
+  /*
+   * 梭哈永远不比跟注便宜 —— 跟不起的人**没有**梭哈，他的按钮是上面那个「全押跟」。
+   * 和引擎 doAllIn 同一条门槛，免得摆一个点下去只会报错的按钮。
+   */
+  const canShove = me.chips > cost && active.length > 1 && shoveOpen;
   const handType = me.looked && me.hand.length === 3 ? evaluateHand(me.hand).name : null;
-  const shoveBase = calcAllInBase(room);
+  // 我梭哈之后别人要按的闷牌单价 = 我的身家换算回闷牌口径（看牌的我只算一半）
+  const shoveBase = calcAllInBase(room, me);
   const shove = room.allIn;
   /**
    * 表态阶段我自己要掏的数。看牌是自由动作、不占行动权，所以在这里点一下看牌，
@@ -49,12 +62,14 @@ export function ActionBar({
    * 和服务端 doCall 的算法逐字一致，不会出现「按钮显示能接、点了说钱不够」。
    */
   const acceptPrice = shove ? Math.min(shove.base * (me.looked ? 2 : 1), me.chips) : 0;
+  const acceptShove = shove ? acceptPrice < shove.base * (me.looked ? 2 : 1) : false;
   // 兜底：万一房间是老快照，别把 undefined 显示出来
   const allInFrom = room.settings.allInFromRound ?? 3;
 
   const tiers = room.settings.betOptions.filter((x) => x > room.betUnit);
   /**
-   * 自动跟注（挂机）。跟不起时自动改成梭哈，正好是「钱没了自动梭哈比牌」。
+   * 自动跟注（挂机）。跟不起时照发 call —— 引擎的 `pay` 会夹到全部筹码，也就是全押跟，
+   * 结算走边池。（不是梭哈：梭哈现在是全押，而且不能比跟注便宜，短码根本没有这个动作。）
    * 有人梭哈时会自动关掉交还给人 —— 接不接一个全场开牌的注，不该由一个勾选框替你决定。
    */
   const [autoCall, setAutoCall] = useState(false);
@@ -70,8 +85,7 @@ export function ActionBar({
     if (firedRef.current === token) return;
     firedRef.current = token;
     const t = setTimeout(() => {
-      if (me.chips > cost) cmd({ type: 'call' });
-      else if (me.chips > 0) cmd({ type: 'all_in' });
+      if (me.chips > 0) cmd({ type: 'call' });
       else cmd({ type: 'fold' });
     }, 450);
     return () => clearTimeout(t);
@@ -88,6 +102,8 @@ export function ActionBar({
   useEffect(() => setArmFold(false), [room.handNo, myTurn]);
 
   if (room.phase === 'lobby') {
+    // 发牌档只在准备阶段能改（引擎那边牌局进行中一律拒 settings），所以开关就放在这里。
+    const party = room.settings.dealMode === 'party';
     const seated = room.players.length;
     const readyCount = room.players.filter((p) => p.isBot || p.ready).length;
     return (
@@ -127,6 +143,16 @@ export function ActionBar({
           )}
           {isHost && (
             <button
+              className={`btn ${party ? 'primary' : 'ghost'}`}
+              title="娱乐增强：大牌更多、碰撞更多（大牌约 54%，默认档约 26%）"
+              aria-pressed={party}
+              onClick={() => cmd({ type: 'settings', dealMode: party ? 'standard' : 'party' })}
+            >
+              娱乐增强 {party ? '开' : '关'}
+            </button>
+          )}
+          {isHost && (
+            <button
               className="btn primary go"
               disabled={readyCount < 2}
               onClick={() => cmd({ type: 'start' })}
@@ -135,6 +161,9 @@ export function ActionBar({
             </button>
           )}
         </div>
+        {isHost && (
+          <p className="bar-hint">娱乐增强：大牌更多、碰撞更多（大牌约 54%，默认档约 26%）</p>
+        )}
         {canAutoStart(room) && (
           <p className="bar-hint">
             所有人都准备好了，{autoIn > 0 ? `${autoIn} 秒后自动开局` : '马上自动开局'}
@@ -179,8 +208,9 @@ export function ActionBar({
           第 {room.handNo} 局 · 第 {room.roundNo}
           {room.settings.maxRounds > 0 ? `/${room.settings.maxRounds}` : ''} 轮 · 底注 {fmt(room.betUnit)}
           {compareOpen ? ' · 可比牌' : ' · 首轮中'}
-          {/* 梭哈还没开放时把门槛写出来，省得有人一直找那个按钮 */}
-          {!shoveOpen && ` · 第 ${allInFrom} 轮起可梭哈`}
+          {/* 梭哈还没开放时把门槛写出来，省得有人一直找那个按钮。
+              解锁只看轮次 —— 没有「有人跟不起就提前放开」这回事了。 */}
+          {!shoveOpen && ` · 第 ${allInFrom} 轮起可梭哈（全押）`}
         </span>
       </div>
 
@@ -204,8 +234,8 @@ export function ActionBar({
             }
             onClick={() => cmd({ type: 'call' })}
           >
-            接受梭哈 {fmt(acceptPrice)}
-            {!me.looked && <small className="hint-half"> 闷牌半价</small>}
+            {acceptShove ? '全押接下' : '接受梭哈'} {fmt(acceptPrice)}
+            {!me.looked && !acceptShove && <small className="hint-half"> 闷牌半价</small>}
           </button>
           {/* 弃牌不占行动权：别人梭哈、还没轮到我表态的时候，我照样可以直接走人。
               这里原来跟着 myTurn 一起禁用，等于把「随时可以放弃」这条规则在界面上
@@ -247,8 +277,13 @@ export function ActionBar({
           >
             {armFold ? '再点一次确认' : '弃牌'}
           </button>
-          <button className="btn primary call" disabled={!myTurn || !canCall} onClick={() => cmd({ type: 'call' })}>
-            跟注 {fmt(cost)}
+          <button
+            className="btn primary call"
+            disabled={!myTurn || !canCall}
+            title={callShove ? `台面要 ${fmt(cost)}，你只剩 ${fmt(callPrice)} —— 点下去会全部推出去` : undefined}
+            onClick={() => cmd({ type: 'call' })}
+          >
+            {callShove ? '全押' : '跟注'} {fmt(callPrice)}
           </button>
           {tiers.map((x) => (
             <button
@@ -267,12 +302,12 @@ export function ActionBar({
               className="btn allin"
               disabled={!myTurn}
               title={
-                `你先出 ${fmt(shovePrice)}：闷牌一份 ${fmt(shoveBase)}、看牌两份 ${fmt(shoveBase * 2)}` +
-                `，单价上限由场上最短的一家决定。其他人按各自的倍率选接或弃`
+                `全押：你把全部 ${fmt(shovePrice)} 推出去。其他人按各自的倍率接 ——` +
+                `闷牌一份 ${fmt(shoveBase)}、看牌两份 ${fmt(shoveBase * 2)}，掏不动就全押接`
               }
               onClick={() => cmd({ type: 'all_in' })}
             >
-              梭哈 {fmt(shovePrice)}
+              梭哈（全押 {fmt(shovePrice)}，其他人可以接或弃）
             </button>
           )}
         </div>
@@ -283,14 +318,14 @@ export function ActionBar({
         <div className="compare-row">
           {myTurn && compareOpen && active.length > 1 ? (
             <>
-              <span>比牌 {fmt(comparePrice)}：</span>
+              <span>{compareShove ? '全押比牌' : '比牌'} {fmt(comparePay)}：</span>
               {active
                 .filter((p) => p.id !== me.id)
                 .map((p) => (
                   <button
                     key={p.id}
                     className="btn tiny"
-                    disabled={me.chips < comparePrice}
+                    disabled={!canCompare}
                     onClick={() => cmd({ type: 'compare', targetId: p.id })}
                   >
                     {p.avatar} {p.name}
@@ -298,7 +333,7 @@ export function ActionBar({
                 ))}
             </>
           ) : (
-            <span>{compareOpen ? `比牌 ${fmt(comparePrice)} · 轮到你时可选对手` : '首轮走完后开放比牌'}</span>
+            <span>{compareOpen ? `比牌 ${fmt(comparePay)} · 轮到你时可选对手` : '首轮走完后开放比牌'}</span>
           )}
           <button
             className={`btn tiny auto${autoCall ? ' on' : ''}`}

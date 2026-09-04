@@ -46,6 +46,12 @@ ${C.bold}选项${C.reset}
   --code <房间号>    6 位房间号
   --create           创建新房间
   --fresh            忽略本地存档，以新身份入座
+  --party            建房时直接开「娱乐增强」发牌
+
+${C.bold}发牌档${C.reset}
+  标准（默认）  大牌（顺子以上）约 26%，已经是真实牌局的三倍多，牌型还认得出轻重
+  娱乐增强      大牌约 54%，六人桌几乎每两局就撞一次大牌，图的是碰撞，不是牌理
+  ${C.dim}房主随时可以在房里改：${C.reset}${C.gold}:set deal=party${C.reset}${C.dim} / ${C.reset}${C.gold}:set deal=standard${C.reset}${C.dim}，下一局生效${C.reset}
 `);
   process.exit(entry ? 0 : 1);
 }
@@ -340,7 +346,11 @@ const raiseTiers = () => (client.room ? legalActions(client.room).filter((a) => 
 
 /**
  * 挂机跟注。语义和网页版（client/components/ActionBar.tsx）完全一致：
- * 轮到自己就跟，跟不起就梭哈脱身，一分没有就弃牌 —— 「钱没了自动梭哈比牌」。
+ * 轮到自己就跟，跟不起就**把剩下的全押出去跟**，一分没有就弃牌。
+ *
+ * 这里以前是「跟不起就梭哈脱身」。梭哈改成全押、并且不再比跟注便宜之后，
+ * 钱不够跟注的人根本没有梭哈这个动作，引擎会直接拒；他要的那一口本来就是
+ * 「全押跟」——`call` 会被 `pay` 夹到全部筹码，结果一模一样，还不用逼全桌表态。
  *
  * 有人梭哈时**自动关掉、把决定交还给人**：接不接一个全场开牌的注，
  * 不该由一个开关替你决定。开关本身跨局保持，直到手动关或者被上面这条关掉。
@@ -386,8 +396,9 @@ function autoAct() {
     send({ type: 'call' });
     say(`${C.dim}自动跟注 ${fmt(cost)}${C.reset}`, 2500);
   } else if (m.chips > 0) {
-    send({ type: 'all_in' });
-    say(`${C.dim}跟不起了，自动梭哈${C.reset}`, 2500);
+    // 跟不起：动作还是跟注，金额被引擎夹到全部筹码（「全押跟」）
+    send({ type: 'call' });
+    say(`${C.dim}跟不起了，全押跟 ${fmt(m.chips)}${C.reset}`, 2500);
   } else {
     send({ type: 'fold' });
     say(`${C.dim}没分了，自动弃牌${C.reset}`, 2500);
@@ -398,7 +409,7 @@ function toggleAuto() {
   if (auto) return autoOff(`${C.dim}自动跟注已关闭${C.reset}`);
   auto = true;
   autoFired = '';
-  say(`${C.gold}● 自动跟注中${C.reset}${C.dim}　跟不起会梭哈；有人梭哈会自动交还给你${C.reset}`);
+  say(`${C.gold}● 自动跟注中${C.reset}${C.dim}　跟不起会全押跟；有人梭哈会自动交还给你${C.reset}`);
   armAuto(); // 可能正好就轮到自己，别等到下一个事件
 }
 
@@ -406,18 +417,22 @@ const HELP = [
   `${C.bold}一个键就够${C.reset}`,
   `  ${C.gold}空格${C.reset} / ${C.gold}回车${C.reset} 当前场合的主操作${C.dim}（准备阶段＝准备/开始，牌局中＝跟注/接受梭哈，结算＝下一局）${C.reset}`,
   `${C.bold}左手（单手也能打完整局）${C.reset}`,
-  `  ${C.gold}a${C.reset} 梭哈${C.dim}（连按两次）${C.reset}   ${C.gold}s${C.reset} 看牌   ${C.gold}d${C.reset} 跟注/接受   ${C.gold}f${C.reset} 弃牌${C.dim}（随时可弃）${C.reset}   ${C.gold}v${C.reset} 比牌   ${C.gold}g${C.reset} 自动跟注   ${C.gold}1-4${C.reset} 加注档位`,
+  `  ${C.gold}a${C.reset} 梭哈${C.dim}（全押，连按两次）${C.reset}   ${C.gold}s${C.reset} 看牌   ${C.gold}d${C.reset} 跟注/接受   ${C.gold}f${C.reset} 弃牌${C.dim}（随时可弃）${C.reset}   ${C.gold}v${C.reset} 比牌   ${C.gold}g${C.reset} 自动跟注   ${C.gold}1-4${C.reset} 加注档位`,
   `${C.bold}右手（同一套动作的镜像，位置一一对应）${C.reset}`,
-  `  ${C.gold};${C.reset} 梭哈${C.dim}（连按两次）${C.reset}   ${C.gold}k${C.reset} 看牌   ${C.gold}j${C.reset} 跟注/接受   ${C.gold}l${C.reset} 弃牌   ${C.gold}7-0${C.reset} 加注档位`,
+  `  ${C.gold};${C.reset} 梭哈${C.dim}（全押，连按两次）${C.reset}   ${C.gold}k${C.reset} 看牌   ${C.gold}j${C.reset} 跟注/接受   ${C.gold}l${C.reset} 弃牌   ${C.gold}7-0${C.reset} 加注档位`,
   `${C.bold}有人梭哈时${C.reset}`,
   `  ${C.gold}y${C.reset} 接受    ${C.gold}n${C.reset} 弃牌出局    ${C.gold}s${C.reset}/${C.gold}k${C.reset} 先看牌${C.dim}（看完接的价翻倍，闷着接是半价）${C.reset}`,
   `${C.bold}牌局之外${C.reset}`,
   `  ${C.gold}r${C.reset} 准备    ${C.gold}b${C.reset} 加电脑    ${C.gold}n${C.reset} 下一局    ${C.gold}m${C.reset} 补分    ${C.gold}o${C.reset} 房规    ${C.gold}i${C.reset} 邀请链接`,
   `  ${C.gold}p${C.reset} 改名换头像${C.dim}（什么时候都能改）${C.reset}    ${C.gold}e${C.reset} 表情    ${C.gold}:${C.reset} 命令    ${C.gold}?${C.reset} 帮助    ${C.gold}q${C.reset} 退出${C.dim}（连按两次；牌局中退出＝自动弃牌离场）${C.reset}`,
-  `  ${C.gold}g${C.reset} 自动跟注（挂机）：轮到自己就跟，跟不起自动梭哈，没分了弃牌；${C.dim}有人梭哈会自动关掉交还给你${C.reset}`,
+  `  ${C.gold}g${C.reset} 自动跟注（挂机）：轮到自己就跟，跟不起就全押跟，没分了弃牌；${C.dim}有人梭哈会自动关掉交还给你${C.reset}`,
   `${C.bold}命令${C.reset}`,
   `  ${C.gold}:name 昵称${C.reset}   ${C.gold}:avatar 🐯${C.reset}   ${C.gold}:kick 座位号${C.reset}   ${C.gold}:log${C.reset}   ${C.gold}:invite${C.reset}`,
   `  ${C.gold}:set turn=60 rounds=8 allin=3 auto=on${C.reset}   房规（房主）`,
+  `  ${C.gold}:set deal=party${C.reset} / ${C.gold}:set deal=standard${C.reset}   发牌档（房主，下一局生效）`,
+  `${C.bold}发牌档${C.reset}`,
+  `  ${C.gold}标准${C.reset}${C.dim}：大牌（顺子以上）约 26%，是真实牌局的三倍多，牌型还认得出轻重${C.reset}`,
+  `  ${C.gold}娱乐增强${C.reset}${C.dim}：大牌约 54%，六人桌几乎每两局就撞一次大牌${C.reset}`,
 ].join('\n');
 
 function quit() {
@@ -542,7 +557,7 @@ function handleKey(key: string) {
       return send({ type: 'all_in' });
     }
     const cost = acts.find((x) => x.action === 'all_in')?.cost ?? 0;
-    return arm('all_in', `${C.bold}${C.gold}再按一次梭哈 ${fmt(cost)}${C.reset}`);
+    return arm('all_in', `${C.bold}${C.gold}再按一次全押 ${fmt(cost)}${C.reset}${C.dim}（梭哈＝推光全部筹码）${C.reset}`);
   }
   if (key === 'v') {
     if (!can('compare')) return say(`${C.dim}现在不能比牌${C.reset}`);
@@ -586,6 +601,10 @@ function runCommand(input: string) {
         else if (k === 'rounds') cmd.maxRounds = Number(v);
         else if (k === 'allin') cmd.allInFromRound = Number(v);
         else if (k === 'auto') cmd.autoContinue = v === 'on' || v === 'true';
+        else if (k === 'deal') {
+          if (v !== 'standard' && v !== 'party') return say('发牌档只能是 standard 或 party');
+          cmd.dealMode = v;
+        }
       }
       return send(cmd);
     }
@@ -695,8 +714,12 @@ async function main() {
   try {
     const acc = has('fresh') ? null : loadAccount();
     if (saved) await client.resumeSeat(saved);
-    else if (wantCreate) await client.createRoom(name, avatar, false, acc);
-    else await client.joinRoom(code, name, avatar, false, acc);
+    else if (wantCreate) {
+      await client.createRoom(name, avatar, false, acc);
+      // 建好房就是房主，这一条走的是三个入口共用的那个 settings 处理，
+      // 房间日志里会留下「已切换到娱乐增强发牌，下一局生效」。
+      if (has('party')) client.cmd({ type: 'settings', dealMode: 'party' });
+    } else await client.joinRoom(code, name, avatar, false, acc);
   } catch (e) {
     // 存档失效（房间没了 / 被移出）就退回普通加入
     if (saved) {
